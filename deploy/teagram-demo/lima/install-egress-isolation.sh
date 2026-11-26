@@ -560,7 +560,7 @@ stack_reconcile_locked() {
   local -a running_services_list=()
   local -a missing_services=()
   local -A running=()
-  local -a expected_services=(postgres teagramd turnstile-egress haproxy edge cloudflared)
+  local -a expected_services=(postgres turnstile-egress haproxy teagramd edge cloudflared)
 
   active_image_ref=$(active_release_image_ref) \
     || fail 'cannot read the validated active Lima release'
@@ -577,8 +577,11 @@ stack_reconcile_locked() {
   done
   if (( ${#missing_services[@]} > 0 )); then
     apply_rules
-    compose_stack "$active_image_ref" up -d --no-build --no-deps "${missing_services[@]}" \
-      || fail "cannot recover stopped Lima demo services: ${missing_services[*]}"
+    for service in "${missing_services[@]}"; do
+      compose_stack "$active_image_ref" up -d --no-build --no-deps \
+        --wait --wait-timeout 120 "$service" \
+        || fail "cannot recover stopped Lima demo service: $service"
+    done
     printf 'restarted Lima demo services: %s\n' "${missing_services[*]}"
   fi
   stack_lock_release

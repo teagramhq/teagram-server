@@ -521,7 +521,9 @@ compose_stack() {
     local -a services=()
     shift
     while (( $# > 0 )); do
-      if [[ "$1" == -* ]]; then
+      if [[ "$1" == --wait-timeout ]]; then
+        shift 2
+      elif [[ "$1" == -* ]]; then
         shift
       else
         services+=("$1")
@@ -571,12 +573,95 @@ stack_reconcile_locked
                 log.read_text(encoding="utf-8").splitlines(),
                 [
                     "firewall",
-                    f"compose:{active_ref}:up -d --no-build --no-deps cloudflared",
+                    f"compose:{active_ref}:up -d --no-build --no-deps "
+                    "--wait --wait-timeout 120 cloudflared",
                 ],
             )
             running = set(running_services.read_text(encoding="utf-8").splitlines())
             self.assertIn("cloudflared", running)
             self.assertNotIn("migrate", running)
+
+    def test_stack_reconciler_recovers_docker_restart_in_dependency_order(self) -> None:
+        shell = r'''
+source "$1"
+active_release_image_ref() { printf '%s\n' "$TEAGRAM_TEST_ACTIVE_IMAGE_REF"; }
+compose_stack() {
+  local image_ref=$1
+  shift
+  if [[ "$1" == ps ]]; then
+    cat "$TEAGRAM_TEST_RUNNING_SERVICES"
+  elif [[ "$1" == up ]]; then
+    printf 'compose:%s:%s\n' "$image_ref" "$*" >> "$TEAGRAM_TEST_STACK_LOG"
+    local service
+    shift
+    while (( $# > 0 )); do
+      if [[ "$1" == --wait-timeout ]]; then
+        shift 2
+      elif [[ "$1" == -* ]]; then
+        shift
+      else
+        service=$1
+        printf '%s\n' "$service" >> "$TEAGRAM_TEST_RUNNING_SERVICES"
+        shift
+      fi
+    done
+  else
+    return 2
+  fi
+}
+apply_rules() { printf '%s\n' firewall >> "$TEAGRAM_TEST_STACK_LOG"; }
+stack_lock_release() { :; }
+stack_reconcile_locked
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            log = pathlib.Path(directory) / "reconcile.log"
+            running_services = pathlib.Path(directory) / "running-services"
+            running_services.write_text("", encoding="utf-8")
+            active_ref = "ghcr.io/teagramhq/teagram-server-demo@sha256:" + "c" * 64
+            env = os.environ.copy()
+            env["TEAGRAM_TEST_ACTIVE_IMAGE_REF"] = active_ref
+            env["TEAGRAM_TEST_STACK_LOG"] = str(log)
+            env["TEAGRAM_TEST_RUNNING_SERVICES"] = str(running_services)
+
+            result = subprocess.run(
+                ["bash", "-c", shell, "test-stack-reconcile", str(SCRIPT)],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                log.read_text(encoding="utf-8").splitlines(),
+                [
+                    "firewall",
+                    f"compose:{active_ref}:up -d --no-build --no-deps "
+                    "--wait --wait-timeout 120 postgres",
+                    f"compose:{active_ref}:up -d --no-build --no-deps "
+                    "--wait --wait-timeout 120 turnstile-egress",
+                    f"compose:{active_ref}:up -d --no-build --no-deps "
+                    "--wait --wait-timeout 120 haproxy",
+                    f"compose:{active_ref}:up -d --no-build --no-deps "
+                    "--wait --wait-timeout 120 teagramd",
+                    f"compose:{active_ref}:up -d --no-build --no-deps "
+                    "--wait --wait-timeout 120 edge",
+                    f"compose:{active_ref}:up -d --no-build --no-deps "
+                    "--wait --wait-timeout 120 cloudflared",
+                ],
+            )
+            self.assertEqual(
+                set(running_services.read_text(encoding="utf-8").splitlines()),
+                {
+                    "postgres",
+                    "turnstile-egress",
+                    "haproxy",
+                    "teagramd",
+                    "edge",
+                    "cloudflared",
+                },
+            )
+            self.assertNotIn("migrate", running_services.read_text(encoding="utf-8"))
 
     def test_stack_start_uses_active_digest_and_applies_rules_before_compose_up(self) -> None:
         shell = r'''

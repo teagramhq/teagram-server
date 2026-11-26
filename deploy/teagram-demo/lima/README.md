@@ -201,9 +201,10 @@ OpenRC enables `teagram-demo-egress` after Docker and a supervised
 has `restart: "no"`, so dockerd cannot start demo containers before OpenRC has
 installed isolation. The stack supervisor creates the networks, applies the
 rules, and then starts Compose; every ten seconds it checks the six long-running
-services and restarts only missing services with dependency startup disabled,
-leaving the one-shot `migrate` service for explicit bootstrap and rollout. It
-reapplies the rules before recovery. It retries
+services and restarts only missing services one at a time in dependency order,
+waiting up to 120 seconds for each service to become healthy or start. Recovery
+disables dependency startup, leaving the one-shot `migrate` service for explicit
+bootstrap and rollout. It reapplies the rules before recovery. It retries
 while dockerd is unavailable and shares the deploy lock, so it does not start an
 old release during a rollout. OpenRC respawns the supervisor if it exits. Its
 output is sent to syslog with the `teagram-demo-stack` tag. Start and stop the
