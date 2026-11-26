@@ -479,8 +479,9 @@ checks = {
     "new release health is checked through loopback /healthz": 'HEALTH_URL=http://127.0.0.1:8080/healthz' in rollout
     and 'lima_wait_health 60 || demo_fail' in rollout,
     "each candidate health probe is bounded by the remaining deadline": 'timeout "$remaining" wget -q -O /dev/null -T "$remaining" "$HEALTH_URL"' in rollout,
-    "post-cutover image retention failure preserves the committed revision": 'POST_COMMIT_RETENTION_FAILED=1' in rollout
-    and 'rc=75' in cleanup and 'checkout must stay on this revision' in cleanup
+    "post-cutover image retention failure preserves the committed revision and succeeds": 'POST_COMMIT_RETENTION_FAILED=1' in rollout
+    and 'POST_COMMIT_RETENTION_FAILED == 1' in cleanup and 'rc=0' in cleanup
+    and 'image retention failed' in cleanup
     and 'rc == 75 && DEPLOY_COMMITTED == 0' in cleanup,
     "charlie reports post-cutover retention failures without rewinding the checkout": 'POST_CUTOVER_RETENTION_FAILED=1' in charlie
     and 'rc=75' in charlie_cleanup and 'checkout must stay on this revision' in charlie_cleanup
@@ -645,7 +646,10 @@ demo_write_active_release() {
 demo_record_successful_image() { printf 'record-success\n' >> "$LIMA_ROLLOUT_LOG"; }
 demo_prune_images() {
   printf 'prune %s\n' "$*" >> "$LIMA_ROLLOUT_LOG"
-  [[ ${FAIL_PRUNE:-0} != 1 ]]
+  if [[ ${FAIL_PRUNE:-0} == 1 ]]; then
+    printf 'could not remove demo image %s\n' "$LIMA_OLD_IMAGE_ID" >&2
+    return 1
+  fi
 }
 demo_fail() { printf '%s\n' "$1" >&2; return 1; }
 trap lima_cleanup EXIT
@@ -686,23 +690,26 @@ fi
 
 RETENTION_LOG="$TMP_DIR/lima-retention-failure.log"
 ACTIVE_RELEASE_FILE="$TMP_DIR/active-release-retention-failure"
+OLD_IMAGE_ID=sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 if ROLLOUT_FUNCTION="$ROLLOUT_FUNCTION" CLEANUP_FUNCTION="$CLEANUP_FUNCTION" LIMA_ROLLOUT_LOG="$RETENTION_LOG" \
   LIMA_ACTIVE_RELEASE_FILE="$ACTIVE_RELEASE_FILE" LIMA_CANDIDATE_REF="$LIMA_CANDIDATE_REF" \
-  LIMA_CANDIDATE_ID="$LIMA_CANDIDATE_ID" FAIL_PRUNE=1 \
+  LIMA_CANDIDATE_ID="$LIMA_CANDIDATE_ID" LIMA_OLD_IMAGE_ID="$OLD_IMAGE_ID" FAIL_PRUNE=1 \
   bash "$TMP_DIR/lima-success-regression.sh" > "$TMP_DIR/lima-retention-failure.out" \
     2> "$TMP_DIR/lima-retention-failure.err"; then
-  not_ok 'post-cutover retention failure preserves the active release and reports a committed deploy'
-else
-  retention_status=$?
-  if [[ $retention_status == 75 ]] && grep -Fq 'image retention failed and checkout must stay on this revision' \
-    "$TMP_DIR/lima-retention-failure.err" &&
+  if grep -Fq "could not remove demo image $OLD_IMAGE_ID" "$TMP_DIR/lima-retention-failure.err" &&
+    grep -Fq 'lima cutover remains committed at revision=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; image retention failed, continuing with the verified release' \
+      "$TMP_DIR/lima-retention-failure.err" &&
     grep -Fqx "teagramd $LIMA_CANDIDATE_REF" "$ACTIVE_RELEASE_FILE" &&
+    grep -Fq 'lima demo deployed revision=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$TMP_DIR/lima-retention-failure.out" &&
     ! grep -Fq 'compose previous-image up' "$RETENTION_LOG"; then
-    ok 'post-cutover retention failure preserves the active release and reports a committed deploy'
+    ok 'post-cutover retention failure reports the removal error and returns success for the committed deploy'
   else
-    not_ok 'post-cutover retention failure preserves the active release and reports a committed deploy'
+    not_ok 'post-cutover retention failure reports the removal error and returns success for the committed deploy'
     cat "$TMP_DIR/lima-retention-failure.err" >&2
   fi
+else
+  not_ok 'post-cutover retention failure reports the removal error and returns success for the committed deploy'
+  cat "$TMP_DIR/lima-retention-failure.err" >&2
 fi
 
 cat > "$TMP_DIR/lima-rollback-regression.sh" <<'BASH'

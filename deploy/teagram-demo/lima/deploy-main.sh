@@ -112,7 +112,6 @@ lima_rollout_candidate() {
   DEPLOY_COMMITTED=1
   if ! demo_prune_images "$CANDIDATE_IMAGE_ID"; then
     POST_COMMIT_RETENTION_FAILED=1
-    demo_fail 'lima cutover committed but image retention cleanup failed'
   fi
   printf 'lima demo deployed revision=%s previous_revision=%s backup=%s healthz=passed\n' \
     "$SHA" "$PREV_IMAGE_REVISION" "$BACKUP_DIR"
@@ -121,14 +120,13 @@ lima_rollout_candidate() {
 lima_cleanup() {
   local rc=$? cleanup_failed=0 rollback_failed=0
   trap - EXIT
-  if (( rc != 0 && DEPLOY_COMMITTED == 1 )); then
-    if (( POST_COMMIT_RETENTION_FAILED == 1 )); then
-      printf 'lima cutover remains committed at revision=%s; image retention failed and checkout must stay on this revision\n' \
-        "$SHA" >&2
-    else
-      printf 'lima cutover remains committed at revision=%s; post-cutover operation failed and checkout must stay on this revision\n' \
-        "$SHA" >&2
-    fi
+  if (( DEPLOY_COMMITTED == 1 && POST_COMMIT_RETENTION_FAILED == 1 )); then
+    printf 'lima cutover remains committed at revision=%s; image retention failed, continuing with the verified release\n' \
+      "$SHA" >&2
+    rc=0
+  elif (( rc != 0 && DEPLOY_COMMITTED == 1 )); then
+    printf 'lima cutover remains committed at revision=%s; post-cutover operation failed and checkout must stay on this revision\n' \
+      "$SHA" >&2
     rc=75
   elif (( rc != 0 && OLD_SERVER_STOPPED == 1 )); then
     if (( CANDIDATE_STARTED == 1 )); then
