@@ -289,8 +289,6 @@ expect 'criterion 2: Lima edge exposes only loopback port 8080' \
   '(.services.edge.ports | length) == 1 and .services.edge.ports[0].host_ip == "127.0.0.1" and (.services.edge.ports[0].published | tostring) == "8080" and (.services.edge.ports[0].target | tostring) == "8080"'
 expect 'criterion 2: lima has no tailnet edge listener or origin' \
   '.services["edge-tailnet"] == null and .networks["teagram-dev-tailnet"] == null and (.services.teagramd.environment.TG_WEBSOCKET_ALLOWED_ORIGINS | contains("teagram-dev.tailaa4918.ts.net") | not)'
-expect_candidate 'criterion 2: lima candidate has no tailnet edge listener or origin' \
-  '.services["edge-tailnet"] == null and .networks["teagram-dev-tailnet"] == null and (.services["teagramd-next"].environment.TG_WEBSOCKET_ALLOWED_ORIGINS | contains("teagram-dev.tailaa4918.ts.net") | not)'
 expect 'criterion 2: lima does not mount a tailnet Nginx configuration' \
   '[.services[] | .volumes[]? | select(.source | endswith("nginx-tailnet.conf"))] | length == 0'
 

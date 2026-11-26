@@ -1746,10 +1746,15 @@ assert_text_order(forced_command, "forced-command.sh deploy lock", [
     "flock -x 9",
     'git -C "$REPO" fetch',
     'git -C "$REPO" reset --hard "$SHA"',
+])
+charlie_deploy_start = forced_command.index(
+    'else\n    DEMO_DEPLOY_LOCK_HELD=1 TEAGRAM_DEV_TAILNET_ENABLED="$TAILNET_ENABLED"'
+)
+assert_text_order(forced_command, "forced-command.sh charlie deploy", [
     'DEMO_DEPLOY_LOCK_HELD=1 TEAGRAM_DEV_TAILNET_ENABLED="$TAILNET_ENABLED"',
     'DEPLOY_SHA="$SHA" DEPLOY_IMAGE_DIGEST="$IMAGE_DIGEST" PREVIOUS_SHA="$previous"',
     'restore_checkout_after_deploy "$deploy_rc" "$previous"',
-])
+], start=charlie_deploy_start)
 checkout_restore = forced_command.split("restore_checkout_after_deploy() {", 1)[1].split("\n}", 1)[0]
 if 'git -C "$REPO" reset --hard "$previous"' not in checkout_restore:
     raise SystemExit("forced-command.sh: ordinary deploy failures must restore the previous checkout")
