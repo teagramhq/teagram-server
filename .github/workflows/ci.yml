@@ -1266,7 +1266,8 @@ jobs:
           bash -n deploy/link-edge/test-deploy-main.sh
           bash -n deploy/teagram-demo/test-turnstile-secret-access.sh
           bash -n .github/scripts/perf-postgres.sh .github/scripts/test-perf-postgres.sh
-          bash -n .github/scripts/test-lima-server-memory.sh
+          bash -n .github/scripts/test-lima-server-memory.sh .github/scripts/lima-memory-process-snapshot.sh .github/scripts/test-lima-memory-process-snapshot.sh
+          bash .github/scripts/test-lima-memory-process-snapshot.sh
           shellcheck \
             deploy/k8s/bootstrap-alpha.sh \
             deploy/k8s/alpha-incus.sh \
@@ -1342,6 +1343,8 @@ jobs:
             deploy/link-edge/test-deploy-main.sh \
             deploy/teagram-demo/test-turnstile-secret-access.sh \
             .github/scripts/test-lima-server-memory.sh \
+            .github/scripts/lima-memory-process-snapshot.sh \
+            .github/scripts/test-lima-memory-process-snapshot.sh \
             deploy/teagram/test-media-encryption-ops.sh \
             deploy/teagram/test-media-encryption-pg18.sh \
             .github/scripts/perf-postgres.sh \
