@@ -127,6 +127,8 @@ docker volume create "$KEY_VOLUME" >/dev/null
 docker volume create "$BLOB_VOLUME" >/dev/null
 docker run --rm --volume "$KEY_VOLUME:/var/lib/teagramd" "$IMAGE_ID" bootstrap-identity >/dev/null
 
+# Ten runs make twenty successful sign-ins from this disposable loopback client.
+# Keep the smoke server's per-IP login budgets above that test-only volume.
 docker run --detach --name "$CONTAINER" \
   --network host \
   --memory 44m --memory-swap 44m --cpus 0.5 --pids-limit 128 \
@@ -140,6 +142,8 @@ docker run --detach --name "$CONTAINER" \
   --env TG_WEBSOCKET_ALLOWED_ORIGINS=https://web.teagram.io \
   --env TG_WEBSOCKET_BROWSER_ONLY=false \
   --env TG_REGISTRATION=closed --env TG_PG_MAX_CONNS=3 \
+  --env TG_RATE_LIMIT_SEND_CODE_IP=40 --env TG_RATE_LIMIT_SEND_CODE_IP_PHONES=40 \
+  --env TG_RATE_LIMIT_CHECK_PASSWORD_IP=40 --env TG_RATE_LIMIT_GET_PASSWORD_IP=40 \
   --env GOMAXPROCS=1 --env "GOMEMLIMIT=$LIMA_GOMEMLIMIT" \
   "$IMAGE_ID" >/dev/null
 
