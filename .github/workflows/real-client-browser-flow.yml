@@ -28,7 +28,7 @@ jobs:
     env:
       TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX: mirror.gcr.io
       REAL_CLIENT_SERVER_REVISION: ${{ github.sha }}
-      REAL_CLIENT_WEB_REVISION: a4a18f827973d9188b44705ac039bb227772cd11
+      REAL_CLIENT_WEB_REVISION: dc93960fc42e064bada22ce3f8e8dd99ebe1d56f
       REAL_CLIENT_GUEST_WEB_REVISION: 8e23fd09eac68f5ac1beb2468f76d0ffed28f814
       REAL_CLIENT_SERVER_ROOT: ${{ github.workspace }}
       REAL_CLIENT_WEB_ROOT: ${{ github.workspace }}/web-source
