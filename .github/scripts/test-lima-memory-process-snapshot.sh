@@ -96,6 +96,12 @@ if [[ $(<"$sample_prefix-stat-peak") != 2500000 || $(<"$sample_prefix-current") 
   exit 1
 fi
 
+peak_unattributed_bytes=$(lima_memory_peak_unattributed_bytes 44675072 39170048)
+if [[ "$peak_unattributed_bytes" != 5505024 ]]; then
+  printf 'memory.peak gap = %s bytes, want 5505024\n' "$peak_unattributed_bytes" >&2
+  exit 1
+fi
+
 printf '101\n102\n104\n' >"$sample_cgroup/cgroup.procs"
 printf '2600000\n' >"$sample_cgroup/memory.current"
 lima_memory_record_cgroup_sample "$sample_cgroup" "$proc_root" 101 "$sample_prefix"

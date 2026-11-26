@@ -227,3 +227,14 @@ lima_memory_record_cgroup_sample() {
       >"$sample_prefix-processes" || return 1
   fi
 }
+
+lima_memory_peak_unattributed_bytes() {
+  local peak_bytes="$1" sampled_current_bytes="$2"
+  if [[ ! "$peak_bytes" =~ ^[0-9]+$ || ! "$sampled_current_bytes" =~ ^[0-9]+$ ]] ||
+    (( peak_bytes < sampled_current_bytes )); then
+    printf 'invalid memory peak/sample values: peak=%s sample=%s\n' \
+      "$peak_bytes" "$sampled_current_bytes" >&2
+    return 1
+  fi
+  printf '%s\n' "$((peak_bytes - sampled_current_bytes))"
+}
