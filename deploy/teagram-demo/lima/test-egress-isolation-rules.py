@@ -47,6 +47,22 @@ tool = pathlib.Path(sys.argv[0]).name
 args = sys.argv[1:]
 
 if tool == "docker":
+    call_log = pathlib.Path(os.environ["TEAGRAM_TEST_DOCKER_CALL_LOG"])
+    with call_log.open("a", encoding="utf-8") as calls:
+        print(" ".join(args), file=calls)
+    if args == ["info"]:
+        count_path = pathlib.Path(os.environ["TEAGRAM_TEST_DOCKER_INFO_COUNT"])
+        try:
+            count = int(count_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            count = 0
+        count += 1
+        count_path.write_text(str(count), encoding="utf-8")
+        ready_after = int(os.environ.get("TEAGRAM_TEST_DOCKER_READY_AFTER", "1"))
+        if count < ready_after:
+            print("fake Docker daemon is not ready", file=sys.stderr)
+            raise SystemExit(1)
+        raise SystemExit(0)
     if args[:2] == ["network", "ls"]:
         missing = set(os.environ.get("TEAGRAM_TEST_MISSING_NETWORKS", "").split(","))
         names = [
@@ -200,6 +216,9 @@ class EgressIsolationRuleTests(unittest.TestCase):
             "docker",
         ):
             (mock_bin / name).symlink_to(executable)
+        fake_sleep = mock_bin / "sleep"
+        fake_sleep.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        fake_sleep.chmod(0o755)
 
         state_file = pathlib.Path(directory) / "firewall.json"
         state_file.write_text(
@@ -215,6 +234,7 @@ class EgressIsolationRuleTests(unittest.TestCase):
         missing_networks: tuple[str, ...] = (),
         ipv6_networks: tuple[str, ...] = (),
         listing_failure: str = "",
+        docker_ready_after: int = 1,
     ) -> subprocess.CompletedProcess[str]:
         path = os.pathsep.join((str(mock_bin), os.environ.get("PATH", "")))
         env = os.environ.copy()
@@ -225,6 +245,13 @@ class EgressIsolationRuleTests(unittest.TestCase):
                 "TEAGRAM_TEST_MISSING_NETWORKS": ",".join(missing_networks),
                 "TEAGRAM_TEST_IPV6_NETWORKS": ",".join(ipv6_networks),
                 "TEAGRAM_TEST_LISTING_FAILURE": listing_failure,
+                "TEAGRAM_TEST_DOCKER_READY_AFTER": str(docker_ready_after),
+                "TEAGRAM_TEST_DOCKER_INFO_COUNT": str(
+                    state_file.with_name("docker-info-count")
+                ),
+                "TEAGRAM_TEST_DOCKER_CALL_LOG": str(
+                    state_file.with_name("docker-calls.log")
+                ),
             }
         )
         command = [str(SCRIPT), mode]
@@ -241,9 +268,48 @@ class EgressIsolationRuleTests(unittest.TestCase):
                 f"TEAGRAM_TEST_MISSING_NETWORKS={','.join(missing_networks)}",
                 f"TEAGRAM_TEST_IPV6_NETWORKS={','.join(ipv6_networks)}",
                 f"TEAGRAM_TEST_LISTING_FAILURE={listing_failure}",
+                f"TEAGRAM_TEST_DOCKER_READY_AFTER={docker_ready_after}",
+                f"TEAGRAM_TEST_DOCKER_INFO_COUNT={state_file.with_name('docker-info-count')}",
+                f"TEAGRAM_TEST_DOCKER_CALL_LOG={state_file.with_name('docker-calls.log')}",
                 *command,
             ]
         return subprocess.run(command, capture_output=True, text=True, env=env)
+
+    def _run_apply_rules_function(
+        self,
+        mock_bin: pathlib.Path,
+        state_file: pathlib.Path,
+        docker_ready_after: int,
+    ) -> subprocess.CompletedProcess[str]:
+        env = os.environ.copy()
+        env.update(
+            {
+                "PATH": os.pathsep.join((str(mock_bin), env.get("PATH", ""))),
+                "TEAGRAM_TEST_FIREWALL_STATE": str(state_file),
+                "TEAGRAM_TEST_MISSING_NETWORKS": "",
+                "TEAGRAM_TEST_IPV6_NETWORKS": "",
+                "TEAGRAM_TEST_LISTING_FAILURE": "",
+                "TEAGRAM_TEST_DOCKER_READY_AFTER": str(docker_ready_after),
+                "TEAGRAM_TEST_DOCKER_INFO_COUNT": str(
+                    state_file.with_name("docker-info-count")
+                ),
+                "TEAGRAM_TEST_DOCKER_CALL_LOG": str(
+                    state_file.with_name("docker-calls.log")
+                ),
+            }
+        )
+        return subprocess.run(
+            [
+                "bash",
+                "-c",
+                'source "$1"; require_root() { :; }; apply_rules',
+                "test-apply-rules",
+                str(SCRIPT),
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
 
     def _firewall_listings(
         self, mock_bin: pathlib.Path, state_file: pathlib.Path
@@ -316,6 +382,46 @@ class EgressIsolationRuleTests(unittest.TestCase):
                         for rule in state[family][chain]
                     )
                 )
+
+    def test_apply_waits_for_docker_api_before_inspecting_networks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            mock_bin, state_file = self._mock_firewall(directory)
+
+            result = self._run_apply_rules_function(
+                mock_bin, state_file, docker_ready_after=4
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            count_path = state_file.with_name("docker-info-count")
+            self.assertEqual(count_path.read_text(encoding="utf-8"), "4")
+            calls = state_file.with_name("docker-calls.log").read_text(
+                encoding="utf-8"
+            ).splitlines()
+            self.assertEqual(calls[:4], ["info"] * 4)
+            self.assertTrue(calls[4].startswith("network ls "), calls[4])
+
+    def test_apply_fails_clearly_when_docker_never_becomes_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            mock_bin, state_file = self._mock_firewall(directory)
+            before = state_file.read_bytes()
+
+            result = self._run_apply_rules_function(
+                mock_bin, state_file, docker_ready_after=61
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(
+                "Docker daemon did not become ready within 60 seconds", result.stderr
+            )
+            self.assertEqual(
+                state_file.with_name("docker-info-count").read_text(encoding="utf-8"),
+                "60",
+            )
+            calls = state_file.with_name("docker-calls.log").read_text(
+                encoding="utf-8"
+            ).splitlines()
+            self.assertEqual(calls, ["info"] * 60)
+            self.assertEqual(state_file.read_bytes(), before)
 
     @unittest.skipUnless(
         os.geteuid() == 0 or shutil.which("sudo"),

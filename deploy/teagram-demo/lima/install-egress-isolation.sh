@@ -6,6 +6,7 @@ readonly IPTABLES_INPUT_CHAIN=TEAGRAM_DEMO_INPUT
 readonly INPUT_BRIDGE_INTERFACE=br+
 readonly OPENRC_SERVICE=teagram-demo-egress
 readonly OPENRC_STACK_SERVICE=teagram-demo-stack
+readonly DOCKER_READY_ATTEMPTS=60
 readonly REPO_ROOT=/opt/teagram-demo
 readonly COMPOSE_FILE=/opt/teagram-demo/deploy/teagram-demo/lima/compose.yaml
 readonly COMPOSE_ENV_FILE=${TEAGRAM_DEMO_LIMA_ENV_FILE:-/var/lib/teagram-demo/lima.env}
@@ -47,6 +48,21 @@ fail() {
 
 require_root() {
   [[ "$EUID" -eq 0 ]] || fail 'must run as root'
+}
+
+wait_for_docker() {
+  local attempt
+
+  command -v docker >/dev/null 2>&1 || fail 'docker is required on lima'
+  for ((attempt = 1; attempt <= DOCKER_READY_ATTEMPTS; attempt++)); do
+    if docker info >/dev/null 2>&1; then
+      return 0
+    fi
+    if (( attempt < DOCKER_READY_ATTEMPTS )); then
+      sleep 1
+    fi
+  done
+  fail "Docker daemon did not become ready within ${DOCKER_READY_ATTEMPTS} seconds"
 }
 
 render_rules() {
@@ -694,6 +710,7 @@ require_repo_path() {
 
 apply_rules() {
   require_root
+  wait_for_docker
   command -v iptables >/dev/null 2>&1 || fail 'iptables is required on lima'
   command -v iptables-restore >/dev/null 2>&1 || fail 'iptables-restore is required on lima'
 
