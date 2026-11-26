@@ -516,9 +516,11 @@ active_release_image_ref() {
     return 0
   fi
   script_dir=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+  # shellcheck disable=SC2034
   DEMO_DEPLOY_TARGET=lima
   # shellcheck source=../demo-common.sh
   source "$script_dir/../demo-common.sh"
+  # shellcheck disable=SC2034
   DEMO_ACTIVE_RELEASE_FILE=$active_file
   demo_active_image_ref
 }
