@@ -454,6 +454,7 @@ DOCKER
   [[ "$(demo_tailnet_enabled)" == true ]]
 )
 
+# shellcheck disable=SC2030,SC2031 # Maintenance compose state is isolated to this test subshell.
 (
   DEMO_STATE_DIR="$TMP_DIR/tailnet-maintenance-state"
   DEMO_TAILNET_ENABLED_FILE="$DEMO_STATE_DIR/tailnet-enabled"
