@@ -2,7 +2,7 @@
 
 lima_memory_process_snapshot() {
   local proc_root="$1" cgroup_procs_file="$2" server_pid="$3"
-  local pid status_file field value name rss_kib anon_kib rss_bytes anon_bytes
+  local pid status_file field value name rss_kib anon_kib rss_bytes anon_bytes membership_snapshot
   local server_rss_bytes=unknown server_anon_bytes=unknown worker_count=0 worker_entry
   local server_seen=false
   local -a workers=() members_before=() members_after=() incomplete_pids=()
@@ -101,17 +101,19 @@ lima_memory_process_snapshot() {
   fi
 
   local worker_processes=-
+  local IFS=,
   if (( ${#workers[@]} > 0 )); then
-    local IFS=,
     worker_processes="${workers[*]}"
   fi
+  membership_snapshot="${members_before[*]}"
   local attribution=complete incomplete_processes=-
   if (( ${#incomplete_pids[@]} > 0 )); then
     attribution=incomplete
     incomplete_processes=$(printf '%s\n' "${incomplete_pids[@]}" | LC_ALL=C sort -u | paste -sd, -)
   fi
-  printf '%s|%s|%s|%s|%s|%s|%s\n' \
-    "$server_pid" "$server_rss_bytes" "$server_anon_bytes" "$worker_count" "$worker_processes" "$attribution" "$incomplete_processes"
+  printf '%s|%s|%s|%s|%s|%s|%s|%s\n' \
+    "$server_pid" "$server_rss_bytes" "$server_anon_bytes" "$worker_count" "$worker_processes" \
+    "$attribution" "$incomplete_processes" "$membership_snapshot"
 }
 
 lima_memory_record_cgroup_sample() {
@@ -119,7 +121,9 @@ lima_memory_record_cgroup_sample() {
   local process_snapshot peak_bytes events current_bytes stat_snapshot stat_name stat_value
   local stat_anon_bytes=unknown stat_file_bytes=unknown stat_kernel_bytes=unknown
   local observed_current=-1 server_process_pid server_process_rss_bytes server_process_anon_bytes
-  local photo_worker_process_count photo_worker_processes attribution incomplete_processes
+  local photo_worker_process_count photo_worker_processes attribution incomplete_processes membership_snapshot
+  local before_pid after_pid found
+  local -a members_before=() members_after=() membership_changes=() incomplete_pids=()
 
   process_snapshot=$(lima_memory_process_snapshot "$proc_root" "$cgroup_dir/cgroup.procs" "$server_pid") || return 1
   peak_bytes=$(<"$cgroup_dir/memory.peak") || return 1
@@ -147,7 +151,47 @@ lima_memory_record_cgroup_sample() {
   fi
   if (( current_bytes >= observed_current )); then
     IFS='|' read -r server_process_pid server_process_rss_bytes server_process_anon_bytes \
-      photo_worker_process_count photo_worker_processes attribution incomplete_processes <<<"$process_snapshot"
+      photo_worker_process_count photo_worker_processes attribution incomplete_processes membership_snapshot \
+      <<<"$process_snapshot"
+    if [[ -n "$membership_snapshot" ]]; then
+      IFS=, read -r -a members_before <<<"$membership_snapshot"
+    fi
+    if ! mapfile -t members_after <"$cgroup_dir/cgroup.procs"; then
+      membership_changes+=(cgroup.procs)
+    else
+      for before_pid in "${members_before[@]}"; do
+        found=false
+        for after_pid in "${members_after[@]}"; do
+          if [[ "$before_pid" == "$after_pid" ]]; then
+            found=true
+            break
+          fi
+        done
+        if [[ "$found" != true ]]; then
+          membership_changes+=("$before_pid")
+        fi
+      done
+      for after_pid in "${members_after[@]}"; do
+        found=false
+        for before_pid in "${members_before[@]}"; do
+          if [[ "$after_pid" == "$before_pid" ]]; then
+            found=true
+            break
+          fi
+        done
+        if [[ "$found" != true ]]; then
+          membership_changes+=("$after_pid")
+        fi
+      done
+    fi
+    if (( ${#membership_changes[@]} > 0 )); then
+      if [[ "$incomplete_processes" != - ]]; then
+        IFS=, read -r -a incomplete_pids <<<"$incomplete_processes"
+      fi
+      incomplete_pids+=("${membership_changes[@]}")
+      attribution=incomplete
+      incomplete_processes=$(printf '%s\n' "${incomplete_pids[@]}" | LC_ALL=C sort -u | paste -sd, -)
+    fi
     printf '%s\n' "$current_bytes" >"$sample_prefix-stat-peak" || return 1
     printf '%s\n' "$current_bytes" >"$sample_prefix-current" || return 1
     printf '%s\n' "$stat_anon_bytes" >"$sample_prefix-anon" || return 1

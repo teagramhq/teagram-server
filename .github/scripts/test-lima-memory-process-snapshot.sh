@@ -37,7 +37,7 @@ RssAnon: 85 kB
 EOF
 
 snapshot="$(lima_memory_process_snapshot "$proc_root" "$fixture/cgroup.procs" 101)"
-expected='101|102400|81920|2|102:71680:61440,103:76800:66560|complete|-'
+expected='101|102400|81920|2|102:71680:61440,103:76800:66560|complete|-|101,102,103'
 if [[ "$snapshot" != "$expected" ]]; then
   printf 'process snapshot = %s, want %s\n' "$snapshot" "$expected" >&2
   exit 1
@@ -46,7 +46,7 @@ fi
 rm "$proc_root/104/status"
 printf '101\n102\n103\n104\n' >"$fixture/cgroup.procs"
 snapshot="$(lima_memory_process_snapshot "$proc_root" "$fixture/cgroup.procs" 101)"
-expected='101|102400|81920|2|102:71680:61440,103:76800:66560|incomplete|104'
+expected='101|102400|81920|2|102:71680:61440,103:76800:66560|incomplete|104|101,102,103,104'
 if [[ "$snapshot" != "$expected" ]]; then
   printf 'snapshot with an unreadable cgroup PID = %s, want %s\n' "$snapshot" "$expected" >&2
   exit 1
@@ -54,7 +54,7 @@ fi
 
 printf '101\n102\n103\n' >"$fixture/cgroup.procs"
 snapshot="$(lima_memory_process_snapshot "$proc_root" "$fixture/cgroup.procs" 999)"
-expected='999|unknown|unknown|2|102:71680:61440,103:76800:66560|incomplete|999'
+expected='999|unknown|unknown|2|102:71680:61440,103:76800:66560|incomplete|999|101,102,103'
 if [[ "$snapshot" != "$expected" ]]; then
   printf 'snapshot without its server PID = %s, want %s\n' "$snapshot" "$expected" >&2
   exit 1
@@ -103,6 +103,29 @@ expected='2600000|101|102400|81920|1|102:81920:71680|incomplete|104'
 actual="$(<"$sample_prefix-processes")"
 if [[ "$actual" != "$expected" ]]; then
   printf 'incomplete process sample = %s, want %s\n' "$actual" "$expected" >&2
+  exit 1
+fi
+
+race_cgroup="$fixture/race-cgroup"
+race_prefix="$fixture/race"
+mkdir -p "$race_cgroup"
+printf '101\n' >"$race_cgroup/cgroup.procs"
+printf '3145728\n' >"$race_cgroup/memory.peak"
+printf 'low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\n' >"$race_cgroup/memory.events"
+printf '3000000\n' >"$race_cgroup/memory.current"
+mkfifo "$race_cgroup/memory.stat"
+(
+  exec 3>"$race_cgroup/memory.stat"
+  printf '101\n102\n' >"$race_cgroup/cgroup.procs"
+  printf 'anon 2500000\nfile 0\nkernel 500000\n' >&3
+) &
+race_writer_pid=$!
+lima_memory_record_cgroup_sample "$race_cgroup" "$proc_root" 101 "$race_prefix"
+wait "$race_writer_pid"
+expected='3000000|101|102400|81920|0|-|incomplete|102'
+actual="$(<"$race_prefix-processes")"
+if [[ "$actual" != "$expected" ]]; then
+  printf 'membership change between process and memory samples = %s, want %s\n' "$actual" "$expected" >&2
   exit 1
 fi
 

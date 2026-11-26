@@ -3024,11 +3024,11 @@ jobs:
           path: .apt-cache/*.deb
           key: playwright-apt-${{ steps.playwright-deps.outputs.image }}-${{ hashFiles('apt-packages.txt') }}
 
-      # The warm path installs the cached set together without touching a
-      # mirror. Auto-deconfigure allows a cached upgrade to replace an installed
-      # package version that the new set declares as broken. The dry-run
-      # afterwards checks that the install worked; otherwise the step falls
-      # through to the network path.
+      # The warm path: dpkg installs the whole cached set in one call, which is
+      # what lets it resolve the ordering among them, and touches no mirror. The
+      # dry-run afterwards is the check that it actually worked — if anything is
+      # still missing, or dpkg refused, the step falls through to the network
+      # path rather than leaving a half-installed runner to fail in the browser.
       #
       # A bad entry falls back to the network. PR jobs do not get an Actions
       # write token to delete cache entries; the trusted main run can refresh it.
@@ -3036,7 +3036,7 @@ jobs:
         id: apt-cached-install
         if: steps.apt-cache.outputs.cache-hit == 'true'
         run: |
-          if sudo dpkg --auto-deconfigure -i .apt-cache/*.deb && pnpm exec playwright install-deps --dry-run chromium; then
+          if sudo dpkg -i .apt-cache/*.deb && pnpm exec playwright install-deps --dry-run chromium; then
             echo "installed=true" >>"$GITHUB_OUTPUT"
             exit 0
           fi
