@@ -229,7 +229,8 @@ password_file="$RUNNER_TEMP/lima-memory-password"
 printf 'lima-memory-probe-only-password\n' >"$password_file"
 chmod 600 "$password_file"
 for suffix in a b; do
-  username="limamem_$suffix"
+  # The three attempts share a PostgreSQL service, so each needs fresh users.
+  username="limamem_${LIMA_MEMORY_PROBE_ATTEMPT:-1}_$suffix"
   username_file="$RUNNER_TEMP/lima-memory-username-$suffix"
   printf '%s\n' "$username" >"$username_file"
   chmod 600 "$username_file"
