@@ -7,7 +7,9 @@ KEY_VOLUME=tg-lima-memory-key
 BLOB_VOLUME=tg-lima-memory-blobs
 EXPECTED_LIMIT=$((44 * 1024 * 1024))
 MIN_HEADROOM=$((2 * 1024 * 1024))
-LIMA_GOMEMLIMIT=20MiB
+# Go's memory limit is soft; leave room for brief allocation bursts under the
+# probe's half-CPU cgroup instead of targeting the full container reserve.
+LIMA_GOMEMLIMIT=16MiB
 MEMORY_CGROUP_DIR=
 MEMORY_PEAK_FILE=
 MEMORY_EVENTS_FILE=
