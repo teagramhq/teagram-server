@@ -43,6 +43,7 @@ TG_PUBLIC_LINK_PREFIX=https://demo.teagram.io/
 TG_AUTHKEY_ENC_KEY=$DIGEST
 TEAGRAM_DEMO_TURNSTILE_SITE_KEY=fixture-site-key
 TEAGRAM_DEMO_IMAGE_REF=teagramd@sha256:$DIGEST
+TG_RSA_KEY_FINGERPRINT=42
 EOF
 chmod 600 "$ENV_FILE"
 printf 'fixture\n' > "$SECRETS_DIR/turnstile-secret-key"
@@ -226,6 +227,7 @@ compose() {
   env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
     -u POSTGRES_PASSWORD -u TG_PUBLIC_LINK_PREFIX -u TG_AUTHKEY_ENC_KEY \
     -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_IMAGE_REF \
+    -u TG_RSA_KEY_FINGERPRINT \
     TEAGRAM_DEMO_SECRETS_DIR="$SECRETS_DIR" \
     docker compose --env-file "$ENV_FILE" --project-directory "$REPO_ROOT" "$@"
 }
@@ -336,17 +338,20 @@ for service in postgres migrate turnstile-egress haproxy edge; do
     not_ok "image parity with charlie: $service"
   fi
 done
-if diff <(jq -S '.services.teagramd.environment | del(.GOMEMLIMIT, .TG_PG_MAX_CONNS, .NO_PROXY)' "$ROOT_JSON") \
-  <(jq -S '.services.teagramd.environment | del(.GOMEMLIMIT, .TG_PG_MAX_CONNS, .NO_PROXY)' "$LIMA_JSON") >/dev/null; then
+if diff <(jq -S '.services.teagramd.environment | del(.GOMEMLIMIT, .TG_PG_MAX_CONNS, .NO_PROXY, .TG_RSA_KEY_FINGERPRINT)' "$ROOT_JSON") \
+  <(jq -S '.services.teagramd.environment | del(.GOMEMLIMIT, .TG_PG_MAX_CONNS, .NO_PROXY, .TG_RSA_KEY_FINGERPRINT)' "$LIMA_JSON") >/dev/null; then
   ok 'teagramd environment matches the charlie file apart from lima caps and proxy settings'
 else
   not_ok 'teagramd environment matches the charlie file apart from lima caps and proxy settings'
 fi
+expect 'criterion 6: the single lima server pins the imported RSA fingerprint' \
+  '.services.teagramd.environment.TG_RSA_KEY_FINGERPRINT == "42" and .services.teagramd.environment.TG_RSA_KEY_PATH == "/var/lib/teagramd/server_key.pem" and ([.services.teagramd.volumes[] | select(.type == "volume" and .target == "/var/lib/teagramd" and .source == "tgkey")] | length) == 1'
 
 # The image helper rejects unknown existing images and blkid errors without
 # calling mkfs, accepts a recognized ext4 image unchanged, and formats only an
 # image created by this invocation.
 # shellcheck source=deploy/teagram-demo/lima/prepare-blobs.sh
+# shellcheck disable=SC1091
 source "$SCRIPT_DIR/prepare-blobs.sh"
 TEAGRAM_TEST_MKFS_LOG=$TMP_DIR/mkfs.log
 TEAGRAM_TEST_FALLOCATE_LOG=$TMP_DIR/fallocate.log

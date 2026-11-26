@@ -1266,6 +1266,7 @@ jobs:
           bash -n deploy/teagram-demo/lima/test-deploy-contract.sh
           sh -n deploy/teagram-demo/lima/deploy-entry.sh
           sh -n deploy/teagram-demo/lima/teagram-demo-deploy-sshd.initd
+          bash -n deploy/teagram-demo/test-identity-import.sh
           bash -n deploy/teagram-demo/ops/weekly-wipe.sh
           bash -n deploy/teagram-demo/test-turnstile-signin-rollout.sh
           bash -n deploy/teagram-demo/test-image-release.sh
@@ -1340,6 +1341,7 @@ jobs:
             deploy/teagram-demo/image-retention.sh \
             deploy/teagram-demo/test-demo-scheduling.sh \
             deploy/teagram-demo/test-demo-compose.sh \
+            deploy/teagram-demo/test-identity-import.sh \
             deploy/teagram-demo/lima/check.sh \
             deploy/teagram-demo/lima/command-contract.sh \
             deploy/teagram-demo/lima/deploy-entry.sh \
@@ -3549,6 +3551,9 @@ jobs:
           revision=$(docker image inspect teagramd:local --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
           test "$revision" = "$TEAGRAMD_SOURCE_REVISION" \
             || { echo "Compose image revision label is '$revision'"; exit 1; }
+
+      - name: Check identity import against the built server image
+        run: sudo -n env "PATH=$PATH" TEAGRAM_TEST_SERVER_IMAGE=teagramd:local bash deploy/teagram-demo/test-identity-import.sh
 
       - name: Exercise demo General moderation through isolated Compose
         timeout-minutes: 20

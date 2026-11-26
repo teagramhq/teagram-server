@@ -2,7 +2,7 @@
 
 DEMO_SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 DEMO_REPO_ROOT=$(cd -P "$DEMO_SCRIPT_DIR/../.." && pwd)
-DEMO_DEPLOY_TARGET=${DEMO_DEPLOY_TARGET:-charlie}
+DEMO_DEPLOY_TARGET=${DEMO_DEPLOY_TARGET:-${TEAGRAM_DEMO_VARIANT:-charlie}}
 if [[ "$DEMO_DEPLOY_TARGET" == lima ]]; then
   DEMO_ENV_FILE=${TEAGRAM_DEMO_LIMA_ENV_FILE:-/var/lib/teagram-demo/lima.env}
   DEMO_COMPOSE_FILE="$DEMO_SCRIPT_DIR/lima/compose.yaml"
@@ -142,6 +142,7 @@ demo_server_client_config() {
   return 1
 }
 
+# shellcheck disable=SC2120 # Tests pass alternate paths; normal callers use defaults.
 demo_prepare_edge_config_permissions() {
   local config_dir="${1:-$DEMO_SCRIPT_DIR/nginx-config}"
   local config_file="${2:-$config_dir/nginx.conf}"
@@ -614,7 +615,11 @@ demo_ensure_qa_bypass_token() {
 
 demo_require_env() {
   if [[ "$DEMO_DEPLOY_TARGET" == lima ]]; then
-    "$DEMO_SCRIPT_DIR/lima/check.sh"
+    [[ -f "$DEMO_ENV_FILE" && ! -L "$DEMO_ENV_FILE" ]] || {
+      demo_fail 'lima environment file is missing or not a regular file'
+      return 1
+    }
+    python3 "$DEMO_SCRIPT_DIR/validate-env.py" --lima "$DEMO_ENV_FILE"
     return $?
   fi
   [[ -f "$DEMO_ENV_FILE" && ! -L "$DEMO_ENV_FILE" ]] || {
