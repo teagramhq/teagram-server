@@ -80,7 +80,9 @@ if [[ $(uname -m) != x86_64 ]]; then
   echo 'Lima service memory probe requires an x86_64 runner' >&2
   exit 1
 fi
-rm -f "$RUNNER_TEMP/lima-memory-start-gate"
+# Each repeated probe uses the same runner temp directory. Keep the generator's
+# exclusive-create guard, but remove this attempt's previous photo fixture.
+rm -f "$RUNNER_TEMP/lima-memory-start-gate" "$RUNNER_TEMP/lima-memory-photo.jpg"
 if ! docker image inspect "$LIMA_SERVICE_IMAGE" >/dev/null 2>&1; then
   printf 'Lima service image is not present in the local daemon: %s\n' "$LIMA_SERVICE_IMAGE" >&2
   exit 1
