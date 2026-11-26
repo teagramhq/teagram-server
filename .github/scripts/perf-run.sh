@@ -189,6 +189,47 @@ run_branch() {
   echo "::endgroup::"
 }
 
+# Exercise the real date-jump RPC and report judge against disposable fixture
+# clones without the history date index. The normal benchmark databases remain
+# untouched, and the judge must reject the measured row or plan regression.
+run_date_index_probe() (
+  local suffix=_date_index_probe
+  local report="$PERF_WORK/date-index-probe.json"
+  local required="$PERF_WORK/date-index-required.json"
+  local summary="$PERF_WORK/date-index-probe.md"
+  local status=0
+
+  cleanup() {
+    for f in "${fixtures[@]}"; do
+      psql_admin -c "DROP DATABASE IF EXISTS perf_${f}${suffix} WITH (FORCE)" || true
+    done
+  }
+  trap cleanup EXIT
+
+  printf '["messages.getHistory jump to date"]\n' >"$required"
+  for f in "${fixtures[@]}"; do
+    local clone="perf_${f}${suffix}"
+    psql_admin -c "DROP DATABASE IF EXISTS $clone WITH (FORCE)" || fatal "remove a stale $f date-index probe database"
+    psql_admin -c "CREATE DATABASE $clone TEMPLATE perf_$f" || fatal "clone the $f fixture for date-index fault injection"
+    psql_admin -d "$clone" -c "DROP INDEX messages_owner_peer_date_idx" || fatal "remove the date index from the $f probe fixture"
+    analyze "$clone" || fatal "analyze the $f date-index probe fixture"
+  done
+
+  TG_PERF_DIR="$PERF_CACHE" \
+    TG_PERF_FIXTURE_VERSION="${FIXTURE_VERSION:-}" \
+    TG_PERF_DSN_1X="$(dsn 1x "$suffix")" TG_PERF_DSN_100X="$(dsn 100x "$suffix")" \
+    TG_PERF_REPORT="$report" TG_PERF_DATE_INDEX_PROBE=1 TG_PERF_SQL=1 \
+    "$PERF_WORK/head.test" -test.run '^TestRPCPerformanceDateIndexProbe$' -test.count=1 -test.timeout 30m -test.v ||
+    fatal "measure the date jump against fixtures without the history date index"
+
+  "$PERF_WORK/perfreport" -head "$report" -required "$required" >"$summary" || status=$?
+  if [ "$status" -ne 1 ] || ! grep -Eq -- '- `messages\.getHistory jump to date` \(`(rows|seqscan)`\):' "$summary"; then
+    fatal "the RPC performance gate did not reject the missing date index as a row or plan regression"
+  fi
+  echo "RPC performance gate rejected the missing date index as expected:"
+  cat "$summary"
+)
+
 run_rounds() {
   local tag="$1" round
   # Alternate which branch goes first, so drift over the job (a warming page
@@ -235,6 +276,7 @@ measure() {
   done
   go test -c -tags performance -o "$PERF_WORK/head.test" ./test/perf || fatal "build the head RPC performance harness"
   go build -o "$PERF_WORK/perfreport" ./test/perf/cmd/perfreport || fatal "build the RPC performance report judge"
+  run_date_index_probe
   run_rounds a
   local status=0
   judge a || status=$?
