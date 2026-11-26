@@ -948,15 +948,26 @@ demo_prepare_tailnet_client_config() {
     demo_fail 'public client config has an invalid WebSocket endpoint for tailnet discovery'
     return 1
   }
-  temporary=$(mktemp "$DEMO_CLIENT_CONFIG_DIR/.client-tailnet.XXXXXXXX")
+  if ! temporary=$(mktemp "$DEMO_CLIENT_CONFIG_DIR/.client-tailnet.XXXXXXXX"); then
+    demo_fail 'could not create a temporary tailnet client config file'
+    return 1
+  fi
   if ! jq '.websocket.endpoint = "wss://teagram-dev.tailaa4918.ts.net/apiws"' \
     "$DEMO_CLIENT_CONFIG" > "$temporary"; then
     rm -f -- "$temporary"
     demo_fail 'tailnet client config could not be generated'
     return 1
   fi
-  chmod 0644 "$temporary"
-  mv -f -- "$temporary" "$DEMO_TAILNET_CLIENT_CONFIG"
+  if ! chmod 0644 "$temporary"; then
+    rm -f -- "$temporary"
+    demo_fail 'tailnet client config permissions could not be set'
+    return 1
+  fi
+  if ! mv -f -- "$temporary" "$DEMO_TAILNET_CLIENT_CONFIG"; then
+    rm -f -- "$temporary"
+    demo_fail 'tailnet client config could not be installed'
+    return 1
+  fi
 }
 
 demo_reload_edge() {

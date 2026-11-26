@@ -76,9 +76,10 @@ def websocket_handshake(
     x_forwarded_for: str | None = None,
 ) -> None:
     key = base64.b64encode(secrets.token_bytes(16)).decode("ascii")
-    host = host or ("demo.teagram.io" if public else "127.0.0.1")
+    host = host or "demo.teagram.io"
     connection_type = http.client.HTTPSConnection if public else http.client.HTTPConnection
-    connection = connection_type(host, 443 if public else port, timeout=5)
+    connect_host = "demo.teagram.io" if public else "127.0.0.1"
+    connection = connection_type(connect_host, 443 if public else port, timeout=5)
     source = f"to wss://demo.teagram.io/apiws from {origin}" if public else f"from {origin}"
     if origin is None:
         source = f"to wss://demo.teagram.io/apiws without Origin" if public else "without Origin"

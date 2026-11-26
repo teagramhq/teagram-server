@@ -1,0 +1,151 @@
+package main
+
+import (
+	"bufio"
+	"context"
+	"crypto/sha1" //nolint:gosec // RFC 6455 requires SHA-1 for its WebSocket accept token.
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+)
+
+type forwardedHeaders struct {
+	CFConnectingIP string `json:"cfConnectingIp"`
+	XForwardedFor  string `json:"xForwardedFor"`
+	XRealIP        string `json:"xRealIp"`
+}
+
+func failf(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, format+"\n", args...)
+	os.Exit(1)
+}
+
+func request(port int, forwardedFor, cfConnectingIP string) (int, []byte) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/apiws", port), nil) //nolint:gosec // Port is the validated loopback publication allocated for this test.
+	if err != nil {
+		failf("create request: %v", err)
+	}
+	request.Host = "teagram-dev.tailaa4918.ts.net"
+	request.Header.Set("Origin", "https://teagram-dev.tailaa4918.ts.net")
+	if forwardedFor != "<missing>" {
+		request.Header.Set("X-Forwarded-For", forwardedFor)
+	}
+	request.Header.Set("Cf-Connecting-Ip", cfConnectingIP)
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			Proxy: nil,
+		},
+	}
+	response, err := client.Do(request) //nolint:gosec // The request is confined to the validated local test port.
+	if err != nil {
+		failf("GET /apiws: %v", err)
+	}
+	defer func() { _ = response.Body.Close() }() //nolint:errcheck // The response is consumed or has no body.
+	var body []byte
+	if response.StatusCode == http.StatusOK {
+		body, err = io.ReadAll(response.Body)
+		if err != nil {
+			failf("read /apiws response: %v", err)
+		}
+	}
+	return response.StatusCode, body
+}
+
+func assertForwardedHeaders(port int) {
+	status, body := request(port, "203.0.113.8, 192.0.2.44", "198.51.100.99")
+	if status != http.StatusOK {
+		failf("valid X-Forwarded-For returned HTTP %d: %s", status, body)
+	}
+	var headers forwardedHeaders
+	if err := json.Unmarshal(body, &headers); err != nil {
+		failf("decode upstream headers: %v", err)
+	}
+	if headers.CFConnectingIP != "192.0.2.44" {
+		failf("upstream CF-Connecting-IP=%q, want rightmost X-Forwarded-For address", headers.CFConnectingIP)
+	}
+	if headers.XForwardedFor != "" || headers.XRealIP != "" {
+		failf("forged forwarding headers reached upstream: %+v", headers)
+	}
+}
+
+func assertRejectedForwardedHeaders(port int) {
+	for _, forwardedFor := range []string{"<missing>", "not-an-ip"} {
+		status, _ := request(port, forwardedFor, "198.51.100.99")
+		if status != http.StatusBadRequest {
+			failf("X-Forwarded-For %q returned HTTP %d, want 400", forwardedFor, status)
+		}
+	}
+}
+
+func assertWebSocketHandshake(port int) {
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	connection, err := dialer.DialContext(context.Background(), "tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err != nil {
+		failf("connect for WebSocket handshake: %v", err)
+	}
+	defer func() { _ = connection.Close() }() //nolint:errcheck // Close after the handshake assertion.
+	if err := connection.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		failf("set WebSocket deadline: %v", err)
+	}
+	key := base64.StdEncoding.EncodeToString([]byte("tailnet-source-test-key"))
+	if _, err := fmt.Fprintf(connection,
+		"GET /apiws HTTP/1.1\r\nHost: teagram-dev.tailaa4918.ts.net\r\n"+
+			"Origin: https://teagram-dev.tailaa4918.ts.net\r\n"+
+			"Connection: Upgrade\r\nUpgrade: websocket\r\n"+
+			"Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: %s\r\n"+
+			"X-Forwarded-For: 203.0.113.8, 192.0.2.44\r\n"+
+			"CF-Connecting-IP: 198.51.100.99\r\n\r\n", key); err != nil {
+		failf("write WebSocket handshake: %v", err)
+	}
+	reader := bufio.NewReader(connection)
+	statusLine, err := reader.ReadString('\n')
+	if err != nil {
+		failf("read WebSocket status: %v", err)
+	}
+	if !strings.Contains(statusLine, " 101 ") {
+		failf("WebSocket handshake returned %q, want HTTP 101", strings.TrimSpace(statusLine))
+	}
+	acceptDigest := sha1.Sum([]byte(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")) //nolint:gosec // RFC 6455 requires SHA-1 for its WebSocket accept token.
+	wantAccept := base64.StdEncoding.EncodeToString(acceptDigest[:])
+	accept := ""
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			failf("read WebSocket response headers: %v", err)
+		}
+		if line == "\r\n" {
+			break
+		}
+		name, value, found := strings.Cut(line, ":")
+		if found && strings.EqualFold(name, "Sec-WebSocket-Accept") {
+			accept = strings.TrimSpace(value)
+		}
+	}
+	if accept != wantAccept {
+		failf("WebSocket accept %q, want %q", accept, wantAccept)
+	}
+}
+
+func main() {
+	if len(os.Args) != 2 {
+		failf("usage: tailnet-source-client <port>")
+	}
+	port, err := strconv.Atoi(os.Args[1])
+	if err != nil || port < 1 || port > 65535 {
+		failf("invalid published port %q", os.Args[1])
+	}
+	assertForwardedHeaders(port)
+	assertRejectedForwardedHeaders(port)
+	assertWebSocketHandshake(port)
+	fmt.Println("tailnet Nginx source-address and WebSocket checks pass")
+}

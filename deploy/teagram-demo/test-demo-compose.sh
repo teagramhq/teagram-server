@@ -371,6 +371,74 @@ JSON
     and .demo.guest_sign_up == true
   ' "$DEMO_TAILNET_CLIENT_CONFIG" >/dev/null
   jq -e '.websocket.endpoint == "wss://demo.teagram.io/apiws"' "$DEMO_CLIENT_CONFIG" >/dev/null
+
+  original_tailnet_config=$(cat "$DEMO_TAILNET_CLIENT_CONFIG")
+  if (
+    mktemp() { return 1; }
+    demo_prepare_tailnet_client_config >/dev/null 2>&1
+  ); then
+    printf 'tailnet client config accepted a failed temporary-file creation\n' >&2
+    exit 1
+  fi
+  [[ "$(cat "$DEMO_TAILNET_CLIENT_CONFIG")" == "$original_tailnet_config" ]]
+  if (
+    chmod() { return 1; }
+    demo_prepare_tailnet_client_config >/dev/null 2>&1
+  ); then
+    printf 'tailnet client config accepted a failed chmod\n' >&2
+    exit 1
+  fi
+  [[ "$(cat "$DEMO_TAILNET_CLIENT_CONFIG")" == "$original_tailnet_config" ]]
+  [[ -z "$(find "$DEMO_CLIENT_CONFIG_DIR" -maxdepth 1 -name '.client-tailnet.*' -print -quit)" ]]
+)
+
+(
+  TEAGRAM_DEV_TAILNET_ENABLED=true
+  DEMO_CLIENT_CONFIG_DIR="$TMP_DIR/tailnet-reload-client"
+  DEMO_CLIENT_CONFIG="$DEMO_CLIENT_CONFIG_DIR/client"
+  DEMO_TAILNET_CLIENT_CONFIG="$DEMO_CLIENT_CONFIG_DIR/client-tailnet"
+  TAILNET_DOCKER_LOG="$TMP_DIR/tailnet-reload-docker.log"
+  TAILNET_DOCKER_STUB_DIR="$TMP_DIR/tailnet-reload-bin"
+  mkdir -p "$DEMO_CLIENT_CONFIG_DIR" "$TAILNET_DOCKER_STUB_DIR"
+  cat > "$DEMO_CLIENT_CONFIG" <<'JSON'
+{"version":1,"websocket":{"endpoint":"wss://demo.teagram.io/apiws"}}
+JSON
+  cat > "$TAILNET_DOCKER_STUB_DIR/docker" <<'DOCKER'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+printf '%s\n' "$*" >> "$TAILNET_DOCKER_LOG"
+if [[ "$1" == compose ]]; then
+  case "$*" in
+    *' run --rm -T --no-deps --entrypoint nginx edge-tailnet -c /etc/nginx/tailnet/nginx.conf -t'|\
+    *' up -d --no-deps edge-tailnet') exit 0 ;;
+    *' ps --status running -q edge-tailnet') printf 'tailnet-edge\n' ;;
+    *) printf 'unexpected tailnet docker compose invocation: %s\n' "$*" >&2; exit 1 ;;
+  esac
+elif [[ "$1" == exec && "$2" == tailnet-edge && "$3" == nginx &&
+  "$4" == -c && "$5" == /etc/nginx/tailnet/nginx.conf ]]; then
+  [[ "$6" == -t || ( "$6" == -s && "$7" == reload ) ]] || {
+    printf 'unexpected tailnet nginx invocation: %s\n' "$*" >&2
+    exit 1
+  }
+else
+  printf 'unexpected tailnet docker invocation: %s\n' "$*" >&2
+  exit 1
+fi
+DOCKER
+  chmod 0755 "$TAILNET_DOCKER_STUB_DIR/docker"
+  export TAILNET_DOCKER_LOG
+  PATH="$TAILNET_DOCKER_STUB_DIR:$PATH"
+  export PATH
+  demo_prepare_runtime_tmp_dirs_for_up() { :; }
+  demo_compose_image_ref() { printf 'teagram-demo:test\n'; }
+  demo_reload_tailnet_edge
+  mapfile -t tailnet_calls < "$TAILNET_DOCKER_LOG"
+  [[ "${#tailnet_calls[@]}" == 5 ]]
+  [[ "${tailnet_calls[0]}" == compose*"--file $DEMO_TAILNET_COMPOSE_FILE"*' run --rm -T --no-deps --entrypoint nginx edge-tailnet -c /etc/nginx/tailnet/nginx.conf -t' ]]
+  [[ "${tailnet_calls[1]}" == compose*' up -d --no-deps edge-tailnet' ]]
+  [[ "${tailnet_calls[2]}" == compose*' ps --status running -q edge-tailnet' ]]
+  [[ "${tailnet_calls[3]}" == 'exec tailnet-edge nginx -c /etc/nginx/tailnet/nginx.conf -t' ]]
+  [[ "${tailnet_calls[4]}" == 'exec tailnet-edge nginx -c /etc/nginx/tailnet/nginx.conf -s reload' ]]
 )
 
 (
@@ -2715,6 +2783,7 @@ fi
 python3 "$SCRIPT_DIR/test_update_turnstile_signin.py"
 bash "$SCRIPT_DIR/test-turnstile-signin-rollout.sh"
 python3 "$SCRIPT_DIR/test-probe-tailnet-isolation.py"
+python3 "$SCRIPT_DIR/test-smoke-handshake.py"
 "$SCRIPT_DIR/test-tailnet-source-address.sh"
 "$SCRIPT_DIR/test-demo-scheduling.sh"
 "$SCRIPT_DIR/lima/test-lima-compose.sh"
