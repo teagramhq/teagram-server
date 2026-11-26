@@ -120,10 +120,43 @@ def validate_values(values: dict[str, str]) -> None:
     print("demo env=valid")
 
 
+def validate_lima_values(values: dict[str, str]) -> None:
+    required = {
+        "POSTGRES_PASSWORD",
+        "TG_PUBLIC_LINK_PREFIX",
+        "TG_AUTHKEY_ENC_KEY",
+        "TEAGRAM_DEMO_TURNSTILE_SITE_KEY",
+        "TEAGRAM_DEMO_IMAGE_REF",
+    }
+    if not required.issubset(values):
+        reject("lima-variable-set")
+    if not re.fullmatch(r"[0-9a-f]{64}", values["POSTGRES_PASSWORD"]):
+        reject("postgres-password-format")
+    if not re.fullmatch(r"[0-9a-f]{64}", values["TG_AUTHKEY_ENC_KEY"]):
+        reject("authkey-encryption-key-format")
+    if values["POSTGRES_PASSWORD"] == values["TG_AUTHKEY_ENC_KEY"]:
+        reject("secret-reuse")
+    if values["TG_PUBLIC_LINK_PREFIX"] != "https://demo.teagram.io/":
+        reject("lima-public-link-prefix")
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", values["TEAGRAM_DEMO_TURNSTILE_SITE_KEY"]):
+        reject("turnstile-site-key-format")
+    if not re.fullmatch(r"[^\s@]+@sha256:[0-9a-f]{64}", values["TEAGRAM_DEMO_IMAGE_REF"]):
+        reject("image-ref-format")
+    fingerprint = values.get("TG_RSA_KEY_FINGERPRINT")
+    if fingerprint is not None:
+        if not re.fullmatch(r"-?(?:0|[1-9][0-9]*)", fingerprint):
+            reject("rsa-key-fingerprint-format")
+        value = int(fingerprint)
+        if value < -(1 << 63) or value >= 1 << 63:
+            reject("rsa-key-fingerprint-format")
+    print("demo env=valid lima")
+
+
 def main() -> None:
-    if len(sys.argv) != 2:
+    lima_mode = len(sys.argv) == 3 and sys.argv[1] == "--lima"
+    if not lima_mode and len(sys.argv) != 2:
         reject("usage")
-    path = pathlib.Path(sys.argv[1])
+    path = pathlib.Path(sys.argv[2] if lima_mode else sys.argv[1])
     try:
         metadata = path.lstat()
     except OSError:
@@ -146,7 +179,10 @@ def main() -> None:
             reject("assignment-shape")
         values[name] = value
 
-    validate_values(values)
+    if lima_mode:
+        validate_lima_values(values)
+    else:
+        validate_values(values)
 
 
 if __name__ == "__main__":

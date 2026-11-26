@@ -20,7 +20,7 @@ Nothing secret is in the repository.
 
 | Path | Mode | Contents |
 | --- | --- | --- |
-| `/var/lib/teagram-demo/lima.env` | root:root 0600 | `POSTGRES_PASSWORD`, `TG_PUBLIC_LINK_PREFIX`, `TG_AUTHKEY_ENC_KEY`, `TEAGRAM_DEMO_TURNSTILE_SITE_KEY`, `TEAGRAM_DEMO_IMAGE_REF` (a `name@sha256:` reference). |
+| `/var/lib/teagram-demo/lima.env` | root:root 0600 | `POSTGRES_PASSWORD`, `TG_PUBLIC_LINK_PREFIX`, `TG_AUTHKEY_ENC_KEY`, `TEAGRAM_DEMO_TURNSTILE_SITE_KEY`, `TEAGRAM_DEMO_IMAGE_REF` (a `name@sha256:` reference), and the `TG_RSA_KEY_FINGERPRINT` written by identity import. |
 | `/var/lib/teagram-demo/secrets/` | root:root 0700 | Directory. |
 | `.../secrets/turnstile-secret-key` | root:65532 0440 | Siteverify secret, readable by the server uid through its group. |
 | `.../secrets/turnstile-qa-bypass-token` | root:65532 0440 | QA bypass token, readable by the server uid through its group. |
@@ -29,6 +29,21 @@ Nothing secret is in the repository.
 `TEAGRAM_DEMO_LIMA_ENV_FILE` and `TEAGRAM_DEMO_SECRETS_DIR` override the
 default paths, for tests only. `TEAGRAM_DEMO_BLOB_MOUNT` can likewise point the
 preflight at a test fixture.
+
+Import the copied Charlie identity before starting the Lima stack:
+
+Set `CHARLIE_RSA_SPKI` to `.mtproto.rsa_spki` from Charlie's live
+`client-config` output. Use that live value, not a value copied with the key.
+
+```sh
+deploy/teagram-demo/init-demo.sh \
+  --import-key /root/server_key.pem \
+  --expected-rsa-spki "$CHARLIE_RSA_SPKI"
+```
+
+The command reads the root-only `lima.env`, installs the key into the Compose
+`tgkey` volume, verifies `client-config`, and writes the matching public RSA
+fingerprint into `lima.env`. Lima server starts require that fingerprint.
 
 `docker compose config` prints environment values, including the password and
 the tunnel token. Never print it to a log, a comment or a PR.
