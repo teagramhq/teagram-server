@@ -69,6 +69,21 @@ class PlaywrightAptCacheTests(unittest.TestCase):
             workflow,
         )
 
+    def test_cached_install_auto_deconfigures_obsolete_conflicting_packages(
+        self,
+    ) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        job = re.search(
+            r"(?ms)^  test-e2e-admin:\n(.*?)(?=^  [a-z0-9-]+:|\Z)", workflow
+        )
+        self.assertIsNotNone(job, "test-e2e-admin job is missing")
+        step = re.search(
+            r"(?ms)^      - name: Install the system dependencies from cache\n(.*?)(?=^      - name:|\Z)",
+            job.group(1),
+        )
+        self.assertIsNotNone(step, "cached dependency install step is missing")
+        self.assertIn("sudo dpkg --auto-deconfigure -i .apt-cache/*.deb", step.group(1))
+
     def test_network_install_retry_budget_covers_slow_archive_mirrors(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         job = re.search(
