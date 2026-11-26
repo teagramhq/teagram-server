@@ -117,7 +117,7 @@ lima_memory_process_snapshot() {
 }
 
 lima_memory_process_attribution_check() {
-  local attempts="$1" sample_peak_bytes="$2" attribution="$3" incomplete_pids="$4"
+  local attempts="$1" sample_peak_bytes="$2" attribution="$3" incomplete_pid_list="$4"
 
   case "$attempts" in
     3|10) ;;
@@ -136,7 +136,7 @@ lima_memory_process_attribution_check() {
   esac
 
   printf 'memory probe sampled incomplete process attribution at %s bytes: pids=%s\n' \
-    "$sample_peak_bytes" "$incomplete_pids" >&2
+    "$sample_peak_bytes" "$incomplete_pid_list" >&2
   [[ "$attempts" == 3 ]]
 }
 
