@@ -519,6 +519,7 @@ active_release_image_ref() {
   # shellcheck disable=SC2034
   DEMO_DEPLOY_TARGET=lima
   # shellcheck source=../demo-common.sh
+  # shellcheck disable=SC1091
   source "$script_dir/../demo-common.sh"
   # shellcheck disable=SC2034
   DEMO_ACTIVE_RELEASE_FILE=$active_file
