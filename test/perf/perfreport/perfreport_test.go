@@ -271,6 +271,16 @@ func TestEvaluateIgnoresUnmeasuredBaseRows(t *testing.T) {
 	}
 }
 
+func TestEvaluateBlocksUnmeasuredBaseRowsForOtherRPC(t *testing.T) {
+	name := "messages.getHistory newest page"
+	base := rounds(pair(name, perfreport.Read, result(1.6, 2.4, 6, 0), result(1.5, 2.3, 6, 0))...)
+	head := rounds(pair(name, perfreport.Read, result(1.6, 2.4, 6, 100), result(1.5, 2.3, 6, 100))...)
+	got := reasons(perfreport.Evaluate(perfreport.Input{Head: head, Base: base}).Failures)
+	if !strings.Contains(got, "messages.getHistory newest page: rows read 100 at 100x, main reads 0") {
+		t.Fatalf("zero-row base hid another RPC's row regression: %q", got)
+	}
+}
+
 func TestEvaluateReportsBaseRelativeTimingUntilCalibrated(t *testing.T) {
 	base := rounds(pair("read", perfreport.Read,
 		result(2, 3, 5, 100), result(10, 21, 5, 100))...)

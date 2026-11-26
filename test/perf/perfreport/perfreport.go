@@ -426,9 +426,9 @@ func Evaluate(in Input) Verdict {
 			if float64(l.Queries) > regressionRatio*float64(b.Queries) {
 				fail(checkBase, "queries %d at %s, main runs %d", l.Queries, Large, b.Queries)
 			}
-			// Zero means the base harness did not capture query plans for this
-			// scenario, so it is not a measured baseline for row comparisons.
-			if b.RowsRead > 0 && float64(l.RowsRead) > regressionRatio*float64(b.RowsRead) && l.RowsRead-b.RowsRead > rowsSlack {
+			// Older base reports did not capture the date-jump query plan.
+			compareBaseRows := name != dateJumpScenario || b.RowsRead > 0
+			if compareBaseRows && float64(l.RowsRead) > regressionRatio*float64(b.RowsRead) && l.RowsRead-b.RowsRead > rowsSlack {
 				fail(checkBase, "rows read %d at %s, main reads %d", l.RowsRead, Large, b.RowsRead)
 			}
 		}
