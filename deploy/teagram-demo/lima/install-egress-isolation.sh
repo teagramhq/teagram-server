@@ -3,6 +3,7 @@ set -Eeuo pipefail
 
 readonly IPTABLES_CHAIN=TEAGRAM_DEMO_EGRESS
 readonly IPTABLES_INPUT_CHAIN=TEAGRAM_DEMO_INPUT
+readonly INPUT_BRIDGE_INTERFACE=br+
 readonly OPENRC_SERVICE=teagram-demo-egress
 readonly OPENRC_STACK_SERVICE=teagram-demo-stack
 readonly REPO_ROOT=/opt/teagram-demo
@@ -66,7 +67,7 @@ render_rules() {
 
   for subnet in "$@"; do
     printf '%s\n' "-A DOCKER-USER -s $subnet -j $IPTABLES_CHAIN"
-    printf '%s\n' "-A INPUT -s $subnet -j $IPTABLES_INPUT_CHAIN"
+    printf '%s\n' "-A INPUT -i $INPUT_BRIDGE_INTERFACE -s $subnet -j $IPTABLES_INPUT_CHAIN"
   done
   for subnet in "$@"; do
     printf '%s\n' "-A $IPTABLES_CHAIN -d $subnet -j RETURN"
@@ -262,19 +263,26 @@ apply_family() {
     printf 'COMMIT\n'
   } | "${binary}-restore" -w 10 --noflush
 
-  ensure_source_hooks "$binary" DOCKER-USER "$IPTABLES_CHAIN" '' "${subnets[@]}"
-  ensure_source_hooks "$binary" INPUT "$IPTABLES_INPUT_CHAIN" "$IPTABLES_CHAIN" "${subnets[@]}"
+  ensure_source_hooks "$binary" DOCKER-USER "$IPTABLES_CHAIN" '' '' "${subnets[@]}"
+  ensure_source_hooks "$binary" INPUT "$IPTABLES_INPUT_CHAIN" "$IPTABLES_CHAIN" \
+    "$INPUT_BRIDGE_INTERFACE" "${subnets[@]}"
 }
 
 ensure_source_hooks() {
-  local binary=$1 parent_chain=$2 hook_chain=$3 stale_chain=$4
+  local binary=$1 parent_chain=$2 hook_chain=$3 stale_chain=$4 interface=$5
   local subnet index prefix_matches=1 listing status
-  shift 4
+  shift 5
   local -a subnets=("$@")
-  local -a expected_hooks=() parent_rules=()
+  local -a expected_hooks=() parent_rules=() interface_args=()
+
+  [[ -n $interface ]] && interface_args=(-i "$interface")
 
   for subnet in "${subnets[@]}"; do
-    expected_hooks+=("-A $parent_chain -s $subnet -j $hook_chain")
+    if [[ -n $interface ]]; then
+      expected_hooks+=("-A $parent_chain -i $interface -s $subnet -j $hook_chain")
+    else
+      expected_hooks+=("-A $parent_chain -s $subnet -j $hook_chain")
+    fi
   done
   if chain_listing "$binary" "$parent_chain"; then
     listing=$CHAIN_LISTING
@@ -293,7 +301,8 @@ ensure_source_hooks() {
 
   if (( prefix_matches == 0 )); then
     for ((index = ${#subnets[@]} - 1; index >= 0; index--)); do
-      "$binary" -w 10 -I "$parent_chain" 1 -s "${subnets[$index]}" -j "$hook_chain"
+      "$binary" -w 10 -I "$parent_chain" 1 "${interface_args[@]}" \
+        -s "${subnets[$index]}" -j "$hook_chain"
     done
   fi
 
@@ -370,9 +379,9 @@ remove_family() {
 }
 
 check_source_hooks() {
-  local binary=$1 family=$2 parent_chain=$3 hook_chain=$4 stale_chain=$5
+  local binary=$1 family=$2 parent_chain=$3 hook_chain=$4 stale_chain=$5 interface=$6
   local listing subnet line index hook_count=0 status
-  shift 5
+  shift 6
   local -a subnets=("$@")
   local -a expected_hooks=() parent_rules=()
 
@@ -385,7 +394,11 @@ check_source_hooks() {
   fi
   mapfile -t parent_rules < <(sed -n "/^-A $parent_chain /p" <<<"$listing")
   for subnet in "${subnets[@]}"; do
-    expected_hooks+=("-A $parent_chain -s $subnet -j $hook_chain")
+    if [[ -n $interface ]]; then
+      expected_hooks+=("-A $parent_chain -i $interface -s $subnet -j $hook_chain")
+    else
+      expected_hooks+=("-A $parent_chain -s $subnet -j $hook_chain")
+    fi
   done
   (( ${#parent_rules[@]} >= ${#expected_hooks[@]} )) \
     || fail "$family $parent_chain isolation hooks are missing or out of order"
@@ -412,8 +425,9 @@ check_family() {
   local chain_rules expected_rules status
 
   command -v "$binary" >/dev/null 2>&1 || fail "$binary is required to check the $family rules"
-  check_source_hooks "$binary" "$family" DOCKER-USER "$IPTABLES_CHAIN" '' "${subnets[@]}"
-  check_source_hooks "$binary" "$family" INPUT "$IPTABLES_INPUT_CHAIN" "$IPTABLES_CHAIN" "${subnets[@]}"
+  check_source_hooks "$binary" "$family" DOCKER-USER "$IPTABLES_CHAIN" '' '' "${subnets[@]}"
+  check_source_hooks "$binary" "$family" INPUT "$IPTABLES_INPUT_CHAIN" "$IPTABLES_CHAIN" \
+    "$INPUT_BRIDGE_INTERFACE" "${subnets[@]}"
   require_firewall_rule "$family FORWARD hook to DOCKER-USER is missing" \
     "$binary" -w 10 -C FORWARD -j DOCKER-USER
   if chain_listing "$binary" "$IPTABLES_CHAIN"; then

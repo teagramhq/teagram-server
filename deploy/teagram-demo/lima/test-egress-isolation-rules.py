@@ -359,6 +359,7 @@ class EgressIsolationRuleTests(unittest.TestCase):
             cases = (
                 "drifted chain rule",
                 "missing input hook",
+                "unscoped input hook",
                 "duplicate docker hook",
                 "misordered input hooks",
             )
@@ -371,6 +372,10 @@ class EgressIsolationRuleTests(unittest.TestCase):
                         )
                     elif case == "missing input hook":
                         state["iptables"]["INPUT"].pop(0)
+                    elif case == "unscoped input hook":
+                        state["iptables"]["INPUT"][0] = (
+                            f"-A INPUT -s 198.18.130.0/24 -j {INPUT_CHAIN}"
+                        )
                     elif case == "duplicate docker hook":
                         state["iptables"]["DOCKER-USER"].insert(
                             0, state["iptables"]["DOCKER-USER"][0]
@@ -406,7 +411,7 @@ class EgressIsolationRuleTests(unittest.TestCase):
                     f"-A DOCKER-USER -s {subnet} -j {IPTABLES_CHAIN}"
                 )
                 state["ip6tables"]["INPUT"].append(
-                    f"-A INPUT -s {subnet} -j {INPUT_CHAIN}"
+                    f"-A INPUT -i br+ -s {subnet} -j {INPUT_CHAIN}"
                 )
             state_file.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
             ipv6_before = json.dumps(state["ip6tables"], sort_keys=True)
@@ -436,6 +441,15 @@ class EgressIsolationRuleTests(unittest.TestCase):
             self.assertNotEqual(check.returncode, 0)
             self.assertIn(DEMO_NETWORKS[-1], check.stderr)
 
+    def test_input_hook_only_matches_demo_traffic_arriving_from_bridge(self) -> None:
+        rules = render("v4", EXAMPLE_IPV4_SUBNET)
+
+        input_hooks = [rule for rule in rules if rule.startswith("-A INPUT ")]
+        self.assertEqual(
+            input_hooks,
+            [f"-A INPUT -i br+ -s {EXAMPLE_IPV4_SUBNET} -j {INPUT_CHAIN}"],
+        )
+
     def test_multiple_subnets_render_one_hook_and_self_return_each(self) -> None:
         subnets = (
             "198.18.90.0/24",
@@ -451,7 +465,7 @@ class EgressIsolationRuleTests(unittest.TestCase):
                 for subnet in subnets
                 for hook in (
                     f"-A DOCKER-USER -s {subnet} -j {IPTABLES_CHAIN}",
-                    f"-A INPUT -s {subnet} -j {INPUT_CHAIN}",
+                    f"-A INPUT -i br+ -s {subnet} -j {INPUT_CHAIN}",
                 )
             ],
         )
@@ -491,7 +505,7 @@ class EgressIsolationRuleTests(unittest.TestCase):
         )
         self.assertEqual(
             rules[1],
-            f"-A INPUT -s {EXAMPLE_IPV4_SUBNET} -j {INPUT_CHAIN}",
+            f"-A INPUT -i br+ -s {EXAMPLE_IPV4_SUBNET} -j {INPUT_CHAIN}",
         )
         self.assertEqual(
             rules[2],
@@ -534,7 +548,7 @@ class EgressIsolationRuleTests(unittest.TestCase):
         )
         self.assertEqual(
             rules[1],
-            f"-A INPUT -s {EXAMPLE_IPV6_SUBNET} -j {INPUT_CHAIN}",
+            f"-A INPUT -i br+ -s {EXAMPLE_IPV6_SUBNET} -j {INPUT_CHAIN}",
         )
         self.assertEqual(
             rules[2],
