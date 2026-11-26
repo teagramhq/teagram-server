@@ -69,10 +69,10 @@ render_rules() {
   for subnet in "$@"; do
     printf '%s\n' "-A $IPTABLES_CHAIN -d $subnet -j RETURN"
   done
+  printf '%s\n' "-A $IPTABLES_CHAIN -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN"
   for cidr in "${blocked_cidrs[@]}"; do
     printf '%s\n' "-A $IPTABLES_CHAIN -d $cidr -j DROP"
   done
-  printf '%s\n' "-A $IPTABLES_CHAIN -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN"
   printf '%s\n' "-A $IPTABLES_CHAIN -j RETURN"
 }
 

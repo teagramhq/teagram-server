@@ -483,6 +483,30 @@ class EgressIsolationRuleTests(unittest.TestCase):
             )
         self.assertEqual(rules[-1], f"-A {IPTABLES_CHAIN} -j RETURN")
 
+    def test_established_replies_return_before_private_destination_drops(self) -> None:
+        established_rule = (
+            f"-A {IPTABLES_CHAIN} -m conntrack "
+            "--ctstate RELATED,ESTABLISHED -j RETURN"
+        )
+        for family, subnet, blocked_cidrs in (
+            ("v4", EXAMPLE_IPV4_SUBNET, PRIVATE_IPV4_CIDRS),
+            ("v6", EXAMPLE_IPV6_SUBNET, PRIVATE_IPV6_CIDRS),
+        ):
+            with self.subTest(family=family):
+                rules = render(family, subnet)
+                established_index = rules.index(established_rule)
+                self.assertLess(
+                    rules.index(f"-A {IPTABLES_CHAIN} -d {subnet} -j RETURN"),
+                    established_index,
+                )
+                for destination in blocked_cidrs:
+                    self.assertLess(
+                        established_index,
+                        rules.index(
+                            f"-A {IPTABLES_CHAIN} -d {destination} -j DROP"
+                        ),
+                    )
+
     def test_rendering_is_stable_and_contains_no_duplicate_rules(self) -> None:
         first = render("v4", EXAMPLE_IPV4_SUBNET)
         second = render("v4", EXAMPLE_IPV4_SUBNET)
