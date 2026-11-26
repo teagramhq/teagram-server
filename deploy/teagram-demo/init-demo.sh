@@ -107,7 +107,7 @@ source_path, destination_path = sys.argv[1:]
 maximum_size = 16384
 source_fd = os.open(
     source_path,
-    os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+    os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
 )
 destination_fd = -1
 try:
@@ -307,7 +307,7 @@ inspect_import_volume() {
 }
 
 read_existing_volume_key() {
-  if ! docker run --pull=never --rm --network none --read-only \
+  if ! docker run --pull=never --rm --log-driver none --network none --read-only \
     --user 65532:65532 --cap-drop ALL --security-opt no-new-privileges \
     --mount "type=volume,src=$IMPORT_KEY_VOLUME,dst=/key,readonly" \
     --entrypoint /bin/sh "$LIMA_HELPER_IMAGE" -ec '
@@ -317,7 +317,9 @@ read_existing_volume_key() {
         [ -e "$item" ] || [ -L "$item" ] || continue
         [ "$item" = /key/server_key.pem ] || exit 41
       done
-      [ -f /key/server_key.pem ] && [ ! -L /key/server_key.pem ]
+      if [ ! -f /key/server_key.pem ] || [ -L /key/server_key.pem ]; then
+        exit 41
+      fi
       [ "$(stat -c "%u:%g:%a" /key/server_key.pem)" = 65532:65532:600 ]
       cat /key/server_key.pem
     ' >"$TMP_DIR/volume-copy-server_key.pem" 2>"$TMP_DIR/volume-read.stderr"; then
@@ -331,7 +333,7 @@ read_existing_volume_key() {
 }
 
 publish_imported_volume_key() {
-  if ! docker run --pull=never --rm --network none --read-only \
+  if ! docker run --pull=never --rm --log-driver none --network none --read-only \
     --user 0:0 --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER \
     --security-opt no-new-privileges \
     --mount "type=bind,src=$TMP_DIR/imported-server_key.pem,dst=/tmp/server_key.pem,readonly" \

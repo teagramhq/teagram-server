@@ -116,6 +116,7 @@ case "${1:-}" in
     shift
     entrypoint=
     network=
+    log_driver=
     read_only=0
     env_file=
     mounts=()
@@ -126,6 +127,10 @@ case "${1:-}" in
         --read-only) read_only=1; shift ;;
         --network)
           network=$2
+          shift 2
+          ;;
+        --log-driver)
+          log_driver=$2
           shift 2
           ;;
         --env-file)
@@ -165,7 +170,7 @@ case "${1:-}" in
             ;;
         esac
       done
-      [[ "$has_volume_mount" == 1 && "$network" == none && "$read_only" == 1 ]]
+      [[ "$has_volume_mount" == 1 && "$network" == none && "$read_only" == 1 && "$log_driver" == none ]]
       if [[ -n "$source_key" ]]; then
         [[ -f "$source_key" ]]
         rewritten_script=$(printf '%s\n' "$script" | sed \
@@ -183,7 +188,18 @@ case "${1:-}" in
       grep -Fxq 'TG_TURNSTILE_SECRET_KEY=fixture-verification-secret' "$env_file"
       ! grep -Eq '^(TG_AUTHKEY_ENC_KEY|TG_POSTGRES_DSN)=' "$env_file"
       [[ " ${mounts[*]} " == *"type=volume,src=$TEAGRAM_TEST_VOLUME_NAME,dst=/var/lib/teagramd,readonly"* ]]
-      printf '{"mtproto":{"rsa_spki":"%s"}}\n' "$TEAGRAM_TEST_CLIENT_SPKI"
+      if [[ "${TEAGRAM_TEST_RUN_REAL_CLIENT_CONFIG:-0}" == 1 ]]; then
+        [[ -n "${TEAGRAM_TEST_SERVER_IMAGE:-}" ]]
+        client_config=$("$TEAGRAM_TEST_REAL_DOCKER" run --pull=never --rm --network none --read-only \
+          --user 65532:65532 --cap-drop ALL --security-opt no-new-privileges \
+          --env-file "$env_file" \
+          --mount "type=bind,src=$volume_dir,dst=/var/lib/teagramd,readonly" \
+          "$TEAGRAM_TEST_SERVER_IMAGE" client-config)
+        printf '%s\n' "$client_config" > "$TEAGRAM_TEST_REAL_CLIENT_CONFIG_OUTPUT"
+        printf '%s\n' "$client_config"
+      else
+        printf '{"mtproto":{"rsa_spki":"%s"}}\n' "$TEAGRAM_TEST_CLIENT_SPKI"
+      fi
     fi
     ;;
   *) exit 1 ;;
@@ -315,7 +331,11 @@ EOF
 
 run_import() {
   local key_path=$1 expected_spki=$2 client_spki=${3:-$VALID_SPKI}
-  env PATH="$MOCK_BIN:$PATH" \
+  local run_real_client_config=0
+  if [[ -n "${TEAGRAM_TEST_SERVER_IMAGE:-}" && "$client_spki" == "$VALID_SPKI" ]]; then
+    run_real_client_config=1
+  fi
+  timeout 15s env PATH="$MOCK_BIN:$PATH" \
     TEAGRAM_DEMO_LIMA_ENV_FILE="$CASE_ENV" \
     TEAGRAM_DEMO_SECRETS_DIR="$CASE_ROOT/secrets" \
     TEAGRAM_TEST_DOCKER_LOG="$CASE_LOG" \
@@ -323,6 +343,9 @@ run_import() {
     TEAGRAM_TEST_VOLUME_NAME="$VOLUME_NAME" \
     TEAGRAM_TEST_REAL_DOCKER="$REAL_DOCKER" \
     TEAGRAM_TEST_INSPECT_COUNT="$CASE_INSPECT_COUNT" \
+    TEAGRAM_TEST_SERVER_IMAGE="${TEAGRAM_TEST_SERVER_IMAGE:-}" \
+    TEAGRAM_TEST_RUN_REAL_CLIENT_CONFIG="$run_real_client_config" \
+    TEAGRAM_TEST_REAL_CLIENT_CONFIG_OUTPUT="$CASE_ROOT/real-client-config.json" \
     TEAGRAM_TEST_CLIENT_SPKI="$client_spki" \
     TEAGRAM_TEST_SEED_STRAY="${TEAGRAM_TEST_SEED_STRAY:-0}" \
     TEAGRAM_TEST_FORCE_LN_COLLISION="${TEAGRAM_TEST_FORCE_LN_COLLISION:-0}" \
@@ -366,8 +389,13 @@ grep -Fxq "TG_RSA_KEY_FINGERPRINT=$EXPECTED_FINGERPRINT" "$CASE_ENV"
 grep -Fq -- '--network none' "$CASE_LOG"
 grep -Fq 'dst=/tmp/server_key.pem,readonly' "$CASE_LOG"
 grep -Fq 'dst=/var/lib/teagramd,readonly' "$CASE_LOG"
+grep -Fq -- '--log-driver none' "$CASE_LOG"
 grep -Fq -- '--env-file ' "$CASE_LOG"
 grep -Fq 'client-config' "$CASE_LOG"
+if [[ -n "${TEAGRAM_TEST_SERVER_IMAGE:-}" ]]; then
+  jq -e --arg expected "$VALID_SPKI" '.mtproto.rsa_spki == $expected' \
+    "$CASE_ROOT/real-client-config.json" >/dev/null
+fi
 assert_no_secret_output
 
 new_case stray-volume-entry
@@ -415,6 +443,17 @@ if run_import "$CASE_ROOT/symlink.pem" "$VALID_SPKI"; then
   exit 1
 fi
 [[ ! -e "$CASE_VOLUME_ROOT/$VOLUME_NAME" ]]
+assert_no_secret_output
+
+new_case fifo-source
+mkfifo "$CASE_ROOT/key.fifo"
+if run_import "$CASE_ROOT/key.fifo" "$VALID_SPKI"; then
+  printf 'identity import accepted a named pipe as the source RSA key\n' >&2
+  exit 1
+fi
+[[ ! -e "$CASE_VOLUME_ROOT/$VOLUME_NAME" ]]
+grep -Fq 'RSA import key is missing or unsafe' "$CASE_OUTPUT"
+assert_not_contains 'volume create' "$CASE_LOG"
 assert_no_secret_output
 
 new_case unreadable
@@ -529,6 +568,24 @@ fi
 assert_not_contains 'volume create' "$CASE_LOG"
 assert_no_secret_output
 
+new_case existing-key-fifo
+mkdir -m 0700 "$CASE_VOLUME_ROOT/$VOLUME_NAME"
+mkfifo "$CASE_VOLUME_ROOT/$VOLUME_NAME/server_key.pem"
+chown 65532:65532 "$CASE_VOLUME_ROOT/$VOLUME_NAME" "$CASE_VOLUME_ROOT/$VOLUME_NAME/server_key.pem"
+chmod 0700 "$CASE_VOLUME_ROOT/$VOLUME_NAME"
+chmod 0600 "$CASE_VOLUME_ROOT/$VOLUME_NAME/server_key.pem"
+jq -n --arg name "$VOLUME_NAME" \
+  '[{Name:$name,Driver:"local",Options:{},Labels:{}}]' > "$CASE_VOLUME_ROOT/volume.json"
+before_volume_hash=$(sha256sum "$CASE_VOLUME_ROOT/volume.json")
+if run_import "$TMP_ROOT/server_key.pem" "$VALID_SPKI"; then
+  printf 'identity import accepted a non-regular existing key-volume entry\n' >&2
+  exit 1
+fi
+[[ -p "$CASE_VOLUME_ROOT/$VOLUME_NAME/server_key.pem" ]]
+[[ "$before_volume_hash" == "$(sha256sum "$CASE_VOLUME_ROOT/volume.json")" ]]
+assert_not_contains 'volume create' "$CASE_LOG"
+assert_no_secret_output
+
 new_case existing-same
 mkdir -m 0700 "$CASE_VOLUME_ROOT/$VOLUME_NAME"
 cp "$TMP_ROOT/server_key.pem" "$CASE_VOLUME_ROOT/$VOLUME_NAME/server_key.pem"
@@ -544,6 +601,11 @@ fi
 assert_not_contains 'volume create' "$CASE_LOG"
 assert_not_contains 'dst=/tmp/server_key.pem,readonly' "$CASE_LOG"
 grep -Fxq "TG_RSA_KEY_FINGERPRINT=$EXPECTED_FINGERPRINT" "$CASE_ENV"
+grep -Fq -- '--log-driver none' "$CASE_LOG"
+if [[ -n "${TEAGRAM_TEST_SERVER_IMAGE:-}" ]]; then
+  jq -e --arg expected "$VALID_SPKI" '.mtproto.rsa_spki == $expected' \
+    "$CASE_ROOT/real-client-config.json" >/dev/null
+fi
 assert_no_secret_output
 
 new_case postcheck-failure
