@@ -1341,15 +1341,16 @@ check_contract() {
     "$(demo_query '.jobs.deploy-dev.steps[] | select(.name == "Deploy the tested server commit to dev") | .env.DEV_DEPLOY_USER')" == '${{ vars.DEV_DEPLOY_USER }}' ]] ||
     fail 'the dev job must deploy the same tested commit and image digest as demo'
   demo_dev_run="$(demo_query '.jobs.deploy-dev.steps[] | select(.name == "Deploy the tested server commit to dev") | .run')"
-  if ! grep -Fq '"$DEV_DEPLOY_USER@$DEV_DEPLOY_HOST" "$DEPLOY_SHA $DEPLOY_IMAGE_DIGEST" </dev/null' <<< "$demo_dev_run" ||
-    ! grep -Fq '"$DEV_DEPLOY_USER@$DEV_DEPLOY_HOST" "$DEPLOY_SHA $DEPLOY_IMAGE_DIGEST true" </dev/null' <<< "$demo_dev_run" ||
-    ! grep -Fq 'if [[ "$TEAGRAM_DEV_TAILNET_ENABLED" == true ]]; then' <<< "$demo_dev_run"; then
-    fail 'the dev job must preserve the two-argument wrapper transition before enabling the tailnet listener'
+  if ! grep -Fq '"$DEV_DEPLOY_USER@$DEV_DEPLOY_HOST" "$remote_command" </dev/null' <<< "$demo_dev_run" ||
+    ! grep -Fq 'if [[ "$TEAGRAM_DEV_TAILNET_ENABLED" == true ]]; then' <<< "$demo_dev_run" ||
+    ! grep -Fq 'dev_ssh "$DEPLOY_SHA $DEPLOY_IMAGE_DIGEST true"' <<< "$demo_dev_run" ||
+    ! grep -Fq 'grep -Fxq "$legacy_rejection" "$ssh_stderr"' <<< "$demo_dev_run"; then
+    fail 'the dev job must try the tailnet opt-in first and bootstrap only after the old wrapper rejects it'
   fi
   (
     transition_tmp=$(mktemp -d)
     trap 'rm -rf -- "$transition_tmp"' EXIT
-    mkdir -p "$transition_tmp/bin"
+    mkdir -p "$transition_tmp/bin" "$transition_tmp/ssh-dev"
     cat > "$transition_tmp/bin/ssh" <<'SSH'
 #!/usr/bin/env bash
 set -Eeuo pipefail
@@ -1362,48 +1363,73 @@ if [[ -f "$DEV_TEST_SSH_CALLS" ]]; then
 fi
 call_number=$((call_number + 1))
 printf '%s\n' "$remote_command" >> "$DEV_TEST_SSH_CALLS"
-if (( call_number == 1 )); then
-  # The deployed wrapper accepts only SHA and digest until this call updates its checkout.
-  [[ "${#remote_args[@]}" == 2 && "${remote_args[0]}" == "$DEPLOY_SHA" &&
-    "${remote_args[1]}" == "$DEPLOY_IMAGE_DIGEST" ]] || {
-    printf 'the old deployed wrapper rejected the upgrade command: %s\n' "$remote_command" >&2
-    exit 1
-  }
-elif (( call_number == 2 )); then
-  [[ "$TEAGRAM_DEV_TAILNET_ENABLED" == true && "${#remote_args[@]}" == 3 &&
-    "${remote_args[0]}" == "$DEPLOY_SHA" && "${remote_args[1]}" == "$DEPLOY_IMAGE_DIGEST" &&
-    "${remote_args[2]}" == true ]] || {
-    printf 'the updated wrapper received an invalid tailnet setting command: %s\n' "$remote_command" >&2
-    exit 1
-  }
-else
-  printf 'dev deploy sent an unexpected extra SSH command\n' >&2
+[[ "${remote_args[0]:-}" == "$DEPLOY_SHA" && "${remote_args[1]:-}" == "$DEPLOY_IMAGE_DIGEST" ]] || {
+  printf 'dev deploy sent invalid release coordinates: %s\n' "$remote_command" >&2
   exit 1
+}
+if [[ "$DEV_TEST_WRAPPER_MODE" == legacy && "$call_number" == 1 && "${#remote_args[@]}" == 3 ]]; then
+  printf '%s\n' 'demo deploy key accepts server/web releases or a reviewed qa-invite operation' >&2
+  exit 255
 fi
+case "$TEAGRAM_DEV_TAILNET_ENABLED:${DEV_TEST_WRAPPER_MODE}:${#remote_args[@]}:${remote_args[2]:-}" in
+  false:*:2:)
+    ;;
+  true:modern:3:true|true:legacy:2:|true:legacy:3:true)
+    ;;
+  true:unrelated:3:true)
+    printf 'Connection reset by peer\n' >&2
+    exit 255
+    ;;
+  *)
+    printf 'dev deploy sent an unexpected command for %s mode: %s\n' "$DEV_TEST_WRAPPER_MODE" "$remote_command" >&2
+    exit 1
+    ;;
+esac
 SSH
     chmod 0755 "$transition_tmp/bin/ssh"
     printf '%s\n' "$demo_dev_run" > "$transition_tmp/deploy.sh"
-    local tailnet_enabled expected_calls
-    for tailnet_enabled in false true; do
-      : > "$transition_tmp/ssh-calls"
-      # shellcheck disable=SC2031 # PATH is deliberately limited to the generated workflow process.
-      RUNNER_TEMP="$transition_tmp" \
-        DEPLOY_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
-        DEPLOY_IMAGE_DIGEST=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
-        TEAGRAM_DEV_TAILNET_ENABLED="$tailnet_enabled" \
-        DEV_DEPLOY_HOST=dev.example.test DEV_DEPLOY_PORT=2222 DEV_DEPLOY_USER=deploy \
-        DEV_TEST_SSH_CALLS="$transition_tmp/ssh-calls" \
-        PATH="$transition_tmp/bin:$PATH" bash "$transition_tmp/deploy.sh"
-      mapfile -t transition_calls < "$transition_tmp/ssh-calls"
-      expected_calls=1
-      [[ "$tailnet_enabled" != true ]] || expected_calls=2
-      [[ "${#transition_calls[@]}" == "$expected_calls" &&
-        "${transition_calls[0]}" == 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' ]] ||
-        fail 'the dev workflow must upgrade through the old two-argument wrapper before sending the opt-in'
-      if [[ "$tailnet_enabled" == true ]]; then
-        [[ "${transition_calls[1]}" == 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb true' ]] ||
-          fail 'the dev workflow must send the tailnet opt-in only after the two-argument upgrade call'
-      fi
+    local tailnet_enabled wrapper_mode expected_calls
+    for wrapper_mode in modern legacy unrelated; do
+      for tailnet_enabled in false true; do
+        : > "$transition_tmp/ssh-calls"
+        # shellcheck disable=SC2031 # PATH is deliberately limited to the generated workflow process.
+        if RUNNER_TEMP="$transition_tmp" \
+          DEPLOY_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+          DEPLOY_IMAGE_DIGEST=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+          TEAGRAM_DEV_TAILNET_ENABLED="$tailnet_enabled" \
+          DEV_DEPLOY_HOST=dev.example.test DEV_DEPLOY_PORT=2222 DEV_DEPLOY_USER=deploy \
+          DEV_TEST_WRAPPER_MODE="$wrapper_mode" DEV_TEST_SSH_CALLS="$transition_tmp/ssh-calls" \
+          PATH="$transition_tmp/bin:$PATH" bash "$transition_tmp/deploy.sh"; then
+          deploy_status=0
+        else
+          deploy_status=$?
+        fi
+        mapfile -t transition_calls < "$transition_tmp/ssh-calls"
+        expected_calls=1
+        if [[ "$tailnet_enabled" == true && "$wrapper_mode" == legacy ]]; then
+          expected_calls=3
+        fi
+        if [[ "$tailnet_enabled" == true && "$wrapper_mode" == unrelated ]]; then
+          [[ "$deploy_status" != 0 && "${#transition_calls[@]}" == 1 &&
+            "${transition_calls[0]}" == 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb true' ]] ||
+            fail 'the dev workflow must stop on an unrelated opt-in SSH failure without bootstrapping'
+          continue
+        fi
+        [[ "$deploy_status" == 0 && "${#transition_calls[@]}" == "$expected_calls" ]] ||
+          fail 'the dev workflow must complete the expected wrapper transition'
+        if [[ "$tailnet_enabled" == true ]]; then
+          [[ "${transition_calls[0]}" == 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb true' ]] ||
+            fail 'the dev workflow must attempt tailnet opt-in before any bootstrap deploy'
+          if [[ "$wrapper_mode" == legacy ]]; then
+            [[ "${transition_calls[1]}" == 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' &&
+              "${transition_calls[2]}" == 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb true' ]] ||
+              fail 'the dev workflow must bootstrap and retry opt-in after an old-wrapper rejection'
+          fi
+        else
+          [[ "${transition_calls[0]}" == 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' ]] ||
+            fail 'the dev workflow must preserve the two-argument command when tailnet is disabled'
+        fi
+      done
     done
   )
   [[ "$(demo_query '.jobs.deploy-dev.steps[] | select(.name == "Join the tailnet") | .if')" == '${{ steps.target.outputs.enabled == '\''true'\'' }}' &&

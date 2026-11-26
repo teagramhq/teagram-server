@@ -250,17 +250,33 @@ jobs:
           set -euo pipefail
           [[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$DEPLOY_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
-          ssh -T -p "$DEV_DEPLOY_PORT" -i "$RUNNER_TEMP/ssh-dev/id_deploy" \
-            -o IdentitiesOnly=yes -o BatchMode=yes \
-            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/ssh-dev/known_hosts" \
-            -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
-            "$DEV_DEPLOY_USER@$DEV_DEPLOY_HOST" "$DEPLOY_SHA $DEPLOY_IMAGE_DIGEST" </dev/null
-          if [[ "$TEAGRAM_DEV_TAILNET_ENABLED" == true ]]; then
+          dev_ssh() {
+            local remote_command=$1
             ssh -T -p "$DEV_DEPLOY_PORT" -i "$RUNNER_TEMP/ssh-dev/id_deploy" \
               -o IdentitiesOnly=yes -o BatchMode=yes \
               -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/ssh-dev/known_hosts" \
               -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
-              "$DEV_DEPLOY_USER@$DEV_DEPLOY_HOST" "$DEPLOY_SHA $DEPLOY_IMAGE_DIGEST true" </dev/null
+              "$DEV_DEPLOY_USER@$DEV_DEPLOY_HOST" "$remote_command" </dev/null
+          }
+          if [[ "$TEAGRAM_DEV_TAILNET_ENABLED" == true ]]; then
+            legacy_rejection='demo deploy key accepts server/web releases or a reviewed qa-invite operation'
+            ssh_stderr=$(mktemp "$RUNNER_TEMP/ssh-dev/opt-in-stderr.XXXXXXXX")
+            if dev_ssh "$DEPLOY_SHA $DEPLOY_IMAGE_DIGEST true" 2>"$ssh_stderr"; then
+              cat "$ssh_stderr" >&2
+            else
+              ssh_status=$?
+              if grep -Fxq "$legacy_rejection" "$ssh_stderr"; then
+                cat "$ssh_stderr" >&2
+                dev_ssh "$DEPLOY_SHA $DEPLOY_IMAGE_DIGEST"
+                dev_ssh "$DEPLOY_SHA $DEPLOY_IMAGE_DIGEST true"
+              else
+                cat "$ssh_stderr" >&2
+                exit "$ssh_status"
+              fi
+            fi
+            rm -f -- "$ssh_stderr"
+          else
+            dev_ssh "$DEPLOY_SHA $DEPLOY_IMAGE_DIGEST"
           fi
 
       - name: Remove the dev deploy key
