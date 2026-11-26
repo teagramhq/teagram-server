@@ -265,6 +265,8 @@ expect 'criterion 1: no build key anywhere' \
   '[.services[] | select(has("build"))] | length == 0'
 expect 'criterion 1: every image is pinned by sha256 digest' \
   '[.services[] | .image | select(test("@sha256:[0-9a-f]{64}$") | not)] | length == 0'
+expect 'criterion 1: Docker does not auto-start demo containers before isolation' \
+  '[.services[] | select(.restart != "no")] | length == 0'
 
 # Criterion 2: every service has a memory limit, and the long-running ones fit
 # in 200 MiB. migrate is one-shot, so it is outside that sum.

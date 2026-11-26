@@ -33,6 +33,9 @@ LIMA_LAN_CIDRS = tuple(
         "169.254.0.0/16",
     )
 )
+BLOCKED_IPV6_CIDRS = tuple(
+    ipaddress.ip_network(cidr) for cidr in ("fc00::/7",)
+)
 DOCKER_PROJECT = "teagram-demo"
 DOCKER_SERVICE = "turnstile-egress"
 PUBLIC_HOST = "example.com"
@@ -60,6 +63,57 @@ def probe_target(
         fail(f"{name}-probe-error:{type(error).__name__}")
     connection.close()
     fail(f"{name}-destination-reachable")
+
+
+def require_host_control_target(
+    name: str,
+    address: str,
+    port: int,
+    connect: Callable[..., socket.socket] | None = None,
+) -> None:
+    if connect is None:
+        connect = socket.create_connection
+    try:
+        connection = connect((address, port), timeout=3)
+    except TimeoutError:
+        fail(f"{name}-host-control-timeout")
+    except (ConnectionRefusedError, ConnectionResetError):
+        return
+    except OSError as error:
+        fail(f"{name}-host-control-error:{type(error).__name__}")
+    connection.close()
+
+
+def host_address_targets_from_ip_output(ip_output: str) -> tuple[tuple[str, str, int], ...]:
+    targets: list[tuple[str, str, int]] = []
+    seen: set[str] = set()
+    for line in ip_output.splitlines():
+        fields = line.split()
+        if len(fields) < 4 or fields[2] not in ("inet", "inet6"):
+            continue
+        interface = fields[1].split("@", 1)[0]
+        if interface == "lo" or interface.startswith(("docker", "br-", "veth")):
+            continue
+        try:
+            address = ipaddress.ip_interface(fields[3]).ip
+        except ValueError:
+            continue
+        networks = LIMA_LAN_CIDRS if address.version == 4 else BLOCKED_IPV6_CIDRS
+        if not any(address in network for network in networks):
+            continue
+        value = str(address)
+        if value not in seen:
+            seen.add(value)
+            targets.append((f"lima-host-{interface}", value, 22))
+    return tuple(targets)
+
+
+def lima_host_address_targets() -> tuple[tuple[str, str, int], ...]:
+    output = _one_line_command(["ip", "-o", "address", "show"])
+    targets = host_address_targets_from_ip_output(output)
+    if not targets:
+        fail("could-not-find-lima-private-or-tailnet-address")
+    return targets
 
 
 def lan_gateway_from_route_table(route_table: str) -> str:
@@ -99,8 +153,12 @@ def lima_lan_gateway() -> str:
 def _one_line_command(command: list[str]) -> str:
     try:
         result = subprocess.run(command, check=True, capture_output=True, text=True)
-    except (OSError, subprocess.CalledProcessError) as error:
-        fail(f"command-failed:{pathlib.Path(command[0]).name}")
+    except subprocess.CalledProcessError as error:
+        diagnostic = (error.stderr or "").strip().splitlines()
+        detail = f":{diagnostic[0]}" if diagnostic else ""
+        fail(f"command-failed:{pathlib.Path(command[0]).name}{detail}")
+    except OSError as error:
+        fail(f"command-failed:{pathlib.Path(command[0]).name}:{type(error).__name__}")
     return result.stdout.strip()
 
 
@@ -208,14 +266,18 @@ def public_https_request(hostname: str, address: str) -> None:
         fail("public-https-request-failed")
 
 
-def probe_lima_inside_network(lan_gateway: str) -> None:
-    for name, address, port in (TAILNET_PEER, ("lima-lan-gateway", lan_gateway, 22)):
+def probe_lima_inside_network(
+    lan_gateway: str,
+    host_addresses: tuple[tuple[str, str, int], ...] = (),
+) -> None:
+    targets = (TAILNET_PEER, ("lima-lan-gateway", lan_gateway, 22), *host_addresses)
+    for name, address, port in targets:
         probe_target(name, address, port)
     public_address = dns_query_a(PUBLIC_HOST)
     public_https_request(PUBLIC_HOST, public_address)
     print(
         "tailnet_isolation_probe=pass tailnet=timeout lan_gateway=timeout "
-        "dns=pass https=pass"
+        "lima_addresses=timeout dns=pass https=pass"
     )
 
 
@@ -228,11 +290,16 @@ def probe_charlie_host() -> None:
 def run_lima_probe_from_host() -> None:
     if os.geteuid() != 0:
         fail("lima-probe-must-run-as-root-to-enter-the-Docker-network-namespace")
+    require_host_control_target(*TAILNET_PEER)
     lan_gateway = lima_lan_gateway()
+    host_targets = lima_host_address_targets()
     pid = lima_probe_container_pid()
     script_path = pathlib.Path(__file__).resolve()
     environment = os.environ.copy()
     environment["TEAGRAM_DEMO_LAN_GATEWAY"] = lan_gateway
+    environment["TEAGRAM_DEMO_HOST_ADDRESSES"] = " ".join(
+        address for _, address, _ in host_targets
+    )
     try:
         result = subprocess.run(
             [
@@ -281,7 +348,14 @@ def main() -> None:
             parsed_gateway in network for network in LIMA_LAN_CIDRS
         ):
             fail("TEAGRAM_DEMO_LAN_GATEWAY-must-be-in-a-blocked-private-range")
-        probe_lima_inside_network(str(parsed_gateway))
+        addresses = os.environ.get("TEAGRAM_DEMO_HOST_ADDRESSES", "").split()
+        if not addresses:
+            fail("TEAGRAM_DEMO_HOST_ADDRESSES-must-include-Lima-private-or-tailnet-addresses")
+        host_targets = tuple(
+            (f"lima-host-{index}", address, 22)
+            for index, address in enumerate(addresses, start=1)
+        )
+        probe_lima_inside_network(str(parsed_gateway), host_targets)
     else:
         run_lima_probe_from_host()
 

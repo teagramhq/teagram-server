@@ -97,7 +97,7 @@ x-server: &server
       condition: service_completed_successfully
     turnstile-egress:
       condition: service_healthy
-  restart: unless-stopped
+  restart: "no"
   logging: *logging
 
 services:
@@ -128,7 +128,7 @@ services:
     networks:
       backend:
         ipv4_address: 198.18.130.3
-    restart: unless-stopped
+    restart: "no"
     logging: *logging
 
   migrate:
@@ -154,6 +154,7 @@ services:
       postgres:
         condition: service_healthy
     networks: [backend]
+    restart: "no"
     logging: *logging
 
   teagramd:
@@ -202,7 +203,7 @@ services:
         gw_priority: 1
       backend:
         ipv4_address: 198.18.130.252
-    restart: unless-stopped
+    restart: "no"
     logging: *logging
 
   haproxy:
@@ -245,7 +246,7 @@ services:
     networks:
       backend:
         ipv4_address: 198.18.130.2
-    restart: unless-stopped
+    restart: "no"
     logging: *logging
 
   edge:
@@ -281,7 +282,7 @@ services:
       haproxy:
         condition: service_healthy
     networks: [backend, edge]
-    restart: unless-stopped
+    restart: "no"
     logging: *logging
 
   # Tunnel connector for demo.teagram.io. It reaches the origin as edge:8080
@@ -307,7 +308,7 @@ services:
       edge:
         condition: service_started
     networks: [edge]
-    restart: unless-stopped
+    restart: "no"
     logging: *logging
 
 volumes:
