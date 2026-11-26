@@ -81,14 +81,32 @@ for expected in \
     not_ok "listener config: $expected"
   fi
 done
-grep -Fqx 'teagram-deploy ALL=(root) NOPASSWD: /usr/local/sbin/teagram-demo-deploy' \
-  "$SCRIPT_DIR/teagram-deploy.sudoers" && ok 'sudoers grants only the root wrapper' || not_ok 'sudoers grants only the root wrapper'
-grep -Fq 'exec sudo -n /usr/local/sbin/teagram-demo-deploy "${SSH_ORIGINAL_COMMAND:-}"' \
-  "$SCRIPT_DIR/deploy-entry.sh" && ok 'unprivileged entry forwards one command argument' || not_ok 'unprivileged entry forwards one command argument'
-grep -Fq 'demo_deploy_command_valid "$COMMAND"' "$SCRIPT_DIR/deploy-root-wrapper.sh" &&
-  ok 'root wrapper revalidates the command' || not_ok 'root wrapper revalidates the command'
-grep -Fq 'cmp -s "$SSH_BASE_EFFECTIVE" "$TMP_DIR/sshd-main.after"' "$SCRIPT_DIR/install-deploy-entry.sh" &&
-  ok 'installer verifies sshd -T for port 22 is unchanged' || not_ok 'installer verifies sshd -T for port 22 is unchanged'
+if grep -Fqx 'teagram-deploy ALL=(root) NOPASSWD: /usr/local/sbin/teagram-demo-deploy' \
+  "$SCRIPT_DIR/teagram-deploy.sudoers"; then
+  ok 'sudoers grants only the root wrapper'
+else
+  not_ok 'sudoers grants only the root wrapper'
+fi
+# shellcheck disable=SC2016 # Match literal source text without expanding it.
+if grep -Fq 'exec sudo -n /usr/local/sbin/teagram-demo-deploy "${SSH_ORIGINAL_COMMAND:-}"' \
+  "$SCRIPT_DIR/deploy-entry.sh"; then
+  ok 'unprivileged entry forwards one command argument'
+else
+  not_ok 'unprivileged entry forwards one command argument'
+fi
+# shellcheck disable=SC2016 # Match literal source text without expanding it.
+if grep -Fq 'demo_deploy_command_valid "$COMMAND"' "$SCRIPT_DIR/deploy-root-wrapper.sh"; then
+  ok 'root wrapper revalidates the command'
+else
+  not_ok 'root wrapper revalidates the command'
+fi
+# shellcheck disable=SC2016 # Match literal source text without expanding it.
+if grep -Fq 'cmp -s "$SSH_BASE_EFFECTIVE" "$TMP_DIR/sshd-main.after"' \
+  "$SCRIPT_DIR/install-deploy-entry.sh"; then
+  ok 'installer verifies sshd -T for port 22 is unchanged'
+else
+  not_ok 'installer verifies sshd -T for port 22 is unchanged'
+fi
 
 # Exercise retention with a foreign repository and a shared image. Only
 # unreferenced images owned exclusively by the demo repository may be removed.
@@ -181,8 +199,11 @@ if TEAGRAM_TEST_FAIL_RM="$ID4" demo_prune_images "$ID1" 2> "$TMP_DIR/removal-fai
 else
   ok 'failed image removal is returned as a failure'
 fi
-grep -Fq "could not remove demo image $ID4" "$TMP_DIR/removal-failure" &&
-  ok 'failed image removal is reported with its ID' || not_ok 'failed image removal is reported with its ID'
+if grep -Fq "could not remove demo image $ID4" "$TMP_DIR/removal-failure"; then
+  ok 'failed image removal is reported with its ID'
+else
+  not_ok 'failed image removal is reported with its ID'
+fi
 
 ROTATION_FILE="$TMP_DIR/rotation.json"
 cp -- "$DEMO_IMAGE_HISTORY_FILE" "$ROTATION_FILE"
