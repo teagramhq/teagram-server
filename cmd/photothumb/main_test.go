@@ -68,71 +68,21 @@ func TestMain(m *testing.M) {
 }
 
 func TestWorkerMainHonorsParentMemoryLimit(t *testing.T) {
-	if os.Getenv("PHOTOTHUMB_MEMORY_LIMIT_PROBE") != "" {
-		workerInput, err := io.ReadAll(os.Stdin)
-		if err != nil {
-			t.Fatalf("read worker memory-limit fixture: %v", err)
-		}
-		inputReader, inputWriter, err := os.Pipe()
-		if err != nil {
-			t.Fatalf("create worker memory-limit input pipe: %v", err)
-		}
-		writeResult := make(chan error, 1)
-		go func() {
-			_, writeErr := inputWriter.Write(workerInput)
-			closeErr := inputWriter.Close()
-			if writeErr != nil {
-				writeResult <- writeErr
-				return
-			}
-			writeResult <- closeErr
-		}()
-		os.Args = []string{"photothumb", "worker", strconv.Itoa(len(workerInput)), "1600", "1600", strconv.Itoa(testPixelCap)}
-		os.Stdin = inputReader
-		main()
-		if err := inputReader.Close(); err != nil {
-			t.Fatalf("close worker memory-limit input pipe: %v", err)
-		}
-		if err := <-writeResult; err != nil {
-			t.Fatalf("write worker memory-limit fixture: %v", err)
-		}
-		if _, err := fmt.Fprintf(os.Stderr, "\nPHOTOTHUMB_MEMORY_LIMIT_BYTES=%d\n", debug.SetMemoryLimit(-1)); err != nil {
-			t.Fatalf("report effective worker memory limit: %v", err)
-		}
-		return
-	}
+	const parentLimit = int64(20 << 20)
+	previousLimit := debug.SetMemoryLimit(parentLimit)
+	defer debug.SetMemoryLimit(previousLimit)
 
-	executable, err := os.Executable()
-	if err != nil {
-		t.Fatalf("resolve photothumb test executable: %v", err)
+	if got := applyWorkerMemoryLimit(); got != parentLimit {
+		t.Fatalf("worker effective memory limit = %d bytes, want parent limit %d", got, parentLimit)
 	}
-	command := exec.CommandContext(t.Context(), executable, "-test.run=^TestWorkerMainHonorsParentMemoryLimit$") // #nosec G204 -- invokes this test binary with a fixed selector to isolate process-level GOMEMLIMIT.
-	command.Env = []string{
-		"GOMAXPROCS=1",
-		"GOMEMLIMIT=20MiB",
-		"PHOTOTHUMB_RESOURCE_LIMIT_PROBE=1",
-		"PHOTOTHUMB_MEMORY_LIMIT_PROBE=1",
-	}
-	command.Stdin = bytes.NewReader(testJPEG(t, 1600, 1600, false, false))
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("run worker main with constrained memory limit: %v\n%s", err, output)
-	}
-	const marker = "PHOTOTHUMB_MEMORY_LIMIT_BYTES="
-	markerIndex := strings.LastIndex(string(output), marker)
-	if markerIndex < 0 {
-		t.Fatalf("worker output has no effective-memory-limit marker:\n%s", output)
-	}
-	fields := strings.Fields(string(output[markerIndex+len(marker):]))
-	if len(fields) == 0 {
-		t.Fatalf("worker output has an empty effective-memory-limit marker:\n%s", output)
-	}
-	got, err := strconv.ParseInt(fields[0], 10, 64)
-	if err != nil {
-		t.Fatalf("parse worker effective memory limit %q: %v", fields[0], err)
-	}
-	if want := int64(20 << 20); got != want {
-		t.Fatalf("worker effective memory limit = %d bytes, want %d", got, want)
+}
+
+func TestWorkerMainCapsLargerParentMemoryLimit(t *testing.T) {
+	previousLimit := debug.SetMemoryLimit(workerGoMemoryLimit + 1)
+	defer debug.SetMemoryLimit(previousLimit)
+
+	if got := applyWorkerMemoryLimit(); got != workerGoMemoryLimit {
+		t.Fatalf("worker effective memory limit = %d bytes, want cap %d", got, workerGoMemoryLimit)
 	}
 }
 
