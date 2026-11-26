@@ -131,7 +131,7 @@ func uploadProfilePhotoSmoke(ctx context.Context, api *tg.Client, username, payl
 	return fmt.Errorf("profile photo response omitted user %s", username)
 }
 
-func uploadMediaPhotoSmoke(ctx context.Context, api *tg.Client, payloadPath, startGateFile string) error {
+func uploadMediaPhotoSmoke(ctx context.Context, api *tg.Client, payloadPath, startGateFile string, requireThumbnails bool) error {
 	payload, err := readSmokeMediaPhoto(payloadPath)
 	if err != nil {
 		return err
@@ -159,7 +159,7 @@ func uploadMediaPhotoSmoke(ctx context.Context, api *tg.Client, payloadPath, sta
 	if err != nil {
 		return fmt.Errorf("send uploaded media photo: %w", err)
 	}
-	if err := validateMediaPhotoUpdates(updates); err != nil {
+	if err := validateMediaPhotoUpdates(updates, requireThumbnails); err != nil {
 		return err
 	}
 	return nil
@@ -188,7 +188,7 @@ func uploadPhotoParts(ctx context.Context, api *tg.Client, payload []byte) (int6
 	return fileID, parts, hex.EncodeToString(checksum[:]), nil
 }
 
-func validateMediaPhotoUpdates(updates tg.UpdatesClass) error {
+func validateMediaPhotoUpdates(updates tg.UpdatesClass, requireThumbnails bool) error {
 	var entries []tg.UpdateClass
 	switch result := updates.(type) {
 	case *tg.Updates:
@@ -214,6 +214,9 @@ func validateMediaPhotoUpdates(updates tg.UpdatesClass) error {
 		photo, ok := media.Photo.(*tg.Photo)
 		if !ok || photo.ID <= 0 {
 			return fmt.Errorf("send uploaded media photo returned invalid photo %T", media.Photo)
+		}
+		if !requireThumbnails {
+			return nil
 		}
 		hasStrippedThumbnail := false
 		hasMThumbnail := false

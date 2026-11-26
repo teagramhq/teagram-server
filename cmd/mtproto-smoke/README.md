@@ -34,9 +34,12 @@ parts have uploaded and before the final profile-photo RPC, allowing a test to
 start multiple photo assemblies together.
 
 The optional `--media-photo-upload-file` mode sends an uploaded JPEG as a
-message photo and verifies that the response contains the sent photo with its
-`m` and stripped thumbnails. It also mutates the account's message history and
-blob store, so use it only against a disposable target.
+message photo and verifies that the response contains the sent photo. The
+optional `--media-photo-require-thumbnails` flag also requires valid `m` and
+stripped thumbnails; the Lima memory probe uses it to verify worker processing.
+Small photos can be returned without an `m` thumbnail. The upload mutates the
+account's message history and blob store, so use it only against a disposable
+target.
 `--media-photo-start-gate-file` waits after the upload parts have been sent and
 before `messages.sendMedia`, allowing it to start alongside another photo
 assembly.

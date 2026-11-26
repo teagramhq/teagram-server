@@ -102,6 +102,23 @@ func TestReadSmokeProfilePhotoRejectsOversizedPayload(t *testing.T) {
 	}
 }
 
+func TestValidateMediaPhotoUpdatesAllowsSmallPhotoWithoutMByDefault(t *testing.T) {
+	t.Parallel()
+
+	smallPhoto := &tg.Updates{Updates: []tg.UpdateClass{
+		&tg.UpdateNewMessage{Message: &tg.Message{Media: &tg.MessageMediaPhoto{Photo: &tg.Photo{
+			ID: 1,
+			Sizes: []tg.PhotoSizeClass{
+				&tg.PhotoStrippedSize{Type: "i", Bytes: []byte{1, 40, 40, 0xff}},
+				&tg.PhotoSize{Type: "s", W: 200, H: 200, Size: 10_000},
+			},
+		}}}},
+	}}
+	if err := validateMediaPhotoUpdates(smallPhoto, false); err != nil {
+		t.Fatalf("validate 200x200 media photo without m thumbnail: %v", err)
+	}
+}
+
 func TestValidateMediaPhotoUpdatesRequiresSentPhotoAndThumbnails(t *testing.T) {
 	t.Parallel()
 
@@ -115,7 +132,7 @@ func TestValidateMediaPhotoUpdatesRequiresSentPhotoAndThumbnails(t *testing.T) {
 			},
 		}}}},
 	}}
-	if err := validateMediaPhotoUpdates(valid); err != nil {
+	if err := validateMediaPhotoUpdates(valid, true); err != nil {
 		t.Fatalf("validate media photo updates: %v", err)
 	}
 
@@ -125,7 +142,7 @@ func TestValidateMediaPhotoUpdatesRequiresSentPhotoAndThumbnails(t *testing.T) {
 			Sizes: []tg.PhotoSizeClass{&tg.PhotoSize{Type: "w", W: 1600, H: 1600, Size: 10_000}},
 		}}}},
 	}}
-	if err := validateMediaPhotoUpdates(fallback); err == nil || !strings.Contains(err.Error(), "stripped thumbnail") {
+	if err := validateMediaPhotoUpdates(fallback, true); err == nil || !strings.Contains(err.Error(), "stripped thumbnail") {
 		t.Fatalf("validate original-only fallback error = %v, want missing stripped thumbnail", err)
 	}
 
@@ -138,14 +155,14 @@ func TestValidateMediaPhotoUpdatesRequiresSentPhotoAndThumbnails(t *testing.T) {
 			},
 		}}}},
 	}}
-	if err := validateMediaPhotoUpdates(missingM); err == nil || !strings.Contains(err.Error(), "m thumbnail") {
+	if err := validateMediaPhotoUpdates(missingM, true); err == nil || !strings.Contains(err.Error(), "m thumbnail") {
 		t.Fatalf("validate photo without m thumbnail error = %v, want missing m thumbnail", err)
 	}
 
 	invalid := &tg.Updates{Updates: []tg.UpdateClass{
 		&tg.UpdateNewMessage{Message: &tg.Message{Media: &tg.MessageMediaEmpty{}}},
 	}}
-	if err := validateMediaPhotoUpdates(invalid); err == nil || !strings.Contains(err.Error(), "no photo message") {
+	if err := validateMediaPhotoUpdates(invalid, false); err == nil || !strings.Contains(err.Error(), "no photo message") {
 		t.Fatalf("validate empty media updates error = %v, want missing photo message", err)
 	}
 }

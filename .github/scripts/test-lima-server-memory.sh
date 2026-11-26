@@ -317,6 +317,7 @@ client_a_pid=$!
   --username-file "$RUNNER_TEMP/lima-memory-username-b" \
   --password-file "$password_file" \
   --media-photo-upload-file "$RUNNER_TEMP/lima-memory-photo.jpg" \
+  --media-photo-require-thumbnails \
   --media-photo-start-gate-file "$RUNNER_TEMP/lima-memory-start-gate" \
   >"$RUNNER_TEMP/lima-memory-client-media.log" 2>&1 &
 media_client_pid=$!
