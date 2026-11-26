@@ -27,6 +27,8 @@ MEMORY_SAMPLE_ANON_FILE=
 MEMORY_SAMPLE_FILE_FILE=
 MEMORY_SAMPLE_KERNEL_FILE=
 MEMORY_SAMPLE_PROCESS_FILE=
+MEMORY_SAMPLE_ERROR_FILE=
+MEMORY_SAMPLE_STOP_FILE=
 MEMORY_SAMPLER_PID=
 IMAGE_REVISION=
 IMAGE_ID=
@@ -35,15 +37,20 @@ MEMORY_METRICS_SOURCE=unavailable
 PROBE_PHASE=server_startup
 UPLOAD_OUTCOME=not_started
 
+stop_memory_sampler() {
+  if [[ -n $MEMORY_SAMPLER_PID ]]; then
+    : >"$MEMORY_SAMPLE_STOP_FILE" 2>/dev/null || true
+    wait "$MEMORY_SAMPLER_PID" 2>/dev/null || true
+    MEMORY_SAMPLER_PID=
+  fi
+}
+
 finish() {
   local status=$?
   trap - EXIT
   set +e
 
-  if [[ -n $MEMORY_SAMPLER_PID ]]; then
-    kill "$MEMORY_SAMPLER_PID" 2>/dev/null
-    wait "$MEMORY_SAMPLER_PID" 2>/dev/null
-  fi
+  stop_memory_sampler
 
   local peak_bytes='' events=''
   if [[ -r $MEMORY_PEAK_FILE && -r $MEMORY_EVENTS_FILE ]]; then
@@ -59,6 +66,7 @@ finish() {
   if [[ -n $peak_bytes && -n $events ]]; then
     local peak_mib oom oom_kill max_events stat_sample_peak_bytes sample_current_bytes stat_anon_bytes stat_file_bytes stat_kernel_bytes
     local process_sample_peak_bytes server_process_pid server_process_rss_bytes server_process_anon_bytes photo_worker_process_count photo_worker_processes
+    local process_attribution process_incomplete_pids
     peak_mib=$(awk -v bytes="$peak_bytes" 'BEGIN { printf "%.2f", bytes / 1048576 }')
     oom=$(awk '$1 == "oom" { print $2 }' <<<"$events")
     oom_kill=$(awk '$1 == "oom_kill" { print $2 }' <<<"$events")
@@ -74,6 +82,8 @@ finish() {
     server_process_anon_bytes=unknown
     photo_worker_process_count=unknown
     photo_worker_processes=unknown
+    process_attribution=unknown
+    process_incomplete_pids=unknown
     if [[ -r $MEMORY_SAMPLE_STAT_PEAK_FILE && -r $MEMORY_SAMPLE_CURRENT_FILE &&
       -r $MEMORY_SAMPLE_ANON_FILE && -r $MEMORY_SAMPLE_FILE_FILE && -r $MEMORY_SAMPLE_KERNEL_FILE ]]; then
       stat_sample_peak_bytes=$(<"$MEMORY_SAMPLE_STAT_PEAK_FILE")
@@ -83,22 +93,22 @@ finish() {
       stat_kernel_bytes=$(<"$MEMORY_SAMPLE_KERNEL_FILE")
     fi
     if [[ -r $MEMORY_SAMPLE_PROCESS_FILE ]]; then
-      IFS='|' read -r process_sample_peak_bytes server_process_pid server_process_rss_bytes server_process_anon_bytes photo_worker_process_count photo_worker_processes \
+      IFS='|' read -r process_sample_peak_bytes server_process_pid server_process_rss_bytes server_process_anon_bytes photo_worker_process_count photo_worker_processes process_attribution process_incomplete_pids \
         <"$MEMORY_SAMPLE_PROCESS_FILE"
     fi
-    printf 'LIMA_MEMORY_PROBE result=%s attempt=%s/%s phase=%s uploads=%s image=%s image_id=%s revision=%s gomemlimit=%s websocket_listener=127.0.0.1:2446 websocket_origin=https://web.teagram.io websocket_browser_only=false peak_mib=%s peak_bytes=%s memory_stat_sample_interval_ms=%s memory_stat_sample_peak_bytes=%s memory_stat_sample_current_bytes=%s memory_stat_anon_bytes=%s memory_stat_file_bytes=%s memory_stat_kernel_bytes=%s memory_max_bytes=%s metrics_source=%s max_events=%s oom=%s oom_kill=%s memory_process_sample_peak_bytes=%s server_process_pid=%s server_process_rss_bytes=%s server_process_anon_bytes=%s photo_worker_process_count=%s photo_worker_processes=%s\n' \
+    printf 'LIMA_MEMORY_PROBE result=%s attempt=%s/%s phase=%s uploads=%s image=%s image_id=%s revision=%s gomemlimit=%s websocket_listener=127.0.0.1:2446 websocket_origin=https://web.teagram.io websocket_browser_only=false peak_mib=%s peak_bytes=%s memory_stat_sample_interval_ms=%s memory_stat_sample_peak_bytes=%s memory_stat_sample_current_bytes=%s memory_stat_anon_bytes=%s memory_stat_file_bytes=%s memory_stat_kernel_bytes=%s memory_max_bytes=%s metrics_source=%s max_events=%s oom=%s oom_kill=%s memory_process_sample_peak_bytes=%s memory_process_attribution=%s memory_process_incomplete_pids=%s server_process_pid=%s server_process_rss_bytes=%s server_process_anon_bytes=%s photo_worker_process_count=%s photo_worker_processes=%s\n' \
       "$([[ $status -eq 0 ]] && printf passed || printf failed)" "${LIMA_MEMORY_PROBE_ATTEMPT:-1}" "$LIMA_MEMORY_PROBE_ATTEMPTS" "$PROBE_PHASE" "$UPLOAD_OUTCOME" \
       "$LIMA_SERVICE_IMAGE" "${IMAGE_ID:-unknown}" "$IMAGE_REVISION" "$LIMA_GOMEMLIMIT" "$peak_mib" "$peak_bytes" "$MEMORY_SAMPLE_INTERVAL_MS" "$stat_sample_peak_bytes" "$sample_current_bytes" "$stat_anon_bytes" "$stat_file_bytes" "$stat_kernel_bytes" "$MEMORY_MAX_BYTES" "$MEMORY_METRICS_SOURCE" \
-      "${max_events:-unknown}" "${oom:-unknown}" "${oom_kill:-unknown}" "$process_sample_peak_bytes" "$server_process_pid" "$server_process_rss_bytes" "$server_process_anon_bytes" "$photo_worker_process_count" "$photo_worker_processes"
+      "${max_events:-unknown}" "${oom:-unknown}" "${oom_kill:-unknown}" "$process_sample_peak_bytes" "$process_attribution" "$process_incomplete_pids" "$server_process_pid" "$server_process_rss_bytes" "$server_process_anon_bytes" "$photo_worker_process_count" "$photo_worker_processes"
     if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then
       {
         printf '\n### Lima service memory probe\n\n'
-        printf '| Attempt | Result | Phase | Uploads | Image | Image ID | Revision | GOMEMLIMIT | WebSocket settings | Peak cgroup memory | Stat sample interval | Peak at stat sample | Sampled current | memory.stat anon | memory.stat file | memory.stat kernel | memory.max | Metrics source | max events | OOM events | OOM kills | Process sample peak | Server PID | Server RSS | Server anon | Photo worker count | Photo worker processes (PID:RSS:anon bytes) |\n'
-        printf '| ---: | --- | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |\n'
-        printf '| %s/%s | %s | %s | %s | %s | %s | %s | %s | 127.0.0.1:2446, https://web.teagram.io, browser_only=false | %s MiB (%s bytes) | %s ms | %s bytes | %s bytes | %s bytes | %s bytes | %s bytes | %s bytes | %s | %s | %s | %s | %s bytes | %s | %s bytes | %s bytes | %s | %s |\n' \
+        printf '| Attempt | Result | Phase | Uploads | Image | Image ID | Revision | GOMEMLIMIT | WebSocket settings | Peak cgroup memory | Stat sample interval | Peak at stat sample | Sampled current | memory.stat anon | memory.stat file | memory.stat kernel | memory.max | Metrics source | max events | OOM events | OOM kills | Process sample peak | Process attribution | Incomplete process PIDs | Server PID | Server RSS | Server anon | Photo worker count | Photo worker processes (PID:RSS:anon bytes) |\n'
+        printf '| ---: | --- | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | --- | --- | ---: | --- | ---: | --- | --- |\n'
+        printf '| %s/%s | %s | %s | %s | %s | %s | %s | %s | 127.0.0.1:2446, https://web.teagram.io, browser_only=false | %s MiB (%s bytes) | %s ms | %s bytes | %s bytes | %s bytes | %s bytes | %s bytes | %s bytes | %s | %s | %s | %s | %s bytes | %s | %s | %s | %s bytes | %s | %s bytes | %s | %s |\n' \
           "${LIMA_MEMORY_PROBE_ATTEMPT:-1}" "$LIMA_MEMORY_PROBE_ATTEMPTS" "$([[ $status -eq 0 ]] && printf passed || printf failed)" "$PROBE_PHASE" "$UPLOAD_OUTCOME" \
           "$LIMA_SERVICE_IMAGE" "${IMAGE_ID:-unknown}" "$IMAGE_REVISION" "$LIMA_GOMEMLIMIT" "$peak_mib" "$peak_bytes" "$MEMORY_SAMPLE_INTERVAL_MS" "$stat_sample_peak_bytes" "$sample_current_bytes" "$stat_anon_bytes" "$stat_file_bytes" "$stat_kernel_bytes" "$MEMORY_MAX_BYTES" \
-          "$MEMORY_METRICS_SOURCE" "${max_events:-unknown}" "${oom:-unknown}" "${oom_kill:-unknown}" "$process_sample_peak_bytes" "$server_process_pid" "$server_process_rss_bytes" "$server_process_anon_bytes" "$photo_worker_process_count" "$photo_worker_processes"
+          "$MEMORY_METRICS_SOURCE" "${max_events:-unknown}" "${oom:-unknown}" "${oom_kill:-unknown}" "$process_sample_peak_bytes" "$process_attribution" "$process_incomplete_pids" "$server_process_pid" "$server_process_rss_bytes" "$server_process_anon_bytes" "$photo_worker_process_count" "$photo_worker_processes"
       } >>"$GITHUB_STEP_SUMMARY"
     fi
   fi
@@ -125,7 +135,8 @@ rm -f "$RUNNER_TEMP/lima-memory-start-gate" "$RUNNER_TEMP/lima-memory-photo.jpg"
   "$RUNNER_TEMP/lima-memory-sampled-stat-peak" \
   "$RUNNER_TEMP/lima-memory-sampled-current" "$RUNNER_TEMP/lima-memory-sampled-anon" \
   "$RUNNER_TEMP/lima-memory-sampled-file" "$RUNNER_TEMP/lima-memory-sampled-kernel" \
-  "$RUNNER_TEMP/lima-memory-sampled-processes"
+  "$RUNNER_TEMP/lima-memory-sampled-processes" "$RUNNER_TEMP/lima-memory-sampled-error" \
+  "$RUNNER_TEMP/lima-memory-sampled-stop"
 if ! docker image inspect "$LIMA_SERVICE_IMAGE" >/dev/null 2>&1; then
   printf 'Lima service image is not present in the local daemon: %s\n' "$LIMA_SERVICE_IMAGE" >&2
   exit 1
@@ -197,36 +208,11 @@ run_setup_command() {
 }
 
 sample_memory_cgroup() {
-  local observed_peak=0 peak_bytes current_bytes events stat_snapshot stat_name stat_value process_snapshot
-  local stat_anon_bytes stat_file_bytes stat_kernel_bytes
-  while [[ -r $MEMORY_PEAK_FILE && -r $MEMORY_EVENTS_FILE ]]; do
-    peak_bytes=$(<"$MEMORY_PEAK_FILE") || break
-    events=$(<"$MEMORY_EVENTS_FILE") || break
-    current_bytes=$(<"$MEMORY_CURRENT_FILE") || break
-    if [[ $peak_bytes =~ ^[0-9]+$ && $current_bytes =~ ^[0-9]+$ ]]; then
-      printf '%s\n' "$peak_bytes" >"$MEMORY_SAMPLE_PEAK_FILE" || break
-      printf '%s\n' "$events" >"$MEMORY_SAMPLE_EVENTS_FILE" || break
-      if (( peak_bytes > observed_peak )); then
-        stat_snapshot=$(<"$MEMORY_STAT_FILE") || break
-        stat_anon_bytes=unknown
-        stat_file_bytes=unknown
-        stat_kernel_bytes=unknown
-        while read -r stat_name stat_value; do
-          case $stat_name in
-            anon) stat_anon_bytes=$stat_value ;;
-            file) stat_file_bytes=$stat_value ;;
-            kernel) stat_kernel_bytes=$stat_value ;;
-          esac
-        done <<<"$stat_snapshot"
-        printf '%s\n' "$peak_bytes" >"$MEMORY_SAMPLE_STAT_PEAK_FILE" || break
-        printf '%s\n' "$current_bytes" >"$MEMORY_SAMPLE_CURRENT_FILE" || break
-        printf '%s\n' "$stat_anon_bytes" >"$MEMORY_SAMPLE_ANON_FILE" || break
-        printf '%s\n' "$stat_file_bytes" >"$MEMORY_SAMPLE_FILE_FILE" || break
-        printf '%s\n' "$stat_kernel_bytes" >"$MEMORY_SAMPLE_KERNEL_FILE" || break
-        process_snapshot=$(lima_memory_process_snapshot /proc "$MEMORY_CGROUP_DIR/cgroup.procs" "$container_pid") || break
-        printf '%s|%s\n' "$peak_bytes" "$process_snapshot" >"$MEMORY_SAMPLE_PROCESS_FILE" || break
-        observed_peak=$peak_bytes
-      fi
+  while [[ ! -e $MEMORY_SAMPLE_STOP_FILE && -r $MEMORY_PEAK_FILE && -r $MEMORY_EVENTS_FILE ]]; do
+    if ! lima_memory_record_cgroup_sample "$MEMORY_CGROUP_DIR" /proc "$container_pid" \
+      "$RUNNER_TEMP/lima-memory-sampled"; then
+      printf 'failed to capture a complete cgroup sample\n' >"$MEMORY_SAMPLE_ERROR_FILE"
+      break
     fi
     sleep 0.01
   done
@@ -249,6 +235,8 @@ if [[ $container_pid =~ ^[1-9][0-9]*$ ]]; then
     MEMORY_SAMPLE_FILE_FILE="$RUNNER_TEMP/lima-memory-sampled-file"
     MEMORY_SAMPLE_KERNEL_FILE="$RUNNER_TEMP/lima-memory-sampled-kernel"
     MEMORY_SAMPLE_PROCESS_FILE="$RUNNER_TEMP/lima-memory-sampled-processes"
+    MEMORY_SAMPLE_ERROR_FILE="$RUNNER_TEMP/lima-memory-sampled-error"
+    MEMORY_SAMPLE_STOP_FILE="$RUNNER_TEMP/lima-memory-sampled-stop"
     if [[ -r $MEMORY_PEAK_FILE && -r $MEMORY_EVENTS_FILE && -r $MEMORY_CURRENT_FILE && -r $MEMORY_STAT_FILE && -r $MEMORY_CGROUP_DIR/memory.max && -r $MEMORY_CGROUP_DIR/cgroup.procs ]]; then
       MEMORY_MAX_BYTES=$(<"$MEMORY_CGROUP_DIR/memory.max")
     else
@@ -378,20 +366,27 @@ if [[ $client_a_status -ne 0 || $media_client_status -ne 0 ]]; then
 fi
 UPLOAD_OUTCOME=profile_passed,media_photo_passed
 
+stop_memory_sampler
+if [[ -r $MEMORY_SAMPLE_ERROR_FILE ]]; then
+  cat "$MEMORY_SAMPLE_ERROR_FILE" >&2
+  exit 1
+fi
 if [[ ! -r $MEMORY_SAMPLE_PROCESS_FILE || ! -r $MEMORY_SAMPLE_STAT_PEAK_FILE ]]; then
   echo 'memory probe did not capture process attribution at a sampled peak' >&2
   exit 1
 fi
-IFS='|' read -r process_sample_peak_bytes server_process_pid server_process_rss_bytes server_process_anon_bytes photo_worker_process_count photo_worker_processes \
+IFS='|' read -r process_sample_peak_bytes server_process_pid server_process_rss_bytes server_process_anon_bytes photo_worker_process_count photo_worker_processes process_attribution process_incomplete_pids \
   <"$MEMORY_SAMPLE_PROCESS_FILE"
 stat_sample_peak_bytes=$(<"$MEMORY_SAMPLE_STAT_PEAK_FILE")
 if [[ $process_sample_peak_bytes != "$stat_sample_peak_bytes" ||
+  $process_attribution != complete ||
   ! $server_process_pid =~ ^[1-9][0-9]*$ ||
   ! $server_process_rss_bytes =~ ^[0-9]+$ ||
   ! $server_process_anon_bytes =~ ^[0-9]+$ ||
   ! $photo_worker_process_count =~ ^[0-9]+$ ||
   $photo_worker_processes == unknown ]]; then
-  echo 'memory probe process attribution does not match the sampled peak' >&2
+  printf 'memory probe process attribution is incomplete or does not match the sampled peak: status=%s pids=%s\n' \
+    "${process_attribution:-unknown}" "${process_incomplete_pids:-unknown}" >&2
   exit 1
 fi
 
