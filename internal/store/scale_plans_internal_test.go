@@ -120,6 +120,10 @@ func (p scalePlan) indexRowsReadFrom(table string) float64 {
 	return rows
 }
 
+func (p scalePlan) rowsRead(table string) float64 {
+	return p.rowsReadFrom(table) + p.indexRowsReadFrom(table)
+}
+
 func (p scalePlan) accessSummary() []string {
 	var accesses []string
 	if p.Relation != "" || p.IndexName != "" {
@@ -143,7 +147,7 @@ func TestScalePlanCountsBitmapIndexCandidates(t *testing.T) {
 	if len(plans) != 1 {
 		t.Fatalf("canned plan count = %d, want 1", len(plans))
 	}
-	rows := plans[0].Plan.rowsReadFrom("channel_messages") + plans[0].Plan.indexRowsReadFrom("channel_messages")
+	rows := plans[0].Plan.rowsRead("channel_messages")
 	if rows <= 800 {
 		t.Fatalf("canned pkey bitmap plan read %.0f channel_messages rows, want more than 800", rows)
 	}
@@ -362,7 +366,7 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 		}
 	}
 	for _, table := range []string{"messages", "channel_messages"} {
-		if rows := plans[0].Plan.rowsReadFrom(table) + plans[0].Plan.indexRowsReadFrom(table); rows > 800 {
+		if rows := plans[0].Plan.rowsRead(table); rows > 800 {
 			t.Errorf("historical emoji plan read %.0f %s rows for %d IDs: %s", rows, table, len(planFileIDs), strings.Join(plans[0].Plan.accessSummary(), "; "))
 		}
 	}
