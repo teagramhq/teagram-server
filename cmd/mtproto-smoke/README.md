@@ -20,11 +20,25 @@ guarantee zeroization before process exit.
 The separate `--username-file` and `--password-file` mode signs in to a
 provisioned account and verifies that the authenticated username matches. It
 requires `--discovery-file`, protected regular files with one line each, and is
-used only by the disposable k8s cutover migration test. That test creates a
+used by disposable CI smoke jobs. The k8s cutover migration test creates a
 temporary account in the source database, migrates its account and server
 identity, signs in on the restored target, then repeats sign-in against the
 source after the target is stopped for rollback. The default deployment probe
 does not enable this mode or read credentials.
+
+The optional `--profile-photo-upload-file` mode uploads a JPEG after sign-in
+and verifies that it became the account's selected profile photo. It mutates
+the account gallery and blob store, so use it only against disposable test
+targets. The optional `--profile-photo-start-gate-file` waits after all file
+parts have uploaded and before the final profile-photo RPC, allowing a test to
+start multiple photo assemblies together.
+
+The optional `--media-photo-upload-file` mode sends an uploaded JPEG as a
+message photo and verifies that the response contains the sent photo. It also
+mutates the account's message history and blob store, so use it only against a
+disposable target. `--media-photo-start-gate-file` waits after the upload parts
+have been sent and before `messages.sendMedia`, allowing it to start alongside
+another photo assembly.
 
 The client requests a 60-second temporary key, but that is not a server-side
 expiry guarantee today. The MTProto server's exchange path drops the temporary

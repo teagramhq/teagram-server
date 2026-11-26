@@ -45,6 +45,7 @@ const (
 	dialTimeout           = 10 * time.Second
 	exchangeTimeout       = 15 * time.Second
 	probeTimeout          = 30 * time.Second
+	profilePhotoTimeout   = 2 * time.Minute
 	tempKeyLifetime       = 60
 	maxSmokeCredential    = 1024
 )
@@ -67,6 +68,10 @@ func main() {
 	passwordFile := flag.String("password-file", "", "sign in using the password in this protected file")
 	mediaUploadFile := flag.String("media-upload-file", "", "upload a document after sign-in and save its reference to --media-manifest-file")
 	mediaDownloadFile := flag.String("media-download-file", "", "download the document in --media-manifest-file after sign-in")
+	mediaPhotoUploadFile := flag.String("media-photo-upload-file", "", "send an uploaded JPEG photo after sign-in")
+	mediaPhotoStartGateFile := flag.String("media-photo-start-gate-file", "", "wait for this file before sending the uploaded photo")
+	profilePhotoUploadFile := flag.String("profile-photo-upload-file", "", "upload a profile photo after sign-in")
+	profilePhotoStartGateFile := flag.String("profile-photo-start-gate-file", "", "wait for this file before submitting the profile photo RPC")
 	mediaManifestFile := flag.String("media-manifest-file", "", "read or write the protected media reference used by a cutover smoke")
 	expectedInviteQuota := flag.Int("expect-user-invite-quota", -1, "require help.getAppConfig to advertise the given invite quota")
 	expectedRegistrationMode := flag.String("expect-registration-mode", "", "require help.getAppConfig to advertise the given registration mode")
@@ -101,7 +106,9 @@ func main() {
 		if *websocketOrigin == "" {
 			log.Fatal("--websocket-origin is required with --websocket-endpoint")
 		}
-		if *usernameFile != "" || *passwordFile != "" || *mediaUploadFile != "" || *mediaDownloadFile != "" || *mediaManifestFile != "" {
+		if *usernameFile != "" || *passwordFile != "" || *mediaUploadFile != "" || *mediaDownloadFile != "" ||
+			*mediaPhotoUploadFile != "" || *mediaPhotoStartGateFile != "" || *profilePhotoUploadFile != "" ||
+			*profilePhotoStartGateFile != "" || *mediaManifestFile != "" {
 			log.Fatal("--websocket-endpoint cannot be used with credential or media smoke options")
 		}
 	} else if *websocketOrigin != "" {
@@ -117,42 +124,77 @@ func main() {
 		((*mediaUploadFile != "" || *mediaDownloadFile != "") != (*mediaManifestFile != "")) {
 		log.Fatal("use exactly one of --media-upload-file or --media-download-file with --media-manifest-file")
 	}
+	if *mediaPhotoUploadFile != "" && (*mediaUploadFile != "" || *mediaDownloadFile != "" ||
+		*mediaManifestFile != "" || *profilePhotoUploadFile != "") {
+		log.Fatal("--media-photo-upload-file cannot be combined with other media upload smoke options")
+	}
+	if *profilePhotoUploadFile != "" && (*mediaUploadFile != "" || *mediaDownloadFile != "" || *mediaManifestFile != "") {
+		log.Fatal("--profile-photo-upload-file cannot be combined with media manifest smoke options")
+	}
+	if *mediaPhotoStartGateFile != "" && *mediaPhotoUploadFile == "" {
+		log.Fatal("--media-photo-start-gate-file requires --media-photo-upload-file")
+	}
+	if *profilePhotoStartGateFile != "" && *profilePhotoUploadFile == "" {
+		log.Fatal("--profile-photo-start-gate-file requires --profile-photo-upload-file")
+	}
 	if *usernameFile != "" && (*discoveryFile == "" || quotaExpectationSet || registrationModeExpectationSet) {
 		log.Fatal("credential sign-in requires --discovery-file and cannot use app-config expectations")
 	}
-	if (*mediaUploadFile != "" || *mediaDownloadFile != "") && *usernameFile == "" {
-		log.Fatal("media smoke requires --username-file and --password-file")
+	if (*mediaUploadFile != "" || *mediaDownloadFile != "" || *mediaPhotoUploadFile != "" ||
+		*profilePhotoUploadFile != "") && *usernameFile == "" {
+		log.Fatal("upload smoke requires --username-file and --password-file")
 	}
 	if err := run(*endpoint, *websocketEndpoint, *websocketOrigin, *discoveryURL, *discoveryFile,
 		*expectedInviteQuota, *expectedRegistrationMode,
-		*usernameFile, *passwordFile, *mediaUploadFile, *mediaDownloadFile, *mediaManifestFile); err != nil {
+		*usernameFile, *passwordFile, *mediaUploadFile, *mediaDownloadFile, *mediaPhotoUploadFile,
+		*mediaPhotoStartGateFile, *profilePhotoUploadFile, *profilePhotoStartGateFile, *mediaManifestFile); err != nil {
 		log.Fatal(err)
 	}
 }
 
 func run(endpoint, websocketEndpoint, websocketOrigin, discoveryURL, discoveryFile string,
 	expectedInviteQuota int, expectedRegistrationMode string,
-	usernameFile, passwordFile, mediaUploadFile, mediaDownloadFile, mediaManifestFile string) error {
+	usernameFile, passwordFile, mediaUploadFile, mediaDownloadFile, mediaPhotoUploadFile,
+	mediaPhotoStartGateFile, profilePhotoUploadFile, profilePhotoStartGateFile, mediaManifestFile string) error {
 	if expectedInviteQuota < -1 {
 		return errors.New("expected user invite quota must be non-negative")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	timeout := probeTimeout
+	if profilePhotoUploadFile != "" || mediaPhotoUploadFile != "" {
+		timeout = profilePhotoTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	if usernameFile != "" {
 		var action func(context.Context, *telegram.Client, *tg.User) error
-		if mediaUploadFile != "" {
+		switch {
+		case mediaUploadFile != "":
 			action = func(ctx context.Context, client *telegram.Client, _ *tg.User) error {
 				return uploadMediaSmoke(ctx, client.API(), mediaUploadFile, mediaManifestFile)
 			}
-		} else if mediaDownloadFile != "" {
+		case mediaDownloadFile != "":
 			action = func(ctx context.Context, client *telegram.Client, _ *tg.User) error {
 				return downloadMediaSmoke(ctx, client.API(), mediaManifestFile, mediaDownloadFile)
+			}
+		case mediaPhotoUploadFile != "":
+			action = func(ctx context.Context, client *telegram.Client, _ *tg.User) error {
+				return uploadMediaPhotoSmoke(ctx, client.API(), mediaPhotoUploadFile, mediaPhotoStartGateFile)
+			}
+		case profilePhotoUploadFile != "":
+			action = func(ctx context.Context, client *telegram.Client, user *tg.User) error {
+				return uploadProfilePhotoSmoke(ctx, client.API(), user.Username, profilePhotoUploadFile, profilePhotoStartGateFile)
 			}
 		}
 		if err := probeSignInFile(ctx, endpoint, discoveryFile, usernameFile, passwordFile, action); err != nil {
 			return fmt.Errorf("MTProto username/password sign-in on %s failed: %w", endpoint, err)
 		}
-		if _, err := fmt.Printf("MTProto username/password sign-in passed on %s\n", endpoint); err != nil {
+		result := "MTProto username/password sign-in passed"
+		if mediaPhotoUploadFile != "" {
+			result = "MTProto media photo upload passed"
+		} else if profilePhotoUploadFile != "" {
+			result = "MTProto profile photo upload passed"
+		}
+		if _, err := fmt.Printf("%s on %s\n", result, endpoint); err != nil {
 			return fmt.Errorf("write sign-in smoke result: %w", err)
 		}
 		return nil

@@ -90,6 +90,47 @@ func TestReadSmokeCredentialRequiresProtectedSingleLineFile(t *testing.T) {
 	}
 }
 
+func TestReadSmokeProfilePhotoRejectsOversizedPayload(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "profile.jpg")
+	if err := os.WriteFile(path, make([]byte, maxSmokePhoto+1), 0o600); err != nil {
+		t.Fatalf("write oversized photo fixture: %v", err)
+	}
+	if _, err := readSmokeProfilePhoto(path); err == nil || !strings.Contains(err.Error(), "profile photo fixture size") {
+		t.Fatalf("read oversized profile photo error = %v, want size rejection", err)
+	}
+}
+
+func TestValidateMediaPhotoUpdatesRequiresSentPhoto(t *testing.T) {
+	t.Parallel()
+
+	valid := &tg.Updates{Updates: []tg.UpdateClass{
+		&tg.UpdateNewMessage{Message: &tg.Message{Media: &tg.MessageMediaPhoto{Photo: &tg.Photo{ID: 1}}}},
+	}}
+	if err := validateMediaPhotoUpdates(valid); err != nil {
+		t.Fatalf("validate media photo updates: %v", err)
+	}
+
+	invalid := &tg.Updates{Updates: []tg.UpdateClass{
+		&tg.UpdateNewMessage{Message: &tg.Message{Media: &tg.MessageMediaEmpty{}}},
+	}}
+	if err := validateMediaPhotoUpdates(invalid); err == nil || !strings.Contains(err.Error(), "no photo message") {
+		t.Fatalf("validate empty media updates error = %v, want missing photo message", err)
+	}
+}
+
+func TestWaitForSmokeGateHonorsContext(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	path := filepath.Join(t.TempDir(), "not-ready")
+	if err := waitForSmokeGate(ctx, path); !errors.Is(err, context.Canceled) {
+		t.Fatalf("waitForSmokeGate error = %v, want context cancellation", err)
+	}
+}
+
 func TestProbePerformsObfuscatedAbridgedAuthKeyExchange(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(t.Context(), probeTimeout)

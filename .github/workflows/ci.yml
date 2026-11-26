@@ -1266,6 +1266,7 @@ jobs:
           bash -n deploy/link-edge/test-deploy-main.sh
           bash -n deploy/teagram-demo/test-turnstile-secret-access.sh
           bash -n .github/scripts/perf-postgres.sh .github/scripts/test-perf-postgres.sh
+          bash -n .github/scripts/test-lima-server-memory.sh
           shellcheck \
             deploy/k8s/bootstrap-alpha.sh \
             deploy/k8s/alpha-incus.sh \
@@ -1330,6 +1331,9 @@ jobs:
             deploy/teagram-demo/activity-guards.sh \
             deploy/teagram-demo/test-demo-scheduling.sh \
             deploy/teagram-demo/test-demo-compose.sh \
+            deploy/teagram-demo/lima/check.sh \
+            deploy/teagram-demo/lima/prepare-blobs.sh \
+            deploy/teagram-demo/lima/test-lima-compose.sh \
             deploy/teagram-demo/ops/weekly-wipe.sh \
             deploy/teagram-demo/test-turnstile-signin-rollout.sh \
             deploy/teagram-demo/test-image-release.sh \
@@ -1337,6 +1341,7 @@ jobs:
             deploy/link-edge/deploy-main.sh \
             deploy/link-edge/test-deploy-main.sh \
             deploy/teagram-demo/test-turnstile-secret-access.sh \
+            .github/scripts/test-lima-server-memory.sh \
             deploy/teagram/test-media-encryption-ops.sh \
             deploy/teagram/test-media-encryption-pg18.sh \
             .github/scripts/perf-postgres.sh \
@@ -3430,6 +3435,19 @@ jobs:
       - name: Stop container
         if: always()
         run: docker rm -f teagramd
+
+      - name: Measure the built Lima image with concurrent photo uploads and WebSocket
+        env:
+          LIMA_SERVICE_IMAGE: teagramd:ci
+        run: |
+          probe_failed=0
+          for attempt in 1 2 3; do
+            echo "Lima service memory probe attempt $attempt/3"
+            if ! LIMA_MEMORY_PROBE_ATTEMPT="$attempt" .github/scripts/test-lima-server-memory.sh; then
+              probe_failed=1
+            fi
+          done
+          exit "$probe_failed"
 
   # Brings the compose stack up the way a developer does, then restarts it to
   # prove the named volumes carry the state that matters: database rows, the

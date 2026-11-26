@@ -2481,4 +2481,5 @@ python3 "$SCRIPT_DIR/test_update_turnstile_signin.py"
 bash "$SCRIPT_DIR/test-turnstile-signin-rollout.sh"
 python3 "$SCRIPT_DIR/test-probe-tailnet-isolation.py"
 "$SCRIPT_DIR/test-demo-scheduling.sh"
+"$SCRIPT_DIR/lima/test-lima-compose.sh"
 printf 'demo Compose contract holds\n'
