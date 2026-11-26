@@ -19,11 +19,11 @@ TEST_REPO="$TMP_ROOT/repo"
 TEST_SCRIPT_DIR="$TEST_REPO/deploy/teagram-demo"
 TEST_INIT="$TEST_SCRIPT_DIR/init-demo.sh"
 MOCK_BIN="$TMP_ROOT/mock-bin"
-CONFIG_TEMPLATE="$TMP_ROOT/compose.json"
 VOLUME_NAME=teagram-demo_tgkey
 POSTGRES_PASSWORD_FIXTURE=$(printf 'b%.0s' {1..64})
 AUTHKEY_FIXTURE=$(printf 'c%.0s' {1..64})
 IMAGE_DIGEST=$(printf 'a%.0s' {1..64})
+REAL_DOCKER=$(command -v docker)
 
 mkdir -p "$TEST_SCRIPT_DIR/lima" "$MOCK_BIN"
 cp "$SCRIPT_DIR/init-demo.sh" "$TEST_INIT"
@@ -36,26 +36,6 @@ cp "$SCRIPT_DIR/nginx-config/nginx.conf" "$TEST_SCRIPT_DIR/nginx-config/nginx.co
 cp "$SCRIPT_DIR/lima/compose.yaml" "$TEST_SCRIPT_DIR/lima/compose.yaml"
 chmod 0755 "$TEST_INIT"
 
-cat > "$CONFIG_TEMPLATE" <<'JSON'
-{
-  "name": "teagram-demo",
-  "volumes": {"tgkey": {"name": "teagram-demo_tgkey", "driver": "local"}},
-  "services": {
-    "postgres": {"image": "postgres:18-alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
-    "teagramd": {
-      "image": "teagramd@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      "environment": {"TG_RSA_KEY_FINGERPRINT": "__FINGERPRINT__"},
-      "volumes": [{"type": "volume", "source": "teagram-demo_tgkey", "target": "/var/lib/teagramd"}]
-    },
-    "teagramd-next": {
-      "image": "teagramd@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      "environment": {"TG_RSA_KEY_FINGERPRINT": "__FINGERPRINT__"},
-      "volumes": [{"type": "volume", "source": "teagram-demo_tgkey", "target": "/var/lib/teagramd"}]
-    }
-  }
-}
-JSON
-
 cat > "$MOCK_BIN/docker" <<'BASH'
 #!/usr/bin/env bash
 set -Eeuo pipefail
@@ -67,12 +47,7 @@ volume_json="$TEAGRAM_TEST_VOLUME_ROOT/volume.json"
 case "${1:-}" in
   compose)
     if [[ " $* " == *" config "* ]]; then
-      sed "s/__FINGERPRINT__/$TG_RSA_KEY_FINGERPRINT/g" "$TEAGRAM_TEST_CONFIG_TEMPLATE"
-      exit 0
-    fi
-    if [[ " $* " == *" client-config "* ]]; then
-      printf '{"mtproto":{"rsa_spki":"%s"}}\n' "$TEAGRAM_TEST_CLIENT_SPKI"
-      exit 0
+      exec "$TEAGRAM_TEST_REAL_DOCKER" "$@"
     fi
     exit 0
     ;;
@@ -91,6 +66,16 @@ case "${1:-}" in
         fi
         ;;
       inspect)
+        inspect_count=0
+        if [[ -f "$TEAGRAM_TEST_INSPECT_COUNT" ]]; then
+          inspect_count=$(<"$TEAGRAM_TEST_INSPECT_COUNT")
+        fi
+        inspect_count=$((inspect_count + 1))
+        printf '%s\n' "$inspect_count" > "$TEAGRAM_TEST_INSPECT_COUNT"
+        if [[ "${TEAGRAM_TEST_FAIL_CLEANUP_INSPECT:-0}" == once && "$inspect_count" == 2 ]] ||
+          [[ "${TEAGRAM_TEST_FAIL_CLEANUP_INSPECT:-0}" == always && "$inspect_count" -ge 2 ]]; then
+          exit 1
+        fi
         [[ -f "$volume_json" ]] || exit 1
         cat "$volume_json"
         ;;
@@ -130,12 +115,24 @@ case "${1:-}" in
   run)
     shift
     entrypoint=
+    network=
+    read_only=0
+    env_file=
     mounts=()
     while (($#)); do
       case "$1" in
         --pull=*) shift ;;
-        --rm|--read-only) shift ;;
-        --network|--user|--cap-drop|--cap-add|--security-opt)
+        --rm) shift ;;
+        --read-only) read_only=1; shift ;;
+        --network)
+          network=$2
+          shift 2
+          ;;
+        --env-file)
+          env_file=$2
+          shift 2
+          ;;
+        --user|--cap-drop|--cap-add|--security-opt)
           shift 2
           ;;
         --mount)
@@ -153,32 +150,41 @@ case "${1:-}" in
           ;;
       esac
     done
-    [[ "$entrypoint" == /bin/sh && "${1:-}" == -ec && "$#" -ge 2 ]]
-    script=$2
-    source_key=
-    has_volume_mount=0
-    for mount in "${mounts[@]}"; do
-      case "$mount" in
-        "type=volume,src=$TEAGRAM_TEST_VOLUME_NAME,dst=/key"|"type=volume,src=$TEAGRAM_TEST_VOLUME_NAME,dst=/key,readonly")
-          has_volume_mount=1
-          ;;
-        type=bind,src=*,dst=/tmp/server_key.pem,readonly)
-          source_key=${mount#type=bind,src=}
-          source_key=${source_key%,dst=/tmp/server_key.pem,readonly}
-          ;;
-      esac
-    done
-    [[ "$has_volume_mount" == 1 ]]
-    if [[ -n "$source_key" ]]; then
-      [[ -f "$source_key" ]]
-      rewritten_script=$(printf '%s\n' "$script" | sed \
-        -e "s|/tmp/server_key\\.pem|$source_key|g" \
-        -e "s|/key|$volume_dir|g")
+    if [[ "$entrypoint" == /bin/sh && "${1:-}" == -ec && "$#" -ge 2 ]]; then
+      script=$2
+      source_key=
+      has_volume_mount=0
+      for mount in "${mounts[@]}"; do
+        case "$mount" in
+          "type=volume,src=$TEAGRAM_TEST_VOLUME_NAME,dst=/key"|"type=volume,src=$TEAGRAM_TEST_VOLUME_NAME,dst=/key,readonly")
+            has_volume_mount=1
+            ;;
+          type=bind,src=*,dst=/tmp/server_key.pem,readonly)
+            source_key=${mount#type=bind,src=}
+            source_key=${source_key%,dst=/tmp/server_key.pem,readonly}
+            ;;
+        esac
+      done
+      [[ "$has_volume_mount" == 1 && "$network" == none && "$read_only" == 1 ]]
+      if [[ -n "$source_key" ]]; then
+        [[ -f "$source_key" ]]
+        rewritten_script=$(printf '%s\n' "$script" | sed \
+          -e "s|/tmp/server_key\\.pem|$source_key|g" \
+          -e "s|/key|$volume_dir|g")
+      else
+        rewritten_script=$(printf '%s\n' "$script" | sed \
+          -e "s|/key|$volume_dir|g")
+      fi
+      sh -ec "$rewritten_script"
     else
-      rewritten_script=$(printf '%s\n' "$script" | sed \
-        -e "s|/key|$volume_dir|g")
+      [[ "$entrypoint" == '' && "${1:-}" == client-config && "$network" == none &&
+        "$read_only" == 1 && -f "$env_file" ]]
+      grep -Fxq 'TG_ADVERTISE_DEMO_GUEST_SIGN_UP=false' "$env_file"
+      grep -Fxq 'TG_TURNSTILE_SECRET_KEY=fixture-verification-secret' "$env_file"
+      ! grep -Eq '^(TG_AUTHKEY_ENC_KEY|TG_POSTGRES_DSN)=' "$env_file"
+      [[ " ${mounts[*]} " == *"type=volume,src=$TEAGRAM_TEST_VOLUME_NAME,dst=/var/lib/teagramd,readonly"* ]]
+      printf '{"mtproto":{"rsa_spki":"%s"}}\n' "$TEAGRAM_TEST_CLIENT_SPKI"
     fi
-    sh -ec "$rewritten_script"
     ;;
   *) exit 1 ;;
 esac
@@ -289,7 +295,8 @@ new_case() {
   CASE_VOLUME_ROOT="$CASE_ROOT/volumes"
   CASE_LOG="$CASE_ROOT/docker.log"
   CASE_OUTPUT="$CASE_ROOT/output.log"
-  mkdir -p "$CASE_ROOT" "$CASE_VOLUME_ROOT"
+  CASE_INSPECT_COUNT="$CASE_ROOT/inspect-count"
+  mkdir -p "$CASE_ROOT" "$CASE_VOLUME_ROOT" "$CASE_ROOT/secrets"
   cat > "$CASE_ENV" <<EOF
 POSTGRES_PASSWORD=$POSTGRES_PASSWORD_FIXTURE
 TG_PUBLIC_LINK_PREFIX=https://demo.teagram.io/
@@ -298,6 +305,11 @@ TEAGRAM_DEMO_TURNSTILE_SITE_KEY=fixture-site-key
 TEAGRAM_DEMO_IMAGE_REF=ghcr.io/teagramhq/teagram-server-demo@sha256:$IMAGE_DIGEST
 EOF
   chmod 0600 "$CASE_ENV"
+  printf '%s\n' 'TUNNEL_TOKEN=fixture-tunnel-token' > "$CASE_ROOT/secrets/cloudflared.env"
+  printf '%s\n' 'fixture-turnstile-secret' > "$CASE_ROOT/secrets/turnstile-secret-key"
+  printf '%s\n' 'fixture-qa-bypass-token-0123456789abcdef' > "$CASE_ROOT/secrets/turnstile-qa-bypass-token"
+  chmod 0600 "$CASE_ROOT/secrets/cloudflared.env" \
+    "$CASE_ROOT/secrets/turnstile-secret-key" "$CASE_ROOT/secrets/turnstile-qa-bypass-token"
   : > "$CASE_LOG"
 }
 
@@ -309,10 +321,12 @@ run_import() {
     TEAGRAM_TEST_DOCKER_LOG="$CASE_LOG" \
     TEAGRAM_TEST_VOLUME_ROOT="$CASE_VOLUME_ROOT" \
     TEAGRAM_TEST_VOLUME_NAME="$VOLUME_NAME" \
-    TEAGRAM_TEST_CONFIG_TEMPLATE="$CONFIG_TEMPLATE" \
+    TEAGRAM_TEST_REAL_DOCKER="$REAL_DOCKER" \
+    TEAGRAM_TEST_INSPECT_COUNT="$CASE_INSPECT_COUNT" \
     TEAGRAM_TEST_CLIENT_SPKI="$client_spki" \
     TEAGRAM_TEST_SEED_STRAY="${TEAGRAM_TEST_SEED_STRAY:-0}" \
     TEAGRAM_TEST_FORCE_LN_COLLISION="${TEAGRAM_TEST_FORCE_LN_COLLISION:-0}" \
+    TEAGRAM_TEST_FAIL_CLEANUP_INSPECT="${TEAGRAM_TEST_FAIL_CLEANUP_INSPECT:-0}" \
     "$TEST_INIT" --import-key "$key_path" --expected-rsa-spki "$expected_spki" \
     >"$CASE_OUTPUT" 2>&1
 }
@@ -351,6 +365,9 @@ cmp -s "$TMP_ROOT/server_key.pem" "$CASE_VOLUME_ROOT/$VOLUME_NAME/server_key.pem
 grep -Fxq "TG_RSA_KEY_FINGERPRINT=$EXPECTED_FINGERPRINT" "$CASE_ENV"
 grep -Fq -- '--network none' "$CASE_LOG"
 grep -Fq 'dst=/tmp/server_key.pem,readonly' "$CASE_LOG"
+grep -Fq 'dst=/var/lib/teagramd,readonly' "$CASE_LOG"
+grep -Fq -- '--env-file ' "$CASE_LOG"
+grep -Fq 'client-config' "$CASE_LOG"
 assert_no_secret_output
 
 new_case stray-volume-entry
@@ -530,13 +547,22 @@ grep -Fxq "TG_RSA_KEY_FINGERPRINT=$EXPECTED_FINGERPRINT" "$CASE_ENV"
 assert_no_secret_output
 
 new_case postcheck-failure
-if run_import "$TMP_ROOT/server_key.pem" "$VALID_SPKI" 'different-public-identity'; then
+if TEAGRAM_TEST_FAIL_CLEANUP_INSPECT=once run_import "$TMP_ROOT/server_key.pem" "$VALID_SPKI" 'different-public-identity'; then
   printf 'identity import accepted a client-config SPKI mismatch\n' >&2
   exit 1
 fi
 [[ ! -e "$CASE_VOLUME_ROOT/$VOLUME_NAME" ]]
 assert_not_contains "TG_RSA_KEY_FINGERPRINT=$EXPECTED_FINGERPRINT" "$CASE_ENV"
 grep -Fq 'volume rm teagram-demo_tgkey' "$CASE_LOG"
+assert_no_secret_output
+
+new_case rollback-inspect-unverified
+if TEAGRAM_TEST_FAIL_CLEANUP_INSPECT=always run_import "$TMP_ROOT/server_key.pem" "$VALID_SPKI" 'different-public-identity'; then
+  printf 'identity import accepted a client-config SPKI mismatch with unverified rollback\n' >&2
+  exit 1
+fi
+[[ -e "$CASE_VOLUME_ROOT/$VOLUME_NAME" ]]
+grep -Fq 'rollback could not verify removal of the key volume' "$CASE_OUTPUT"
 assert_no_secret_output
 
 new_case no-import

@@ -94,39 +94,78 @@ lima_compose() {
 }
 
 validate_import_key() {
-  local key_path=$1 prefix=$2 key_copy key_metadata key_uid key_mode key_size key_mode_value
+  local key_path=$1 prefix=$2 key_copy key_copy_metadata key_copy_uid key_copy_mode key_copy_size
   key_copy="$TMP_DIR/$prefix-server_key.pem"
-  [[ -f "$key_path" && ! -L "$key_path" && -r "$key_path" ]] || {
-    demo_fail 'RSA import key is missing or unreadable'
-    return 1
-  }
-  if ! key_metadata=$(stat -c '%u:%a:%s' -- "$key_path" 2>/dev/null); then
-    demo_fail 'RSA import key metadata could not be read'
+  if ! python3 - "$key_path" "$key_copy" \
+    >"$TMP_DIR/$prefix-copy.stdout" 2>"$TMP_DIR/$prefix-copy.stderr" <<'PY'
+import os
+import stat
+import sys
+
+
+source_path, destination_path = sys.argv[1:]
+maximum_size = 16384
+source_fd = os.open(
+    source_path,
+    os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+)
+destination_fd = -1
+try:
+    before = os.fstat(source_fd)
+    mode = stat.S_IMODE(before.st_mode)
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_uid != 0
+        or before.st_size <= 0
+        or before.st_size > maximum_size
+        or not mode & 0o400
+        or mode & 0o077
+        or mode & 0o111
+    ):
+        raise ValueError("unsafe RSA import key")
+
+    destination_fd = os.open(
+        destination_path,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
+        0o600,
+    )
+    os.fchown(destination_fd, 0, 0)
+    os.fchmod(destination_fd, 0o600)
+    remaining = before.st_size
+    while remaining:
+        block = os.read(source_fd, min(4096, remaining))
+        if not block:
+            raise ValueError("RSA import key changed while being copied")
+        view = memoryview(block)
+        while view:
+            written = os.write(destination_fd, view)
+            view = view[written:]
+        remaining -= len(block)
+    if os.read(source_fd, 1):
+        raise ValueError("RSA import key grew while being copied")
+
+    after = os.fstat(source_fd)
+    before_state = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+    after_state = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+    if before_state != after_state:
+        raise ValueError("RSA import key changed while being copied")
+    os.fsync(destination_fd)
+finally:
+    os.close(source_fd)
+    if destination_fd >= 0:
+        os.close(destination_fd)
+PY
+  then
+    demo_fail 'RSA import key is missing or unsafe'
     return 1
   fi
-  IFS=: read -r key_uid key_mode key_size <<< "$key_metadata"
-  [[ "$key_uid" == 0 && "$key_mode" =~ ^[0-7]{3,4}$ && "$key_size" =~ ^[0-9]+$ ]] || {
-    demo_fail 'RSA import key ownership or mode is unsafe'
-    return 1
-  }
-  key_mode_value=$((8#$key_mode))
-  (( key_size > 0 && key_size <= 16384 && (key_mode_value & 0400) != 0 &&
-    (key_mode_value & 0044) == 0 && (key_mode_value & 0111) == 0 )) || {
-    demo_fail 'RSA import key ownership, mode, or size is unsafe'
-    return 1
-  }
-  if ! install -m 0600 -- "$key_path" "$key_copy" \
-    2>"$TMP_DIR/install.stderr"; then
-    demo_fail 'RSA import key could not be copied safely'
-    return 1
-  fi
-  if ! key_metadata=$(stat -c '%u:%a:%s' -- "$key_copy" 2>/dev/null); then
+  if ! key_copy_metadata=$(stat -c '%u:%a:%s' -- "$key_copy" 2>/dev/null); then
     demo_fail 'RSA import key copy metadata could not be read'
     return 1
   fi
-  IFS=: read -r key_uid key_mode key_size <<< "$key_metadata"
-  if [[ "$key_uid" != 0 || "$key_mode" != 600 || ! "$key_size" =~ ^[0-9]+$ ]] ||
-    (( key_size <= 0 || key_size > 16384 )); then
+  IFS=: read -r key_copy_uid key_copy_mode key_copy_size <<< "$key_copy_metadata"
+  if [[ "$key_copy_uid" != 0 || "$key_copy_mode" != 600 || ! "$key_copy_size" =~ ^[0-9]+$ ]] ||
+    (( key_copy_size <= 0 || key_copy_size > 16384 )); then
     demo_fail 'RSA import key copy could not be secured'
     return 1
   fi
@@ -414,8 +453,8 @@ run_lima_identity_import() {
     and .services.teagramd.image == .services["teagramd-next"].image
     and (.services.teagramd.image | test("@sha256:[0-9a-f]{64}$"))
     and (.services.postgres.image | test("@sha256:[0-9a-f]{64}$"))
-    and ([.services.teagramd.volumes[] | select(.type == "volume" and .target == "/var/lib/teagramd" and .source == "teagram-demo_tgkey")] | length == 1)
-    and ([.services["teagramd-next"].volumes[] | select(.type == "volume" and .target == "/var/lib/teagramd" and .source == "teagram-demo_tgkey")] | length == 1)
+    and ([.services.teagramd.volumes[] | select(.type == "volume" and .target == "/var/lib/teagramd" and .source == "tgkey")] | length == 1)
+    and ([.services["teagramd-next"].volumes[] | select(.type == "volume" and .target == "/var/lib/teagramd" and .source == "tgkey")] | length == 1)
   ' "$TMP_DIR/lima-compose.json" >/dev/null || {
     demo_fail 'Compose configuration is not the pinned Lima identity variant'
     return 1
@@ -432,7 +471,6 @@ run_lima_identity_import() {
     demo_fail 'Lima server image could not be resolved'
     return 1
   }
-
   demo_lock_init || return 1
   if ! docker volume ls --quiet --filter "name=$IMPORT_KEY_VOLUME" \
     >"$TMP_DIR/key-volume-list" 2>"$TMP_DIR/key-volume-list.stderr"; then
@@ -470,8 +508,29 @@ run_lima_identity_import() {
     publish_imported_volume_key || return 1
   fi
 
-  if ! lima_compose --profile candidate run --pull never --rm --no-deps --network none \
-    -e TG_ADVERTISE_DEMO_GUEST_SIGN_UP=false teagramd client-config \
+  if ! jq -er '
+    .services.teagramd.environment
+    | with_entries(select(.key as $key |
+        ["TG_RSA_KEY_PATH", "TG_ADVERTISE_ADDR", "TG_WEBSOCKET_LISTEN_ADDR",
+         "TG_WEBSOCKET_BROWSER_ONLY", "TG_TURNSTILE_SIGNIN_ENABLED",
+         "TG_TURNSTILE_TEST_MODE", "TG_TURNSTILE_HOSTNAMES"] | index($key)))
+    | .TG_ADVERTISE_DEMO_GUEST_SIGN_UP = "false"
+    | .TG_TURNSTILE_SITE_KEY = "fixture-site-key"
+    | .TG_TURNSTILE_SECRET_KEY = "fixture-verification-secret"
+    | .TG_TURNSTILE_SECRET_KEY_FILE = ""
+    | .TG_TURNSTILE_QA_BYPASS_TOKEN_FILE = ""
+    | to_entries[] | "\(.key)=\(.value)"
+  ' \
+    "$TMP_DIR/lima-compose.json" >"$TMP_DIR/client-config.env" 2>"$TMP_DIR/client-config-env.stderr"; then
+    demo_fail 'Lima client-config environment could not be prepared'
+    return 1
+  fi
+  chmod 0600 "$TMP_DIR/client-config.env"
+  if ! docker run --pull=never --rm --network none --read-only \
+    --user 65532:65532 --cap-drop ALL --security-opt no-new-privileges \
+    --env-file "$TMP_DIR/client-config.env" \
+    --mount "type=volume,src=$IMPORT_KEY_VOLUME,dst=/var/lib/teagramd,readonly" \
+    "$LIMA_SERVER_IMAGE" client-config \
     >"$TMP_DIR/client-config.json" 2>"$TMP_DIR/client-config.stderr"; then
     demo_fail 'Lima client-config verification failed'
     return 1
@@ -501,13 +560,36 @@ cleanup() {
   fi
   if [[ -n "$TMP_DIR" && -d "$TMP_DIR" ]]; then
     if (( rc != 0 && import_created_volume == 1 )) && [[ -n "$import_key_volume" && -n "$import_volume_token" ]]; then
-      if docker volume inspect "$import_key_volume" >"$TMP_DIR/cleanup-volume.json" 2>"$TMP_DIR/cleanup-volume.stderr" &&
-        jq -e --arg token "$import_volume_token" 'length == 1 and .[0].Labels["com.teagram.demo.identity-import-run"] == $token' \
-          "$TMP_DIR/cleanup-volume.json" >/dev/null; then
-        if ! docker volume rm "$import_key_volume" >/dev/null 2>"$TMP_DIR/cleanup-volume-rm.stderr"; then
-          printf 'teagram-demo: failed to remove the key volume created by this import\n' >&2
-          (( rc != 0 )) || rc=1
+      local cleanup_attempt cleanup_verified=0
+      for cleanup_attempt in 1 2 3; do
+        if docker volume inspect "$import_key_volume" >"$TMP_DIR/cleanup-volume.json" \
+          2>"$TMP_DIR/cleanup-volume.stderr"; then
+          if ! jq -e --arg name "$import_key_volume" --arg token "$import_volume_token" '
+            length == 1
+            and .[0].Name == $name
+            and .[0].Driver == "local"
+            and ((.[0].Options // {}) | length == 0)
+            and .[0].Labels["com.teagram.demo.identity-import-run"] == $token
+          ' "$TMP_DIR/cleanup-volume.json" >/dev/null; then
+            printf 'teagram-demo: rollback refused to remove a key volume whose ownership changed\n' >&2
+            break
+          fi
+          docker volume rm "$import_key_volume" >"$TMP_DIR/cleanup-volume-rm.stdout" \
+            2>"$TMP_DIR/cleanup-volume-rm.stderr" || true
         fi
+        if docker volume ls --quiet --filter "name=$import_key_volume" \
+          >"$TMP_DIR/cleanup-volume-list" 2>"$TMP_DIR/cleanup-volume-list.stderr" &&
+          ! grep -Fxq "$import_key_volume" "$TMP_DIR/cleanup-volume-list"; then
+          cleanup_verified=1
+          break
+        fi
+        if (( cleanup_attempt < 3 )); then
+          sleep 1
+        fi
+      done
+      if (( cleanup_verified == 0 )); then
+        printf 'teagram-demo: rollback could not verify removal of the key volume created by this import\n' >&2
+        rc=1
       fi
     fi
     if ! rm -rf -- "$TMP_DIR"; then
@@ -556,13 +638,19 @@ INITIAL_INVENTORY="$TMP_DIR/initial-inventory.json"
 MODE_HELPER="$DEMO_SCRIPT_DIR/blob-mode/blob-mode-state.py"
 
 demo_render_config "$TARGET_RENDER"
+demo_compose --profile maintenance --profile bootstrap config --format json \
+  > "$TMP_DIR/charlie-identity-render.json"
 jq -e '
   .services.teagramd != null
-  and .services["teagramd-maintenance"] != null
-  and .services["teagramd-bootstrap"] != null
   and .services.teagramd.environment.TG_RSA_KEY_PATH == "/var/lib/teagramd/server_key.pem"
-' "$TARGET_RENDER" >/dev/null 2>"$TMP_DIR/charlie-variant.stderr" ||
-  demo_fail 'identity bootstrap is only enabled for the Charlie Compose variant'
+  and .services["teagramd-maintenance"].image == .services.teagramd.image
+  and .services["teagramd-maintenance"].environment.TG_RSA_KEY_PATH == "/var/lib/teagramd/server_key.pem"
+  and .services["teagramd-bootstrap"].image == .services.teagramd.image
+  and .services["teagramd-bootstrap"].environment.TG_RSA_KEY_PATH == "/var/lib/teagramd/server_key.pem"
+  and ([.services["teagramd-maintenance"].volumes[] | select(.type == "volume" and .source == "tgkey" and .target == "/var/lib/teagramd")] | length == 1)
+  and ([.services["teagramd-bootstrap"].volumes[] | select(.type == "volume" and .source == "tgkey" and .target == "/var/lib/teagramd")] | length == 1)
+' "$TMP_DIR/charlie-identity-render.json" >/dev/null 2>"$TMP_DIR/charlie-variant.stderr" ||
+  demo_fail 'identity bootstrap is not enabled by the Charlie Compose model'
 demo_check_blob_mount "$TARGET_RENDER"
 BLOB_PATH=$(jq -er '.volumes.tgblobs.driver_opts.device' "$TARGET_RENDER")
 demo_seed_compose config --format json > "$INITIAL_RENDER"

@@ -997,10 +997,19 @@ jq -e '
 env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
   -u TG_TURNSTILE_SIGNIN_ENABLED \
   -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
-  "${compose[@]}" --profile bootstrap config --format json > "$TMP_DIR/bootstrap.json"
+  "${compose[@]}" --profile maintenance --profile bootstrap config --format json > "$TMP_DIR/bootstrap.json"
 jq -e '
   (.services["teagramd-bootstrap"].volumes | map(.target) | sort) == ["/var/lib/teagramd", "/var/lib/teagramd-blobs"]
   and .services["teagramd-bootstrap"].environment.TG_BLOB_DIR == "/var/lib/teagramd-blobs"
+  and .services.teagramd.environment.TG_RSA_KEY_PATH == "/var/lib/teagramd/server_key.pem"
+  and .services["teagramd-maintenance"].environment.TG_RSA_KEY_PATH == "/var/lib/teagramd/server_key.pem"
+  and .services["teagramd-bootstrap"].environment.TG_RSA_KEY_PATH == "/var/lib/teagramd/server_key.pem"
+  and .services["teagramd-maintenance"].image == .services.teagramd.image
+  and .services["teagramd-bootstrap"].image == .services.teagramd.image
+  and ([.services["teagramd-maintenance"].volumes[] | select(.type == "volume" and .source == "tgkey" and .target == "/var/lib/teagramd")] | length == 1)
+  and ([.services["teagramd-bootstrap"].volumes[] | select(.type == "volume" and .source == "tgkey" and .target == "/var/lib/teagramd")] | length == 1)
+  and (.services["teagramd-maintenance"].profiles | index("maintenance")) != null
+  and (.services["teagramd-bootstrap"].profiles | index("bootstrap")) != null
   and .services["teagramd-bootstrap"].environment.HTTP_PROXY == ""
   and .services["teagramd-bootstrap"].environment.HTTPS_PROXY == ""
   and (.services["teagramd-bootstrap"].depends_on | keys) == ["migrate"]
@@ -1400,6 +1409,12 @@ assert_text_order(init, "init-demo.sh image release", [
     'IMAGE_REF=$(demo_pull_image_by_sha "$SHA" "$IMAGE_DIGEST")',
     'export TEAGRAM_DEMO_IMAGE_REF="$IMAGE_REF"',
     'demo_write_active_release "$ACTIVE_SERVER" "$IMAGE_REF"',
+    'demo_compose run --rm --no-deps teagramd-maintenance bootstrap-identity',
+])
+assert_text_order(init, "init-demo.sh Charlie identity bootstrap path", [
+    'demo_compose --profile maintenance --profile bootstrap config --format json',
+    '.services["teagramd-maintenance"].image == .services.teagramd.image',
+    '.services["teagramd-bootstrap"].image == .services.teagramd.image',
     'demo_compose run --rm --no-deps teagramd-maintenance bootstrap-identity',
 ])
 if '[[ "$#" -eq 1 && "${1:-}" =~ ^sha256:[0-9a-f]{64}$ ]]' not in init:

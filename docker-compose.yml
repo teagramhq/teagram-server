@@ -60,6 +60,7 @@ x-demo-server-environment: &demo-server-environment
   TG_UPLOADS_DISABLED: "false"
   TG_RATE_LIMIT_UPLOAD_BYTES: ${TG_RATE_LIMIT_UPLOAD_BYTES:-20971520}
   TG_RSA_KEY_FINGERPRINT: ${TG_RSA_KEY_FINGERPRINT:-}
+  TG_RSA_KEY_PATH: /var/lib/teagramd/server_key.pem
   TG_AUTHKEY_ENC_KEY: ${TG_AUTHKEY_ENC_KEY:-}
   TG_AUTHKEY_ENC_KEY_FILE: ${TG_AUTHKEY_ENC_KEY_FILE:-/var/lib/teagramd/enc_key.hex}
   HTTP_PROXY: http://turnstile-egress:3128
