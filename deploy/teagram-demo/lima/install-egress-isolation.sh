@@ -42,12 +42,10 @@ require_root() {
 render_rules() {
   local family=$1
   shift
-  local source_list destination_list subnet cidr
+  local subnet cidr
   local -a blocked_cidrs
 
   (( $# > 0 )) || fail 'at least one source subnet is required'
-  source_list=$(IFS=,; printf '%s' "$*")
-  destination_list=$source_list
 
   case "$family" in
     ipv4)
@@ -59,8 +57,12 @@ render_rules() {
     *) fail "unknown address family: $family" ;;
   esac
 
-  printf '%s\n' "-A DOCKER-USER -s $source_list -j $IPTABLES_CHAIN"
-  printf '%s\n' "-A $IPTABLES_CHAIN -d $destination_list -j RETURN"
+  for subnet in "$@"; do
+    printf '%s\n' "-A DOCKER-USER -s $subnet -j $IPTABLES_CHAIN"
+  done
+  for subnet in "$@"; do
+    printf '%s\n' "-A $IPTABLES_CHAIN -d $subnet -j RETURN"
+  done
   for cidr in "${blocked_cidrs[@]}"; do
     printf '%s\n' "-A $IPTABLES_CHAIN -d $cidr -j DROP"
   done
@@ -143,8 +145,7 @@ apply_family() {
   local binary=$1 family=$2
   shift 2
   local -a subnets=("$@")
-  local line source_list
-  source_list=$(IFS=,; printf '%s' "${subnets[*]}")
+  local line
 
   "$binary" -w 10 -S DOCKER-USER >/dev/null 2>&1 \
     || fail "$binary has no DOCKER-USER chain; start Docker before installing the rules"
@@ -162,26 +163,35 @@ apply_family() {
     printf 'COMMIT\n'
   } | "${binary}-restore" -w 10 --noflush
 
-  ensure_user_chain_hook "$binary" "$source_list"
+  ensure_user_chain_hooks "$binary" "${subnets[@]}"
 }
 
-ensure_user_chain_hook() {
-  local binary=$1 source_list=$2 line hook_count=0 first_user_rule=
-  local expected_hook="-A DOCKER-USER -s $source_list -j $IPTABLES_CHAIN"
-  local -a user_rules=()
+ensure_user_chain_hooks() {
+  local binary=$1 subnet index prefix_matches=1
+  shift
+  local -a subnets=("$@")
+  local -a expected_hooks=() user_rules=()
 
+  for subnet in "${subnets[@]}"; do
+    expected_hooks+=("-A DOCKER-USER -s $subnet -j $IPTABLES_CHAIN")
+  done
   mapfile -t user_rules < <("$binary" -w 10 -S DOCKER-USER | sed -n '/^-A DOCKER-USER /p')
-  for line in "${user_rules[@]}"; do
-    [[ -n "$first_user_rule" ]] || first_user_rule=$line
-    [[ "$line" == "$expected_hook" ]] && ((hook_count += 1))
+
+  for ((index = 0; index < ${#expected_hooks[@]}; index++)); do
+    if [[ "${user_rules[$index]:-}" != "${expected_hooks[$index]}" ]]; then
+      prefix_matches=0
+      break
+    fi
   done
 
-  if (( hook_count == 0 )) || [[ "$first_user_rule" != "$expected_hook" ]]; then
-    "$binary" -w 10 -I DOCKER-USER 1 -s "$source_list" -j "$IPTABLES_CHAIN"
+  if (( prefix_matches == 0 )); then
+    for ((index = ${#subnets[@]} - 1; index >= 0; index--)); do
+      "$binary" -w 10 -I DOCKER-USER 1 -s "${subnets[$index]}" -j "$IPTABLES_CHAIN"
+    done
   fi
 
   mapfile -t user_rules < <("$binary" -w 10 -S DOCKER-USER | sed -n '/^-A DOCKER-USER /p')
-  for ((index=${#user_rules[@]}-1; index >= 1; index--)); do
+  for ((index = ${#user_rules[@]} - 1; index >= ${#expected_hooks[@]}; index--)); do
     if [[ "${user_rules[$index]}" == *" -j $IPTABLES_CHAIN" ]]; then
       "$binary" -w 10 -D DOCKER-USER "$((index + 1))"
     fi
@@ -212,8 +222,8 @@ check_family() {
   local binary=$1 family=$2
   shift 2
   local -a subnets=("$@")
-  local user_rules chain_rules expected_rules source_list expected_hook line
-  local hook_count=0 chain_hook_count=0 first_user_rule=
+  local user_rules chain_rules expected_rules subnet line index chain_hook_count=0
+  local -a expected_hooks=() user_rule_lines=()
 
   if ! command -v "$binary" >/dev/null 2>&1; then
     fail "$binary is required to check the $family rules"
@@ -226,16 +236,23 @@ check_family() {
   if ! chain_rules=$("$binary" -w 10 -S "$IPTABLES_CHAIN" 2>/dev/null); then
     fail "$family isolation chain is missing"
   fi
-  source_list=$(IFS=,; printf '%s' "${subnets[*]}")
-  expected_hook="-A DOCKER-USER -s $source_list -j $IPTABLES_CHAIN"
+  for subnet in "${subnets[@]}"; do
+    expected_hooks+=("-A DOCKER-USER -s $subnet -j $IPTABLES_CHAIN")
+  done
+  mapfile -t user_rule_lines < <(sed -n '/^-A DOCKER-USER /p' <<<"$user_rules")
+  (( ${#user_rule_lines[@]} >= ${#expected_hooks[@]} )) \
+    || fail "$family DOCKER-USER isolation hooks are missing or out of order"
 
-  while IFS= read -r line; do
-    [[ "$line" == -A\ DOCKER-USER\ * ]] || continue
-    [[ -n "$first_user_rule" ]] || first_user_rule=$line
-    [[ "$line" == *" -j $IPTABLES_CHAIN" ]] && ((chain_hook_count += 1))
-    [[ "$line" == "$expected_hook" ]] && ((hook_count += 1))
-  done <<<"$user_rules"
-  [[ "$hook_count" -eq 1 && "$chain_hook_count" -eq 1 && "$first_user_rule" == "$expected_hook" ]] \
+  for ((index = 0; index < ${#expected_hooks[@]}; index++)); do
+    [[ "${user_rule_lines[$index]}" == "${expected_hooks[$index]}" ]] \
+      || fail "$family DOCKER-USER isolation hooks are missing or out of order"
+  done
+  for line in "${user_rule_lines[@]}"; do
+    if [[ "$line" == *" -j $IPTABLES_CHAIN" ]]; then
+      ((chain_hook_count += 1))
+    fi
+  done
+  [[ "$chain_hook_count" -eq "${#expected_hooks[@]}" ]] \
     || fail "$family DOCKER-USER hook is missing, duplicated, or out of order"
 
   chain_rules=$(sed -n '/^-A /p' <<<"$chain_rules")

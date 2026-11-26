@@ -24,9 +24,9 @@ PRIVATE_IPV4_CIDRS = (
 PRIVATE_IPV6_CIDRS = ("fc00::/7", "fe80::/10", "ff00::/8")
 
 
-def render(family: str, subnet: str) -> list[str]:
+def render(family: str, *subnets: str) -> list[str]:
     result = subprocess.run(
-        [str(SCRIPT), f"--render-{family}", subnet],
+        [str(SCRIPT), f"--render-{family}", *subnets],
         check=True,
         capture_output=True,
         text=True,
@@ -35,6 +35,37 @@ def render(family: str, subnet: str) -> list[str]:
 
 
 class EgressIsolationRuleTests(unittest.TestCase):
+    def test_multiple_subnets_render_one_hook_and_self_return_each(self) -> None:
+        subnets = (
+            "198.18.90.0/24",
+            "198.18.91.0/24",
+            "198.18.92.0/24",
+        )
+        rules = render("v4", *subnets)
+
+        self.assertEqual(
+            rules[: len(subnets)],
+            [
+                f"-A DOCKER-USER -s {subnet} -j {IPTABLES_CHAIN}"
+                for subnet in subnets
+            ],
+        )
+        self.assertEqual(
+            rules[len(subnets) : 2 * len(subnets)],
+            [
+                f"-A {IPTABLES_CHAIN} -d {subnet} -j RETURN"
+                for subnet in subnets
+            ],
+        )
+        self.assertEqual(
+            sum(rule.startswith("-A DOCKER-USER ") for rule in rules),
+            len(subnets),
+        )
+        self.assertTrue(
+            all(rules.count(rule) == 1 for rule in rules[: 2 * len(subnets)])
+        )
+        self.assertFalse(any("," in rule for rule in rules[: 2 * len(subnets)]))
+
     def test_ipv4_drops_every_private_and_multicast_destination_for_demo_source(self) -> None:
         rules = render("v4", EXAMPLE_IPV4_SUBNET)
 
