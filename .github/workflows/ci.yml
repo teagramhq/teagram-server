@@ -1266,6 +1266,7 @@ jobs:
           bash -n deploy/teagram-demo/lima/test-deploy-contract.sh
           sh -n deploy/teagram-demo/lima/deploy-entry.sh
           sh -n deploy/teagram-demo/lima/teagram-demo-deploy-sshd.initd
+          bash -n deploy/teagram-demo/test-tailnet-source-address.sh
           bash -n deploy/teagram-demo/test-identity-import.sh
           bash -n deploy/teagram-demo/ops/weekly-wipe.sh
           bash -n deploy/teagram-demo/test-turnstile-signin-rollout.sh
@@ -1341,6 +1342,7 @@ jobs:
             deploy/teagram-demo/image-retention.sh \
             deploy/teagram-demo/test-demo-scheduling.sh \
             deploy/teagram-demo/test-demo-compose.sh \
+            deploy/teagram-demo/test-tailnet-source-address.sh \
             deploy/teagram-demo/test-identity-import.sh \
             deploy/teagram-demo/lima/check.sh \
             deploy/teagram-demo/lima/command-contract.sh \

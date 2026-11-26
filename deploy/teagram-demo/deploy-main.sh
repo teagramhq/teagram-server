@@ -545,13 +545,19 @@ demo_haproxy_control drain "$ACTIVE_SERVER"
 install -o root -g root -m 0644 "$TMP_DIR/client.json" "$DEMO_CLIENT_CONFIG.next"
 mv -f -- "$DEMO_CLIENT_CONFIG.next" "$DEMO_CLIENT_CONFIG"
 CLIENT_CONFIG_UPDATED=1
+TAILNET_SMOKE_ARGS=()
+TAILNET_ENABLED=$(demo_tailnet_enabled)
+if [[ "$TAILNET_ENABLED" == true ]]; then
+  TAILNET_SMOKE_ARGS+=(--tailnet-port 8081)
+fi
 if [[ -n "$PREV_WEB_RELEASE" ]]; then
   python3 "$SCRIPT_DIR/smoke.py" \
     --web-source-commit "${PREV_WEB_RELEASE%% *}" \
     --web-artifact-digest "sha256:${PREV_WEB_RELEASE#* }" \
+    "${TAILNET_SMOKE_ARGS[@]}" \
     "$DEMO_CLIENT_CONFIG"
 else
-  python3 "$SCRIPT_DIR/smoke.py" --bootstrap "$DEMO_CLIENT_CONFIG"
+  python3 "$SCRIPT_DIR/smoke.py" --bootstrap "${TAILNET_SMOKE_ARGS[@]}" "$DEMO_CLIENT_CONFIG"
 fi
 "$SCRIPT_DIR/seed-demo.sh" --verify-turnstile --endpoint haproxy:2443
 if [[ -n "$PREV_WEB_RELEASE" ]]; then

@@ -285,8 +285,34 @@ expect 'criterion 2: postgres runs with the lima config file' \
   '.services.postgres.volumes | any(.target == "/etc/postgresql/postgresql.conf" and (.source | endswith("deploy/teagram-demo/lima/postgresql.conf")))'
 expect 'criterion 2: only the edge publishes a host port' \
   '[.services | to_entries[] | select(.value.ports != null) | .key] == ["edge"]'
-expect 'criterion 2: edge health check is reachable only on loopback port 8080' \
-  '.services.edge.ports | any(.host_ip == "127.0.0.1" and (.published | tostring) == "8080" and (.target | tostring) == "8080")'
+expect 'criterion 2: Lima edge exposes only loopback port 8080' \
+  '(.services.edge.ports | length) == 1 and .services.edge.ports[0].host_ip == "127.0.0.1" and (.services.edge.ports[0].published | tostring) == "8080" and (.services.edge.ports[0].target | tostring) == "8080"'
+expect 'criterion 2: lima has no tailnet edge listener or origin' \
+  '.services["edge-tailnet"] == null and .networks["teagram-dev-tailnet"] == null and (.services.teagramd.environment.TG_WEBSOCKET_ALLOWED_ORIGINS | contains("teagram-dev.tailaa4918.ts.net") | not)'
+expect_candidate 'criterion 2: lima candidate has no tailnet edge listener or origin' \
+  '.services["edge-tailnet"] == null and .networks["teagram-dev-tailnet"] == null and (.services["teagramd-next"].environment.TG_WEBSOCKET_ALLOWED_ORIGINS | contains("teagram-dev.tailaa4918.ts.net") | not)'
+expect 'criterion 2: lima does not mount a tailnet Nginx configuration' \
+  '[.services[] | .volumes[]? | select(.source | endswith("nginx-tailnet.conf"))] | length == 0'
+
+python3 - "$SCRIPT_DIR/../nginx-config/nginx.conf" "$SCRIPT_DIR/../nginx-tailnet.conf" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+public_nginx = Path(sys.argv[1]).read_text(encoding="utf-8")
+tailnet_nginx = Path(sys.argv[2]).read_text(encoding="utf-8")
+cf_sources = re.findall(
+    r"^\s*proxy_set_header\s+CF-Connecting-IP\s+([^;]+);",
+    public_nginx,
+    flags=re.MULTILINE,
+)
+if cf_sources != ["$http_cf_connecting_ip"]:
+    raise SystemExit("Lima Nginx must forward only Cloudflare's CF-Connecting-IP header")
+if re.search(r"^\s*(?:real_ip_header|set_real_ip_from)\b", public_nginx, flags=re.MULTILINE):
+    raise SystemExit("Lima Nginx must not configure real-IP header trust")
+if "set_real_ip_from 198.18.134.1/32;" not in tailnet_nginx or "real_ip_header X-Forwarded-For;" not in tailnet_nginx:
+    raise SystemExit("tailnet Nginx must trust only the pinned listener gateway and X-Forwarded-For")
+PY
 
 # Criterion 3: teagramd's blobs are a bind of the capped mount, which must
 # already exist, and the bind refuses to create a missing host path.

@@ -187,6 +187,7 @@ jobs:
           DEV_DEPLOY_PORT: ${{ vars.DEV_DEPLOY_PORT }}
           DEV_DEPLOY_KNOWN_HOSTS: ${{ vars.DEV_DEPLOY_KNOWN_HOSTS }}
           DEV_DEPLOY_USER: ${{ vars.DEV_DEPLOY_USER }}
+          TEAGRAM_DEV_TAILNET_ENABLED: ${{ vars.TEAGRAM_DEV_TAILNET_ENABLED }}
           DEMO_DEPLOY_SSH_KEY: ${{ secrets.DEMO_DEPLOY_SSH_KEY }}
           TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           TS_OAUTH_SECRET: ${{ secrets.TS_OAUTH_SECRET }}
@@ -197,6 +198,12 @@ jobs:
             DEV_DEPLOY_PORT "$DEV_DEPLOY_PORT" \
             DEV_DEPLOY_KNOWN_HOSTS "$DEV_DEPLOY_KNOWN_HOSTS" \
             DEV_DEPLOY_USER "$DEV_DEPLOY_USER"
+          tailnet_enabled="${TEAGRAM_DEV_TAILNET_ENABLED:-false}"
+          [[ "$tailnet_enabled" == true || "$tailnet_enabled" == false ]] || {
+            echo "::error::TEAGRAM_DEV_TAILNET_ENABLED must be true or false when set"
+            exit 1
+          }
+          echo "tailnet_enabled=$tailnet_enabled" >> "$GITHUB_OUTPUT"
           [[ -n "$DEMO_DEPLOY_SSH_KEY" ]] || {
             echo "::error::DEMO_DEPLOY_SSH_KEY is empty"
             exit 1
@@ -235,17 +242,19 @@ jobs:
         env:
           DEPLOY_SHA: ${{ needs.check-demo-deploy-target.outputs.sha }}
           DEPLOY_IMAGE_DIGEST: ${{ needs.check-demo-deploy-target.outputs.digest }}
+          TEAGRAM_DEV_TAILNET_ENABLED: ${{ steps.target.outputs.tailnet_enabled }}
           DEV_DEPLOY_HOST: ${{ vars.DEV_DEPLOY_HOST }}
           DEV_DEPLOY_PORT: ${{ vars.DEV_DEPLOY_PORT }}
           DEV_DEPLOY_USER: ${{ vars.DEV_DEPLOY_USER }}
         run: |
+          set -euo pipefail
           [[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$DEPLOY_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           ssh -T -p "$DEV_DEPLOY_PORT" -i "$RUNNER_TEMP/ssh-dev/id_deploy" \
             -o IdentitiesOnly=yes -o BatchMode=yes \
             -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/ssh-dev/known_hosts" \
             -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
-            "$DEV_DEPLOY_USER@$DEV_DEPLOY_HOST" "$DEPLOY_SHA $DEPLOY_IMAGE_DIGEST" </dev/null
+            "$DEV_DEPLOY_USER@$DEV_DEPLOY_HOST" "$DEPLOY_SHA $DEPLOY_IMAGE_DIGEST $TEAGRAM_DEV_TAILNET_ENABLED" </dev/null
 
       - name: Remove the dev deploy key
         if: ${{ always() && steps.target.outputs.enabled == 'true' }}

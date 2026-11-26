@@ -76,7 +76,7 @@ layout and policy:
   probes with PROXY-v2; its `2443` listener is available only on the internal
   backend network. Neither HAProxy nor teagramd publishes a host port.
 - Restrict the Cloudflare Tunnel and DNS configuration to `demo.teagram.io`.
-  The demo does not serve the dev hostname or admin dashboard.
+  The public demo path does not serve the dev hostname or admin dashboard.
 
 The public origin and discovery document advertise
 `demo.teagram.io:443`; browser clients use the separate WSS endpoint. Discovery
@@ -281,6 +281,16 @@ handoff artifact containing the exact tested SHA and CI run ID. On success,
 the separate `Deploy demo.` workflow deploys that exact SHA to the public demo
 and reports its own result. The demo deploy is disabled unless the `demo` GitHub
 environment variable `TEAGRAM_DEMO_DEPLOY_ENABLED` is set to `true`.
+
+The reusable dev deploy reads `TEAGRAM_DEV_TAILNET_ENABLED` from the same
+GitHub environment. Unset or `false` keeps the existing configuration; `true`
+adds a separate Nginx listener on `127.0.0.1:8081` and allows
+`https://teagram-dev.tailaa4918.ts.net` only on the dev server slots. The public
+demo workflow does not read this variable. The listener uses a dedicated
+bridge without outbound masquerading and reaches HAProxy through the private
+backend network. Its trusted forwarded-IP hop is the dedicated bridge gateway
+`198.18.134.1`, verified by the Compose policy test. After the dev deploy is
+verified, the host's `tailscale serve` can be pointed at that loopback port.
 
 When the dev deploy is unavailable, `Deploy demo.` also accepts a manual
 dispatch with an issue key. It deploys only the current `main` SHA after that

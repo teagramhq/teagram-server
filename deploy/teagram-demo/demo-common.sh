@@ -57,9 +57,30 @@ DEMO_SEED_OWNER_USERNAME="demo_seed_owner"
 # shellcheck disable=SC2034
 DEMO_IMAGE_REPOSITORY="ghcr.io/teagramhq/teagram-server-demo"
 DEMO_ACTIVE_RELEASE_FILE="$DEMO_STATE_DIR/active-release.json"
+DEMO_TAILNET_COMPOSE_FILE="$DEMO_SCRIPT_DIR/teagram-dev-tailnet.compose.yaml"
+DEMO_TAILNET_ORIGIN="https://teagram-dev.tailaa4918.ts.net"
 demo_fail() {
   printf 'teagram-demo: %s\n' "$1" >&2
   return 1
+}
+
+demo_tailnet_enabled() {
+  case "${TEAGRAM_DEV_TAILNET_ENABLED:-false}" in
+    ''|false)
+      printf '%s\n' false
+      ;;
+    true)
+      [[ "$DEMO_DEPLOY_TARGET" != lima ]] || {
+        demo_fail 'teagram-dev tailnet listener is not available in the lima variant'
+        return 1
+      }
+      printf '%s\n' true
+      ;;
+    *)
+      demo_fail 'teagram-dev tailnet setting must be true or false'
+      return 1
+      ;;
+  esac
 }
 
 demo_valid_signup_username() {
@@ -85,10 +106,12 @@ demo_prepare_runtime_tmp_dirs() {
   local turnstile_tmp_dir="$runtime_tmp_dir/turnstile-egress"
   local haproxy_tmp_dir="$runtime_tmp_dir/haproxy"
   local edge_tmp_dir="$runtime_tmp_dir/edge"
+  local edge_tailnet_tmp_dir="$runtime_tmp_dir/edge-tailnet"
 
   [[ ! -L "$DEMO_REPO_ROOT/.state" && ! -L "$DEMO_STATE_DIR" &&
     ! -L "$runtime_tmp_dir" && ! -L "$turnstile_tmp_dir" &&
-    ! -L "$haproxy_tmp_dir" && ! -L "$edge_tmp_dir" ]] || {
+    ! -L "$haproxy_tmp_dir" && ! -L "$edge_tmp_dir" &&
+    ! -L "$edge_tailnet_tmp_dir" ]] || {
     demo_fail 'demo /tmp state path must not contain symlinks'
     return 1
   }
@@ -100,13 +123,14 @@ demo_prepare_runtime_tmp_dirs() {
     demo_fail 'Turnstile egress /tmp directory could not be created'
     return 1
   }
-  install -d -o root -g root -m 1777 "$haproxy_tmp_dir" "$edge_tmp_dir" || {
+  install -d -o root -g root -m 1777 "$haproxy_tmp_dir" "$edge_tmp_dir" "$edge_tailnet_tmp_dir" || {
     demo_fail 'proxy /tmp directories could not be created'
     return 1
   }
   [[ "$(stat -c '%u:%g:%a' "$turnstile_tmp_dir")" == '584792:584792:1777' &&
     "$(stat -c '%u:%g:%a' "$haproxy_tmp_dir")" == '0:0:1777' &&
-    "$(stat -c '%u:%g:%a' "$edge_tmp_dir")" == '0:0:1777' ]] || {
+    "$(stat -c '%u:%g:%a' "$edge_tmp_dir")" == '0:0:1777' &&
+    "$(stat -c '%u:%g:%a' "$edge_tailnet_tmp_dir")" == '0:0:1777' ]] || {
     demo_fail 'demo /tmp directory ownership or mode could not be verified'
     return 1
   }
@@ -137,7 +161,8 @@ demo_server_client_config() {
 }
 
 [[ -f "$DEMO_SCRIPT_DIR/haproxy.cfg" && -f "$DEMO_SCRIPT_DIR/render-haproxy-config.py" &&
-  -f "$DEMO_SCRIPT_DIR/nginx-config/nginx.conf" ]] || {
+  -f "$DEMO_SCRIPT_DIR/nginx-config/nginx.conf" &&
+  -f "$DEMO_SCRIPT_DIR/nginx-config/common-locations.conf" ]] || {
   demo_fail 'proxy configuration source is missing'
   return 1
 }
@@ -146,12 +171,17 @@ demo_server_client_config() {
 demo_prepare_edge_config_permissions() {
   local config_dir="${1:-$DEMO_SCRIPT_DIR/nginx-config}"
   local config_file="${2:-$config_dir/nginx.conf}"
+  local locations_file="$config_dir/common-locations.conf"
   [[ -d "$config_dir" && ! -L "$config_dir" ]] || {
     demo_fail 'edge configuration directory is missing or unsafe'
     return 1
   }
   [[ -f "$config_file" && ! -L "$config_file" ]] || {
     demo_fail 'edge configuration file is missing or unsafe'
+    return 1
+  }
+  [[ -f "$locations_file" && ! -L "$locations_file" ]] || {
+    demo_fail 'shared edge locations file is missing or unsafe'
     return 1
   }
   chmod 0755 -- "$config_dir" || {
@@ -166,8 +196,33 @@ demo_prepare_edge_config_permissions() {
     demo_fail 'edge configuration file permissions could not be prepared'
     return 1
   }
+  chmod 0644 -- "$locations_file" || {
+    demo_fail 'shared edge locations permissions could not be prepared'
+    return 1
+  }
   [[ "$(stat -c '%a' "$config_file")" == 644 ]] || {
     demo_fail 'edge configuration file permissions could not be verified'
+    return 1
+  }
+  [[ "$(stat -c '%a' "$locations_file")" == 644 ]] || {
+    demo_fail 'shared edge locations permissions could not be verified'
+    return 1
+  }
+}
+
+demo_prepare_tailnet_edge_config_permissions() {
+  local config_file="$DEMO_SCRIPT_DIR/nginx-tailnet.conf"
+  demo_prepare_edge_config_permissions || return 1
+  [[ -f "$config_file" && ! -L "$config_file" ]] || {
+    demo_fail 'tailnet edge configuration file is missing or unsafe'
+    return 1
+  }
+  chmod 0644 -- "$config_file" || {
+    demo_fail 'tailnet edge configuration permissions could not be prepared'
+    return 1
+  }
+  [[ "$(stat -c '%a' "$config_file")" == 644 ]] || {
+    demo_fail 'tailnet edge configuration permissions could not be verified'
     return 1
   }
 }
@@ -918,6 +973,48 @@ demo_reload_edge() {
     demo_fail 'edge nginx graceful reload failed'
     return 1
   }
+  demo_reload_tailnet_edge
+}
+
+demo_reload_tailnet_edge() {
+  local enabled tailnet_ids_output
+  local -a tailnet_ids=()
+  enabled=$(demo_tailnet_enabled) || return 1
+  if [[ "$enabled" != true ]]; then
+    tailnet_ids_output=$(demo_tailnet_compose ps -a -q edge-tailnet) || return 1
+    if [[ -n "$tailnet_ids_output" ]]; then
+      demo_tailnet_compose stop edge-tailnet || return 1
+      demo_tailnet_compose rm -f edge-tailnet || return 1
+    fi
+    return 0
+  fi
+
+  demo_prepare_tailnet_edge_config_permissions || return 1
+  demo_tailnet_compose run --rm -T --no-deps --entrypoint nginx edge-tailnet \
+    -c /etc/nginx/tailnet/nginx.conf -t >/dev/null || {
+    demo_fail 'tailnet edge configuration failed its pre-start syntax check'
+    return 1
+  }
+  demo_tailnet_compose up -d --no-deps edge-tailnet || {
+    demo_fail 'tailnet edge proxy could not be started with the current configuration'
+    return 1
+  }
+  tailnet_ids_output=$(demo_tailnet_compose ps --status running -q edge-tailnet) || return 1
+  if [[ -n "$tailnet_ids_output" ]]; then
+    mapfile -t tailnet_ids <<< "$tailnet_ids_output"
+  fi
+  ((${#tailnet_ids[@]} == 1)) || {
+    demo_fail 'running tailnet edge proxy is missing or ambiguous'
+    return 1
+  }
+  docker exec "${tailnet_ids[0]}" nginx -c /etc/nginx/tailnet/nginx.conf -t >/dev/null || {
+    demo_fail 'tailnet edge nginx configuration failed its syntax check'
+    return 1
+  }
+  docker exec "${tailnet_ids[0]}" nginx -c /etc/nginx/tailnet/nginx.conf -s reload >/dev/null || {
+    demo_fail 'tailnet edge nginx graceful reload failed'
+    return 1
+  }
 }
 
 demo_current_web_release() {
@@ -1019,7 +1116,7 @@ demo_haproxy_control() {
 }
 
 demo_compose_with_file() {
-  local compose_file="$1" image_ref
+  local compose_file="$1" image_ref enabled
   local -a compose_args=(
     --env-file "$DEMO_ENV_FILE"
     --project-directory "$DEMO_REPO_ROOT"
@@ -1031,6 +1128,21 @@ demo_compose_with_file() {
     compose_args+=(--file "$compose_file")
   else
     compose_args+=(--file "$DEMO_REPO_ROOT/docker-compose.yml")
+  fi
+  if [[ "$compose_file" == "$DEMO_REPO_ROOT/docker-compose.yml" &&
+    "$DEMO_DEPLOY_TARGET" != lima ]]; then
+    if [[ "${DEMO_FORCE_TAILNET_COMPOSE:-false}" == true ]]; then
+      enabled=true
+    else
+      enabled=$(demo_tailnet_enabled) || return 1
+    fi
+    if [[ "$enabled" == true ]]; then
+      [[ -f "$DEMO_TAILNET_COMPOSE_FILE" && ! -L "$DEMO_TAILNET_COMPOSE_FILE" ]] || {
+        demo_fail 'teagram-dev tailnet Compose overlay is missing or unsafe'
+        return 1
+      }
+      compose_args+=(--file "$DEMO_TAILNET_COMPOSE_FILE")
+    fi
   fi
   if [[ "$DEMO_DEPLOY_TARGET" != lima ]]; then
     compose_args+=(--profile demo)
@@ -1044,12 +1156,14 @@ demo_compose_with_file() {
     -u TG_TURNSTILE_SIGNIN_ENABLED \
     -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
     -u TEAGRAM_DEMO_EDGE_BIND -u TEAGRAM_DEMO_EDGE_CONFIG_SHA256 \
+    -u DEMO_FORCE_TAILNET_COMPOSE \
     "TEAGRAM_DEMO_IMAGE_REF=$image_ref" \
     docker compose "${compose_args[@]}" "$@" </dev/null
 }
 
 demo_compose() {
-  local arg server='' compose_file="$DEMO_REPO_ROOT/docker-compose.yml"
+  local arg server='' start_edge=false has_tailnet=false enabled
+  local compose_file="$DEMO_REPO_ROOT/docker-compose.yml"
   if [[ "$DEMO_DEPLOY_TARGET" == lima ]]; then
     compose_file="$DEMO_COMPOSE_FILE"
   fi
@@ -1057,14 +1171,25 @@ demo_compose() {
     for arg in "$@"; do
       case "$arg" in
         teagramd|teagramd-next) server="$arg" ;;
+        edge) start_edge=true ;;
+        edge-tailnet) has_tailnet=true ;;
       esac
     done
+    enabled=$(demo_tailnet_enabled) || return 1
+    if [[ "$enabled" == true && "$start_edge" == true && "$has_tailnet" != true ]]; then
+      set -- "$@" edge-tailnet
+    fi
   fi
   if [[ -n "$server" ]]; then
     demo_seed_compose stop "$server" || return 1
     demo_seed_compose rm -f "$server" || return 1
   fi
   demo_compose_with_file "$compose_file" "$@"
+}
+
+demo_tailnet_compose() {
+  DEMO_FORCE_TAILNET_COMPOSE=true \
+    demo_compose_with_file "$DEMO_REPO_ROOT/docker-compose.yml" "$@"
 }
 
 demo_validation_compose() {
@@ -1227,13 +1352,16 @@ demo_check_blob_mount() {
 }
 
 demo_render_config() {
-  local destination="$1"
+  local destination="$1" tailnet_enabled
+  tailnet_enabled=$(demo_tailnet_enabled) || return 1
   demo_prepare_client_config_dir
   demo_prepare_haproxy_runtime
   demo_compose config --format json > "$destination"
   chmod 0600 "$destination"
   jq -e \
-    --arg haproxyConfigHash "$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256" '
+    --arg haproxyConfigHash "$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256" \
+    --arg tailnetEnabled "$tailnet_enabled" \
+    --arg tailnetOrigin "$DEMO_TAILNET_ORIGIN" '
     (.services.teagramd.ports // [] | length) == 0
     and (.services["teagramd-next"].ports // [] | length) == 0
     and (.services.teagramd.build == null)
@@ -1256,8 +1384,8 @@ demo_render_config() {
     and .services.teagramd.environment.TG_MAX_FILE_BYTES == "16777216"
     and .services.teagramd.environment.TG_MAX_USER_STORAGE_BYTES == "268435456"
     and .services.teagramd.environment.TG_WEBSOCKET_LISTEN_ADDR == ":2446"
-    and .services.teagramd.environment.TG_WEBSOCKET_ALLOWED_ORIGINS == "https://web.teagram.io,https://demo.teagram.io"
-    and .services["teagramd-next"].environment.TG_WEBSOCKET_ALLOWED_ORIGINS == "https://web.teagram.io,https://demo.teagram.io"
+    and .services.teagramd.environment.TG_WEBSOCKET_ALLOWED_ORIGINS == ("https://web.teagram.io,https://demo.teagram.io" + (if $tailnetEnabled == "true" then "," + $tailnetOrigin else "" end))
+    and .services["teagramd-next"].environment.TG_WEBSOCKET_ALLOWED_ORIGINS == ("https://web.teagram.io,https://demo.teagram.io" + (if $tailnetEnabled == "true" then "," + $tailnetOrigin else "" end))
     and .services.teagramd.environment.TG_WEBSOCKET_BROWSER_ONLY == "true"
     and .services["teagramd-next"].environment.TG_WEBSOCKET_BROWSER_ONLY == "true"
     and .services.teagramd.environment.GOMAXPROCS == "1"
@@ -1291,6 +1419,20 @@ demo_render_config() {
     and .services.edge.depends_on.haproxy.condition == "service_healthy"
     and any(.services.edge.volumes[]; (.source | endswith("/deploy/teagram-demo/nginx-config")) and .target == "/etc/nginx/demo" and .read_only)
     and (.services.edge.networks | keys | sort) == ["backend", "edge"]
+    and (if $tailnetEnabled == "true" then
+      .services["edge-tailnet"] != null
+      and (.services["edge-tailnet"].ports | length) == 1
+      and .services["edge-tailnet"].ports[0].host_ip == "127.0.0.1"
+      and ((.services["edge-tailnet"].ports[0].target | tostring) == "8081")
+      and ((.services["edge-tailnet"].ports[0].published | tostring) == "8081")
+      and (.services["edge-tailnet"].networks | keys | sort) == ["backend", "teagram-dev-tailnet"]
+      and (.networks["teagram-dev-tailnet"].internal // false) == false
+      and .networks["teagram-dev-tailnet"].ipam.config[0].gateway == "198.18.134.1"
+      and .networks["teagram-dev-tailnet"].ipam.config[0].subnet == "198.18.134.0/24"
+      and .networks["teagram-dev-tailnet"].driver_opts["com.docker.network.bridge.enable_ip_masquerade"] == "false"
+      and any(.services["edge-tailnet"].volumes[]; (.source | endswith("/deploy/teagram-demo/nginx-tailnet.conf")) and .target == "/etc/nginx/tailnet/nginx.conf" and .read_only)
+      and any(.services["edge-tailnet"].volumes[]; (.source | endswith("/.state/teagram-demo/tmp/edge-tailnet")) and .target == "/tmp" and (.read_only // false) == false)
+      else .services["edge-tailnet"] == null end)
     and .secrets.teagram_demo_turnstile.file == "/var/lib/teagram-demo/secrets/turnstile-secret-key"
     and .secrets.teagram_demo_turnstile_qa_bypass.file == "/var/lib/teagram-demo/secrets/turnstile-qa-bypass-token"
     and .volumes.tgblobs.driver == "local"

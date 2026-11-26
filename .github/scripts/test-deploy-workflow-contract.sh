@@ -618,7 +618,7 @@ check_deploy_target_validator() (
     DEV_DEPLOY_USER=deploy DEMO_DEPLOY_SSH_KEY=fixture-key TS_OAUTH_CLIENT_ID=fixture-id \
     TS_OAUTH_SECRET=fixture-secret GITHUB_OUTPUT="$tmp/output" \
     bash -euo pipefail "$tmp/dev-target.sh" 2>&1)
-  [[ -z "$output" && "$(cat "$tmp/output")" == 'enabled=true' ]] ||
+  [[ -z "$output" && "$(cat "$tmp/output")" == $'tailnet_enabled=false\nenabled=true' ]] ||
     fail 'a complete dev target must pass validation and enable the deploy steps'
 
   : > "$tmp/output"
@@ -1331,15 +1331,18 @@ check_contract() {
   [[ "$(demo_query '.jobs.deploy-dev.steps[] | select(.id == "target") | .env.DEV_DEPLOY_HOST')" == '${{ vars.DEV_DEPLOY_HOST }}' &&
     "$(demo_query '.jobs.deploy-dev.steps[] | select(.id == "target") | .env.DEV_DEPLOY_PORT')" == '${{ vars.DEV_DEPLOY_PORT }}' &&
     "$(demo_query '.jobs.deploy-dev.steps[] | select(.id == "target") | .env.DEV_DEPLOY_KNOWN_HOSTS')" == '${{ vars.DEV_DEPLOY_KNOWN_HOSTS }}' &&
-    "$(demo_query '.jobs.deploy-dev.steps[] | select(.id == "target") | .env.DEV_DEPLOY_USER')" == '${{ vars.DEV_DEPLOY_USER }}' ]] ||
-    fail 'the dev job must read all four dev target variables from the demo environment'
+    "$(demo_query '.jobs.deploy-dev.steps[] | select(.id == "target") | .env.DEV_DEPLOY_USER')" == '${{ vars.DEV_DEPLOY_USER }}' &&
+    "$(demo_query '.jobs.deploy-dev.steps[] | select(.id == "target") | .env.TEAGRAM_DEV_TAILNET_ENABLED')" == '${{ vars.TEAGRAM_DEV_TAILNET_ENABLED }}' &&
+    "$(demo_query '.jobs.deploy-dev.steps[] | select(.id == "target") | .run')" == *'tailnet_enabled=$tailnet_enabled'* ]] ||
+    fail 'the dev job must validate the tailnet opt-in alongside its target variables'
   [[ "$(demo_query '.jobs.deploy-dev.steps[] | select(.name == "Deploy the tested server commit to dev") | .env.DEPLOY_SHA')" == '${{ needs.check-demo-deploy-target.outputs.sha }}' &&
     "$(demo_query '.jobs.deploy-dev.steps[] | select(.name == "Deploy the tested server commit to dev") | .env.DEPLOY_IMAGE_DIGEST')" == '${{ needs.check-demo-deploy-target.outputs.digest }}' &&
+    "$(demo_query '.jobs.deploy-dev.steps[] | select(.name == "Deploy the tested server commit to dev") | .env.TEAGRAM_DEV_TAILNET_ENABLED')" == '${{ steps.target.outputs.tailnet_enabled }}' &&
     "$(demo_query '.jobs.deploy-dev.steps[] | select(.name == "Deploy the tested server commit to dev") | .env.DEV_DEPLOY_USER')" == '${{ vars.DEV_DEPLOY_USER }}' ]] ||
     fail 'the dev job must deploy the same tested commit and image digest as demo'
   demo_dev_run="$(demo_query '.jobs.deploy-dev.steps[] | select(.name == "Deploy the tested server commit to dev") | .run')"
-  grep -Fq '"$DEV_DEPLOY_USER@$DEV_DEPLOY_HOST" "$DEPLOY_SHA $DEPLOY_IMAGE_DIGEST"' <<< "$demo_dev_run" ||
-    fail 'the dev job must send the shared SHA and digest using its configured user and host'
+  grep -Fq '"$DEV_DEPLOY_USER@$DEV_DEPLOY_HOST" "$DEPLOY_SHA $DEPLOY_IMAGE_DIGEST $TEAGRAM_DEV_TAILNET_ENABLED"' <<< "$demo_dev_run" ||
+    fail 'the dev job must send the shared SHA, digest, and validated tailnet setting using its configured user and host'
   [[ "$(demo_query '.jobs.deploy-dev.steps[] | select(.name == "Join the tailnet") | .if')" == '${{ steps.target.outputs.enabled == '\''true'\'' }}' &&
     "$(demo_query '.jobs.deploy-dev.steps[] | select(.name == "Join the tailnet") | .with.ping')" == '${{ vars.DEV_DEPLOY_HOST }}' ]] ||
     fail 'the dev job must connect only after target validation and ping its configured host'
