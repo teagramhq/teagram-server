@@ -393,7 +393,7 @@ JSON
 )
 
 (
-  TEAGRAM_DEV_TAILNET_ENABLED=true
+  export TEAGRAM_DEV_TAILNET_ENABLED=true
   DEMO_CLIENT_CONFIG_DIR="$TMP_DIR/tailnet-reload-client"
   DEMO_CLIENT_CONFIG="$DEMO_CLIENT_CONFIG_DIR/client"
   DEMO_TAILNET_CLIENT_CONFIG="$DEMO_CLIENT_CONFIG_DIR/client-tailnet"
@@ -427,11 +427,9 @@ fi
 DOCKER
   chmod 0755 "$TAILNET_DOCKER_STUB_DIR/docker"
   export TAILNET_DOCKER_LOG
-  PATH="$TAILNET_DOCKER_STUB_DIR:$PATH"
-  export PATH
   demo_prepare_runtime_tmp_dirs_for_up() { :; }
   demo_compose_image_ref() { printf 'teagram-demo:test\n'; }
-  demo_reload_tailnet_edge
+  PATH="$TAILNET_DOCKER_STUB_DIR:$PATH" demo_reload_tailnet_edge
   mapfile -t tailnet_calls < "$TAILNET_DOCKER_LOG"
   [[ "${#tailnet_calls[@]}" == 5 ]]
   [[ "${tailnet_calls[0]}" == compose*"--file $DEMO_TAILNET_COMPOSE_FILE"*' run --rm -T --no-deps --entrypoint nginx edge-tailnet -c /etc/nginx/tailnet/nginx.conf -t' ]]
