@@ -440,6 +440,7 @@ DOCKER
   [[ "${tailnet_calls[4]}" == 'exec tailnet-edge nginx -c /etc/nginx/tailnet/nginx.conf -s reload' ]]
 )
 
+# shellcheck disable=SC2031 # Environment overrides are scoped to these test function calls.
 (
   demo_tailnet_compose() {
     [[ "$*" == 'ps --status running -q edge-tailnet' ]] || return 1
