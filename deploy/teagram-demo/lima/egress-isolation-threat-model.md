@@ -16,8 +16,10 @@ these rules and is outside this policy's protection.
 ## Trust boundaries and controls
 
 - Forwarded packets from each configured demo source subnet enter
-  `TEAGRAM_DEMO_EGRESS` through `DOCKER-USER`. Its jump is kept first in
-  `FORWARD`, so an earlier terminal rule cannot bypass it.
+  `TEAGRAM_DEMO_EGRESS` through source-scoped hooks at the start of `FORWARD`
+  and in `DOCKER-USER`. Other forwarded packets retain their existing rule
+  order; packets from demo subnets continue through host rules when the egress
+  chain returns them.
 - The egress chain returns traffic addressed to the demo's own subnets and
   related or established replies, drops RFC1918, carrier-grade NAT, link-local
   and multicast destinations, then returns other traffic. This preserves

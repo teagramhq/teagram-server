@@ -14,7 +14,8 @@
 # Images are pinned by digest and never built here. Memory limits (mem_limit,
 # MiB) of all long-running services add up to 157 MiB; migrate is one-shot.
 # Fixed subnets: backend 198.18.130.0/24, egress 198.18.132.0/24, edge
-# 198.18.133.0/24. The egress-isolation rules in DOCKER-USER name these.
+# 198.18.133.0/24. The source-scoped FORWARD and DOCKER-USER isolation hooks
+# name these.
 
 name: teagram-demo
 

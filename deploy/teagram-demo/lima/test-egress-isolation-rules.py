@@ -171,12 +171,18 @@ class EgressIsolationRuleTests(unittest.TestCase):
         for family in ("iptables", "ip6tables"):
             state[family] = {
                 "DOCKER-USER": [
-                    "-A DOCKER-USER -s 198.18.129.0/24 -j TEAGRAM_DEMO_EGRESS"
+                    "-A DOCKER-USER -s 198.18.129.0/24 -j TEAGRAM_DEMO_EGRESS",
+                    "-A DOCKER-USER -j RETURN",
                 ],
                 "INPUT": [
-                    "-A INPUT -s 198.18.129.0/24 -j TEAGRAM_DEMO_EGRESS"
+                    "-A INPUT -s 198.18.129.0/24 -j TEAGRAM_DEMO_EGRESS",
+                    "-A INPUT -j DROP",
                 ],
-                "FORWARD": ["-A FORWARD -j DOCKER-USER"],
+                "FORWARD": [
+                    "-A FORWARD -j ACCEPT",
+                    "-A FORWARD -j DOCKER-USER",
+                    "-A FORWARD -j RETURN",
+                ],
             }
         return state
 
@@ -247,7 +253,7 @@ class EgressIsolationRuleTests(unittest.TestCase):
         env["TEAGRAM_TEST_FIREWALL_STATE"] = str(state_file)
         listings = []
         for binary in ("iptables", "ip6tables"):
-            for chain in ("DOCKER-USER", "INPUT", IPTABLES_CHAIN, INPUT_CHAIN):
+            for chain in ("FORWARD", "DOCKER-USER", "INPUT", IPTABLES_CHAIN, INPUT_CHAIN):
                 result = subprocess.run(
                     [str(mock_bin / binary), "-w", "10", "-S", chain],
                     check=False,
@@ -306,7 +312,7 @@ class EgressIsolationRuleTests(unittest.TestCase):
                 self.assertFalse(
                     any(
                         rule.endswith((f"-j {IPTABLES_CHAIN}", f"-j {INPUT_CHAIN}"))
-                        for chain in ("DOCKER-USER", "INPUT")
+                        for chain in ("DOCKER-USER", "INPUT", "FORWARD")
                         for rule in state[family][chain]
                     )
                 )
@@ -439,30 +445,68 @@ class EgressIsolationRuleTests(unittest.TestCase):
             result = self._run_firewall_mode(mock_bin, state_file, "check")
 
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("FORWARD hook is missing or shadowed", result.stderr)
+            self.assertIn("FORWARD isolation hooks are missing or out of order", result.stderr)
             self.assertEqual(state_file.read_bytes(), before_check)
 
     @unittest.skipUnless(
         os.geteuid() == 0 or shutil.which("sudo"),
         "fake firewall integration requires root or passwordless sudo",
     )
-    def test_apply_moves_docker_user_hook_ahead_of_terminal_forward_rules(self) -> None:
+    def test_apply_and_remove_preserve_existing_host_rule_order(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             mock_bin, state_file = self._mock_firewall(directory)
-            state = json.loads(state_file.read_text(encoding="utf-8"))
-            state["iptables"]["FORWARD"].insert(0, "-A FORWARD -j ACCEPT")
-            state_file.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+            initial = json.loads(state_file.read_text(encoding="utf-8"))
+            host_rules = {
+                family: {
+                    chain: [
+                        rule
+                        for rule in initial[family][chain]
+                        if not rule.endswith((f"-j {IPTABLES_CHAIN}", f"-j {INPUT_CHAIN}"))
+                    ]
+                    for chain in ("FORWARD", "DOCKER-USER", "INPUT")
+                }
+                for family in ("iptables", "ip6tables")
+            }
 
-            result = self._run_firewall_mode(mock_bin, state_file, "apply-rules")
+            result = self._run_firewall_mode(
+                mock_bin, state_file, "apply-rules", ipv6_networks=DEMO_NETWORKS
+            )
 
             self.assertEqual(result.returncode, 0, result.stderr)
             state = json.loads(state_file.read_text(encoding="utf-8"))
-            forward_rules = state["iptables"]["FORWARD"]
-            self.assertEqual(forward_rules[0], "-A FORWARD -j DOCKER-USER")
-            self.assertEqual(forward_rules.count("-A FORWARD -j DOCKER-USER"), 1)
-            self.assertEqual(forward_rules[1], "-A FORWARD -j ACCEPT")
+            subnets_by_family = {
+                "iptables": ("198.18.130.0/24", "198.18.132.0/24", "198.18.133.0/24"),
+                "ip6tables": ("fd42:100::/64", "fd42:101::/64", "fd42:102::/64"),
+            }
+            for family, subnets in subnets_by_family.items():
+                hooks_by_chain = {
+                    "FORWARD": [
+                        f"-A FORWARD -s {subnet} -j {IPTABLES_CHAIN}"
+                        for subnet in subnets
+                    ],
+                    "DOCKER-USER": [
+                        f"-A DOCKER-USER -s {subnet} -j {IPTABLES_CHAIN}"
+                        for subnet in subnets
+                    ],
+                    "INPUT": [
+                        f"-A INPUT -i br+ -s {subnet} -j {INPUT_CHAIN}"
+                        for subnet in subnets
+                    ],
+                }
+                for chain, hooks in hooks_by_chain.items():
+                    self.assertEqual(state[family][chain], hooks + host_rules[family][chain])
 
-    def test_stack_reconciler_reapplies_rules_before_restarting_stopped_services(self) -> None:
+            remove = self._run_firewall_mode(mock_bin, state_file, "remove")
+
+            self.assertEqual(remove.returncode, 0, remove.stderr)
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+            for family in subnets_by_family:
+                for chain, expected_host_rules in host_rules[family].items():
+                    self.assertEqual(state[family][chain], expected_host_rules)
+
+    def test_stack_reconciler_recovers_missing_services_and_leaves_migrate_stopped(
+        self,
+    ) -> None:
         shell = r'''
 source "$1"
 active_release_image_ref() { printf '%s\n' "$TEAGRAM_TEST_ACTIVE_IMAGE_REF"; }
@@ -470,9 +514,29 @@ compose_stack() {
   local image_ref=$1
   shift
   if [[ "$1" == ps ]]; then
-    printf '%s\n' postgres teagramd turnstile-egress haproxy edge
+    cat "$TEAGRAM_TEST_RUNNING_SERVICES"
   elif [[ "$1" == up ]]; then
-    printf 'compose:%s:%s\n' "$image_ref" "$*" >> "$TEAGRAM_TEST_STACK_LOG"
+    local command="$*"
+    local service
+    local -a services=()
+    shift
+    while (( $# > 0 )); do
+      if [[ "$1" == -* ]]; then
+        shift
+      else
+        services+=("$1")
+        shift
+      fi
+    done
+    if (( ${#services[@]} == 0 )); then
+      services=(postgres migrate teagramd turnstile-egress haproxy edge cloudflared)
+    fi
+    for service in "${services[@]}"; do
+      if ! grep -Fqx "$service" "$TEAGRAM_TEST_RUNNING_SERVICES"; then
+        printf '%s\n' "$service" >> "$TEAGRAM_TEST_RUNNING_SERVICES"
+      fi
+    done
+    printf 'compose:%s:%s\n' "$image_ref" "$command" >> "$TEAGRAM_TEST_STACK_LOG"
   else
     return 2
   fi
@@ -483,10 +547,17 @@ stack_reconcile_locked
 '''
         with tempfile.TemporaryDirectory() as directory:
             log = pathlib.Path(directory) / "reconcile.log"
+            running_services = pathlib.Path(directory) / "running-services"
+            running_services.write_text(
+                "\n".join(("postgres", "teagramd", "turnstile-egress", "haproxy", "edge"))
+                + "\n",
+                encoding="utf-8",
+            )
             active_ref = "ghcr.io/teagramhq/teagram-server-demo@sha256:" + "c" * 64
             env = os.environ.copy()
             env["TEAGRAM_TEST_ACTIVE_IMAGE_REF"] = active_ref
             env["TEAGRAM_TEST_STACK_LOG"] = str(log)
+            env["TEAGRAM_TEST_RUNNING_SERVICES"] = str(running_services)
             result = subprocess.run(
                 ["bash", "-c", shell, "test-stack-reconcile", str(SCRIPT)],
                 check=False,
@@ -500,9 +571,12 @@ stack_reconcile_locked
                 log.read_text(encoding="utf-8").splitlines(),
                 [
                     "firewall",
-                    f"compose:{active_ref}:up -d --no-build",
+                    f"compose:{active_ref}:up -d --no-build --no-deps cloudflared",
                 ],
             )
+            running = set(running_services.read_text(encoding="utf-8").splitlines())
+            self.assertIn("cloudflared", running)
+            self.assertNotIn("migrate", running)
 
     def test_stack_start_uses_active_digest_and_applies_rules_before_compose_up(self) -> None:
         shell = r'''
@@ -698,22 +772,27 @@ compose_stack "$active_ref" config
         rules = render("v4", *subnets)
 
         self.assertEqual(
-            rules[: 2 * len(subnets)],
+            rules[: 3 * len(subnets)],
             [
                 hook
                 for subnet in subnets
                 for hook in (
+                    f"-A FORWARD -s {subnet} -j {IPTABLES_CHAIN}",
                     f"-A DOCKER-USER -s {subnet} -j {IPTABLES_CHAIN}",
                     f"-A INPUT -i br+ -s {subnet} -j {INPUT_CHAIN}",
                 )
             ],
         )
         self.assertEqual(
-            rules[2 * len(subnets) : 3 * len(subnets)],
+            rules[3 * len(subnets) : 4 * len(subnets)],
             [
                 f"-A {IPTABLES_CHAIN} -d {subnet} -j RETURN"
                 for subnet in subnets
             ],
+        )
+        self.assertEqual(
+            sum(rule.startswith("-A FORWARD ") for rule in rules),
+            len(subnets),
         )
         self.assertEqual(
             sum(rule.startswith("-A DOCKER-USER ") for rule in rules),
@@ -731,23 +810,27 @@ compose_stack "$active_ref" config
             )
         )
         self.assertTrue(
-            all(rules.count(rule) == 1 for rule in rules[: 3 * len(subnets)])
+            all(rules.count(rule) == 1 for rule in rules[: 4 * len(subnets)])
         )
-        self.assertFalse(any("," in rule for rule in rules[: 3 * len(subnets)]))
+        self.assertFalse(any("," in rule for rule in rules[: 4 * len(subnets)]))
 
     def test_ipv4_drops_every_private_and_multicast_destination_for_demo_source(self) -> None:
         rules = render("v4", EXAMPLE_IPV4_SUBNET)
 
         self.assertEqual(
             rules[0],
-            f"-A DOCKER-USER -s {EXAMPLE_IPV4_SUBNET} -j {IPTABLES_CHAIN}",
+            f"-A FORWARD -s {EXAMPLE_IPV4_SUBNET} -j {IPTABLES_CHAIN}",
         )
         self.assertEqual(
             rules[1],
-            f"-A INPUT -i br+ -s {EXAMPLE_IPV4_SUBNET} -j {INPUT_CHAIN}",
+            f"-A DOCKER-USER -s {EXAMPLE_IPV4_SUBNET} -j {IPTABLES_CHAIN}",
         )
         self.assertEqual(
             rules[2],
+            f"-A INPUT -i br+ -s {EXAMPLE_IPV4_SUBNET} -j {INPUT_CHAIN}",
+        )
+        self.assertEqual(
+            rules[3],
             f"-A {IPTABLES_CHAIN} -d {EXAMPLE_IPV4_SUBNET} -j RETURN",
         )
         for destination in PRIVATE_IPV4_CIDRS:
@@ -783,14 +866,18 @@ compose_stack "$active_ref" config
 
         self.assertEqual(
             rules[0],
-            f"-A DOCKER-USER -s {EXAMPLE_IPV6_SUBNET} -j {IPTABLES_CHAIN}",
+            f"-A FORWARD -s {EXAMPLE_IPV6_SUBNET} -j {IPTABLES_CHAIN}",
         )
         self.assertEqual(
             rules[1],
-            f"-A INPUT -i br+ -s {EXAMPLE_IPV6_SUBNET} -j {INPUT_CHAIN}",
+            f"-A DOCKER-USER -s {EXAMPLE_IPV6_SUBNET} -j {IPTABLES_CHAIN}",
         )
         self.assertEqual(
             rules[2],
+            f"-A INPUT -i br+ -s {EXAMPLE_IPV6_SUBNET} -j {INPUT_CHAIN}",
+        )
+        self.assertEqual(
+            rules[3],
             f"-A {IPTABLES_CHAIN} -d {EXAMPLE_IPV6_SUBNET} -j RETURN",
         )
         for destination in PRIVATE_IPV6_CIDRS:

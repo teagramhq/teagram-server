@@ -68,6 +68,7 @@ render_rules() {
   esac
 
   for subnet in "$@"; do
+    printf '%s\n' "-A FORWARD -s $subnet -j $IPTABLES_CHAIN"
     printf '%s\n' "-A DOCKER-USER -s $subnet -j $IPTABLES_CHAIN"
     printf '%s\n' "-A INPUT -i $INPUT_BRIDGE_INTERFACE -s $subnet -j $IPTABLES_INPUT_CHAIN"
   done
@@ -228,7 +229,12 @@ apply_family() {
     status=$?
     chain_listing_error "$binary" INPUT "$status" "$binary has no INPUT chain"
   fi
-  ensure_forward_hook "$binary"
+  if chain_listing "$binary" FORWARD; then
+    :
+  else
+    status=$?
+    chain_listing_error "$binary" FORWARD "$status" "$binary has no FORWARD chain"
+  fi
   rendered_rules=$(render_rules "$family" "${subnets[@]}") \
     || fail "$family isolation rules could not be rendered"
   for chain in "$IPTABLES_CHAIN" "$IPTABLES_INPUT_CHAIN"; do
@@ -253,6 +259,7 @@ apply_family() {
     printf 'COMMIT\n'
   } | "${binary}-restore" -w 10 --noflush
 
+  ensure_source_hooks "$binary" FORWARD "$IPTABLES_CHAIN" '' '' "${subnets[@]}"
   ensure_source_hooks "$binary" DOCKER-USER "$IPTABLES_CHAIN" '' '' "${subnets[@]}"
   ensure_source_hooks "$binary" INPUT "$IPTABLES_INPUT_CHAIN" "$IPTABLES_CHAIN" \
     "$INPUT_BRIDGE_INTERFACE" "${subnets[@]}"
@@ -311,56 +318,6 @@ ensure_source_hooks() {
   done
 }
 
-ensure_forward_hook() {
-  local binary=$1 listing status index hook_count=0 rule
-  local -a forward_rules=()
-
-  if chain_listing "$binary" FORWARD; then
-    listing=$CHAIN_LISTING
-  else
-    status=$?
-    chain_listing_error "$binary" FORWARD "$status" "$binary is missing FORWARD"
-  fi
-  mapfile -t forward_rules < <(sed -n '/^-A FORWARD /p' <<<"$listing")
-  for rule in "${forward_rules[@]}"; do
-    if [[ "$rule" == '-A FORWARD -j DOCKER-USER' ]]; then
-      ((hook_count += 1))
-    fi
-  done
-  if [[ "${forward_rules[0]:-}" == '-A FORWARD -j DOCKER-USER' ]] \
-    && (( hook_count == 1 )); then
-    return 0
-  fi
-
-  for ((index = ${#forward_rules[@]} - 1; index >= 0; index--)); do
-    if [[ "${forward_rules[$index]}" == '-A FORWARD -j DOCKER-USER' ]]; then
-      "$binary" -w 10 -D FORWARD "$((index + 1))"
-    fi
-  done
-  "$binary" -w 10 -I FORWARD 1 -j DOCKER-USER
-}
-
-check_forward_hook() {
-  local binary=$1 family=$2 listing status rule hook_count=0
-  local -a forward_rules=()
-
-  if chain_listing "$binary" FORWARD; then
-    listing=$CHAIN_LISTING
-  else
-    status=$?
-    chain_listing_error "$binary" FORWARD "$status" "$binary is missing FORWARD for $family"
-  fi
-  mapfile -t forward_rules < <(sed -n '/^-A FORWARD /p' <<<"$listing")
-  [[ "${forward_rules[0]:-}" == '-A FORWARD -j DOCKER-USER' ]] \
-    || fail "$family FORWARD hook is missing or shadowed"
-  for rule in "${forward_rules[@]}"; do
-    if [[ "$rule" == '-A FORWARD -j DOCKER-USER' ]]; then
-      ((hook_count += 1))
-    fi
-  done
-  [[ "$hook_count" -eq 1 ]] || fail "$family FORWARD hook is duplicated"
-}
-
 remove_family() {
   local binary=$1 parent_chain listing status managed_chain index
   local -A parent_listings=() chain_present=()
@@ -371,7 +328,7 @@ remove_family() {
 
   # Inspect every managed chain before changing any hooks or rules. A lock or
   # permission error must not be mistaken for an absent chain during removal.
-  for parent_chain in DOCKER-USER INPUT; do
+  for parent_chain in DOCKER-USER INPUT FORWARD; do
     if chain_listing "$binary" "$parent_chain"; then
       parent_listings[$parent_chain]=$CHAIN_LISTING
     else
@@ -397,7 +354,7 @@ remove_family() {
     fi
   done
 
-  for parent_chain in DOCKER-USER INPUT; do
+  for parent_chain in DOCKER-USER INPUT FORWARD; do
     listing=${parent_listings[$parent_chain]}
     mapfile -t parent_rules < <(sed -n "/^-A $parent_chain /p" <<<"$listing")
     for ((index = ${#parent_rules[@]} - 1; index >= 0; index--)); do
@@ -468,7 +425,7 @@ check_family() {
   check_source_hooks "$binary" "$family" DOCKER-USER "$IPTABLES_CHAIN" '' '' "${subnets[@]}"
   check_source_hooks "$binary" "$family" INPUT "$IPTABLES_INPUT_CHAIN" "$IPTABLES_CHAIN" \
     "$INPUT_BRIDGE_INTERFACE" "${subnets[@]}"
-  check_forward_hook "$binary" "$family"
+  check_source_hooks "$binary" "$family" FORWARD "$IPTABLES_CHAIN" '' '' "${subnets[@]}"
   if chain_listing "$binary" "$IPTABLES_CHAIN"; then
     chain_rules=$CHAIN_LISTING
   else
@@ -599,8 +556,9 @@ stack_lock_release() {
 }
 
 stack_reconcile_locked() {
-  local active_image_ref running_services service missing=''
+  local active_image_ref running_services service
   local -a running_services_list=()
+  local -a missing_services=()
   local -A running=()
   local -a expected_services=(postgres teagramd turnstile-egress haproxy edge cloudflared)
 
@@ -614,14 +572,14 @@ stack_reconcile_locked() {
   done
   for service in "${expected_services[@]}"; do
     if [[ -z ${running[$service]:-} ]]; then
-      missing+=" $service"
+      missing_services+=("$service")
     fi
   done
-  if [[ -n $missing ]]; then
+  if (( ${#missing_services[@]} > 0 )); then
     apply_rules
-    compose_stack "$active_image_ref" up -d --no-build \
-      || fail "cannot recover stopped Lima demo services:$missing"
-    printf 'restarted Lima demo services:%s\n' "$missing"
+    compose_stack "$active_image_ref" up -d --no-build --no-deps "${missing_services[@]}" \
+      || fail "cannot recover stopped Lima demo services: ${missing_services[*]}"
+    printf 'restarted Lima demo services: %s\n' "${missing_services[*]}"
   fi
   stack_lock_release
 }

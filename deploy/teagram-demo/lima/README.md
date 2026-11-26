@@ -11,7 +11,7 @@ charlie demo files are unchanged; this directory is a separate Compose file.
 | `compose.yaml` | The stack: postgres, migrate, one teagramd, turnstile-egress, haproxy, edge, cloudflared. |
 | `postgresql.conf` | Postgres settings sized for its 49 MiB limit. |
 | `prepare-blobs.sh` | Root, idempotent: fully allocated 4 GiB ext4 filesystem at `/srv/teagram-demo-blobs`, preserving 100 MiB free on the host filesystem, and proxy runtime directories outside the privileged checkout. Run once before starting the stack. |
-| `install-egress-isolation.sh` | Root, idempotent: installs source-scoped `DOCKER-USER` and host `INPUT` rules and enables ordered OpenRC firewall and stack services. |
+| `install-egress-isolation.sh` | Root, idempotent: installs source-scoped `FORWARD`, `DOCKER-USER`, and host `INPUT` rules and enables ordered OpenRC firewall and stack services. |
 | `egress-isolation-threat-model.md` | Scope, trust boundaries, controls, and residual risks for the Lima demo firewall policy. |
 | `check.sh` | Read-only preflight. Pulls nothing, starts and stops nothing, writes nothing. Ends with `would_apply` or `would_reject`. |
 | `test-lima-compose.sh` | Renders the stack against fixture values and asserts the acceptance criteria. CI runs it through `test-demo-compose.sh`. |
@@ -179,14 +179,18 @@ deploy/teagram-demo/lima/install-egress-isolation.sh check
 ```
 
 The installer manages the `TEAGRAM_DEMO_EGRESS` chain and one source hook per
-demo subnet in `DOCKER-USER`, plus a separate `TEAGRAM_DEMO_INPUT` chain for
-traffic addressed to Lima. The egress chain allows traffic between demo
-networks, drops RFC1918, carrier-grade NAT, link-local and multicast
-destinations, then returns all other traffic to Docker. The INPUT chain allows
-established replies first, then blocks those destinations and each bridge
-gateway address without a subnet return. Docker's embedded DNS is queried at
-`127.0.0.11`; no direct DNS exception to the bridge gateways is needed. Other
-containers and host-originated traffic do not match the demo source ranges.
+demo subnet at the start of `FORWARD` and in `DOCKER-USER`, plus a separate
+`TEAGRAM_DEMO_INPUT` chain for traffic addressed to Lima. The source-scoped
+`FORWARD` hooks run before host rules that could terminate demo packets, while
+preserving the order of those host rules for all traffic. The egress chain
+allows traffic between demo networks, drops RFC1918, carrier-grade NAT,
+link-local and multicast destinations, then returns all other traffic to
+Docker. The INPUT chain allows established replies first, then blocks those
+destinations and each bridge gateway address without a subnet return. Docker's
+embedded DNS is queried at `127.0.0.11`; no direct DNS exception to the bridge
+gateways is needed. Other containers and host-originated traffic do not match
+the demo source ranges.
+
 If any Docker demo networks are absent, apply reports their names and defers
 IPv6 updates without removing an existing IPv6 chain; `check` rejects until all
 three networks exist. The stack service creates the networks without starting
@@ -197,7 +201,9 @@ OpenRC enables `teagram-demo-egress` after Docker and a supervised
 has `restart: "no"`, so dockerd cannot start demo containers before OpenRC has
 installed isolation. The stack supervisor creates the networks, applies the
 rules, and then starts Compose; every ten seconds it checks the six long-running
-services and restarts stopped services after reapplying the rules. It retries
+services and restarts only missing services with dependency startup disabled,
+leaving the one-shot `migrate` service for explicit bootstrap and rollout. It
+reapplies the rules before recovery. It retries
 while dockerd is unavailable and shares the deploy lock, so it does not start an
 old release during a rollout. OpenRC respawns the supervisor if it exits. Its
 output is sent to syslog with the `teagram-demo-stack` tag. Start and stop the
