@@ -258,6 +258,7 @@ def main() -> None:
 
     if args.tailnet_port is not None:
         tailnet_url = f"http://127.0.0.1:{args.tailnet_port}"
+        tailnet_host = "teagram-dev.tailaa4918.ts.net"
         tailnet_status, tailnet_headers, tailnet_body = read_response(tailnet_url + "/")
         if tailnet_status != 200 or tailnet_body != body:
             fail("tailnet edge root response differs from the public edge")
@@ -265,8 +266,20 @@ def main() -> None:
         tailnet_admin_status, _, _ = read_response(tailnet_url + "/admin/")
         if tailnet_admin_status != 404:
             fail(f"tailnet /admin/ returned HTTP {tailnet_admin_status}, want 404")
+        bootstrap_status, bootstrap_headers, bootstrap_body = read_response(
+            tailnet_url + "/teagram-config.json", headers={"Host": tailnet_host}
+        )
+        if bootstrap_status != 200 or bootstrap_headers.get("Content-Type", "").split(";", 1)[0] != "application/json":
+            fail("tailnet /teagram-config.json did not return application/json")
+        try:
+            tailnet_bootstrap = json.loads(bootstrap_body)
+        except json.JSONDecodeError as error:
+            fail(f"tailnet Web bootstrap config is invalid: {error}")
+        if tailnet_bootstrap != {"server": tailnet_host, "autoGuest": True}:
+            fail("tailnet Web bootstrap config does not select the tailnet server")
         tailnet_discovery_status, _, tailnet_discovery_body = read_response(
-            tailnet_url + "/.well-known/teagramd/client"
+            tailnet_url + "/.well-known/teagramd/client",
+            headers={"Host": tailnet_bootstrap["server"]},
         )
         if tailnet_discovery_status != 200:
             fail(f"tailnet discovery HTTP status is {tailnet_discovery_status}")
@@ -280,11 +293,18 @@ def main() -> None:
             fail("tailnet discovery document differs from the dev-specific client config")
         if tailnet_discovery.get("websocket", {}).get("endpoint") != TAILNET_WEBSOCKET_ENDPOINT:
             fail("tailnet discovery WebSocket endpoint is incorrect")
+        websocket_endpoint = urllib.parse.urlsplit(tailnet_discovery["websocket"]["endpoint"])
+        if (
+            websocket_endpoint.scheme != "wss"
+            or websocket_endpoint.hostname != tailnet_bootstrap["server"]
+            or websocket_endpoint.path != "/apiws"
+        ):
+            fail("tailnet Web bootstrap does not lead to the advertised /apiws endpoint")
         websocket_handshake(
             args.tailnet_port,
-            "https://teagram-dev.tailaa4918.ts.net",
+            f"https://{tailnet_bootstrap['server']}",
             101,
-            host="teagram-dev.tailaa4918.ts.net",
+            host=websocket_endpoint.hostname,
             cf_connecting_ip="198.51.100.9",
             x_forwarded_for="203.0.113.8, 192.0.2.44",
         )
@@ -292,22 +312,22 @@ def main() -> None:
             args.tailnet_port,
             "https://foreign.example",
             403,
-            host="teagram-dev.tailaa4918.ts.net",
+            host=tailnet_bootstrap["server"],
             cf_connecting_ip="198.51.100.9",
             x_forwarded_for="192.0.2.44",
         )
         websocket_handshake(
             args.tailnet_port,
-            "https://teagram-dev.tailaa4918.ts.net",
+            f"https://{tailnet_bootstrap['server']}",
             400,
-            host="teagram-dev.tailaa4918.ts.net",
+            host=tailnet_bootstrap["server"],
             x_forwarded_for=None,
         )
         websocket_handshake(
             args.tailnet_port,
-            "https://teagram-dev.tailaa4918.ts.net",
+            f"https://{tailnet_bootstrap['server']}",
             400,
-            host="teagram-dev.tailaa4918.ts.net",
+            host=tailnet_bootstrap["server"],
             x_forwarded_for="not-an-ip",
         )
     print(

@@ -751,6 +751,7 @@ if [[ -e "$MODE_FILE" || -L "$MODE_FILE" ]]; then
     TAILNET_SMOKE_ARGS+=(--tailnet-port 8081)
   fi
   python3 "$SCRIPT_DIR/smoke.py" --bootstrap "${TAILNET_SMOKE_ARGS[@]}" "$DEMO_CLIENT_CONFIG"
+  demo_persist_tailnet_enabled "$TAILNET_ENABLED"
   echo "demo install resumed and seeded at $SHA"
   exit 0
 fi
@@ -854,4 +855,5 @@ if [[ "$TAILNET_ENABLED" == true ]]; then
   TAILNET_SMOKE_ARGS+=(--tailnet-port 8081)
 fi
 python3 "$SCRIPT_DIR/smoke.py" --bootstrap "${TAILNET_SMOKE_ARGS[@]}" "$DEMO_CLIENT_CONFIG"
+demo_persist_tailnet_enabled "$TAILNET_ENABLED"
 echo "demo install ready sha=$SHA rsa_fingerprint=$FINGERPRINT seeded=true"

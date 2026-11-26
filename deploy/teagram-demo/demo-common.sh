@@ -59,6 +59,7 @@ DEMO_SEED_OWNER_USERNAME="demo_seed_owner"
 # shellcheck disable=SC2034
 DEMO_IMAGE_REPOSITORY="ghcr.io/teagramhq/teagram-server-demo"
 DEMO_ACTIVE_RELEASE_FILE="$DEMO_STATE_DIR/active-release.json"
+DEMO_TAILNET_ENABLED_FILE="$DEMO_STATE_DIR/tailnet-enabled"
 DEMO_TAILNET_COMPOSE_FILE="$DEMO_SCRIPT_DIR/teagram-dev-tailnet.compose.yaml"
 DEMO_TAILNET_ORIGIN="https://teagram-dev.tailaa4918.ts.net"
 demo_fail() {
@@ -67,7 +68,20 @@ demo_fail() {
 }
 
 demo_tailnet_enabled() {
-  case "${TEAGRAM_DEV_TAILNET_ENABLED:-false}" in
+  local enabled
+  if [[ "${TEAGRAM_DEV_TAILNET_ENABLED+x}" == x ]]; then
+    enabled=$TEAGRAM_DEV_TAILNET_ENABLED
+  elif [[ -e "$DEMO_TAILNET_ENABLED_FILE" || -L "$DEMO_TAILNET_ENABLED_FILE" ]]; then
+    [[ -f "$DEMO_TAILNET_ENABLED_FILE" && ! -L "$DEMO_TAILNET_ENABLED_FILE" &&
+      "$(stat -c '%a' "$DEMO_TAILNET_ENABLED_FILE")" == 600 ]] || {
+      demo_fail 'persisted teagram-dev tailnet setting is missing, unsafe, or has invalid permissions'
+      return 1
+    }
+    enabled=$(<"$DEMO_TAILNET_ENABLED_FILE")
+  else
+    enabled=false
+  fi
+  case "$enabled" in
     ''|false)
       printf '%s\n' false
       ;;
@@ -83,6 +97,44 @@ demo_tailnet_enabled() {
       return 1
       ;;
   esac
+}
+
+demo_persist_tailnet_enabled() {
+  local enabled="${1:-}" temporary
+  case "$enabled" in
+    true|false) ;;
+    *)
+      demo_fail 'tailnet setting to persist must be true or false'
+      return 1
+      ;;
+  esac
+  [[ ! -L "$DEMO_STATE_DIR" && ! -L "$DEMO_TAILNET_ENABLED_FILE" ]] || {
+    demo_fail 'tailnet setting state path must not be a symlink'
+    return 1
+  }
+  mkdir -p "$DEMO_STATE_DIR" || {
+    demo_fail 'tailnet setting state directory could not be created'
+    return 1
+  }
+  if ! temporary=$(mktemp "$DEMO_STATE_DIR/.tailnet-enabled.XXXXXXXX"); then
+    demo_fail 'tailnet setting could not be staged'
+    return 1
+  fi
+  if ! printf '%s\n' "$enabled" > "$temporary"; then
+    rm -f -- "$temporary"
+    demo_fail 'tailnet setting could not be written'
+    return 1
+  fi
+  if ! chmod 0600 "$temporary"; then
+    rm -f -- "$temporary"
+    demo_fail 'tailnet setting permissions could not be set'
+    return 1
+  fi
+  if ! mv -f -- "$temporary" "$DEMO_TAILNET_ENABLED_FILE"; then
+    rm -f -- "$temporary"
+    demo_fail 'tailnet setting could not be installed'
+    return 1
+  fi
 }
 
 demo_valid_signup_username() {
@@ -968,6 +1020,44 @@ demo_prepare_tailnet_client_config() {
     demo_fail 'tailnet client config could not be installed'
     return 1
   fi
+  demo_prepare_tailnet_bootstrap_config
+}
+
+demo_prepare_tailnet_bootstrap_config() {
+  local public_config="$DEMO_CLIENT_CONFIG_DIR/teagram-config.json"
+  local tailnet_config="$DEMO_CLIENT_CONFIG_DIR/teagram-config-tailnet.json" temporary
+  [[ -f "$public_config" && ! -L "$public_config" ]] || {
+    demo_fail 'public Web bootstrap config is missing or unsafe for tailnet setup'
+    return 1
+  }
+  [[ ! -L "$tailnet_config" ]] || {
+    demo_fail 'tailnet Web bootstrap config must not be a symlink'
+    return 1
+  }
+  jq -e 'type == "object" and .server == "demo.teagram.io" and .autoGuest == true' \
+    "$public_config" >/dev/null || {
+    demo_fail 'public Web bootstrap config is invalid for tailnet setup'
+    return 1
+  }
+  if ! temporary=$(mktemp "$DEMO_CLIENT_CONFIG_DIR/.teagram-config-tailnet.XXXXXXXX"); then
+    demo_fail 'tailnet Web bootstrap config could not be staged'
+    return 1
+  fi
+  if ! jq '.server = "teagram-dev.tailaa4918.ts.net"' "$public_config" > "$temporary"; then
+    rm -f -- "$temporary"
+    demo_fail 'tailnet Web bootstrap config could not be generated'
+    return 1
+  fi
+  if ! chmod 0644 "$temporary"; then
+    rm -f -- "$temporary"
+    demo_fail 'tailnet Web bootstrap config permissions could not be set'
+    return 1
+  fi
+  if ! mv -f -- "$temporary" "$tailnet_config"; then
+    rm -f -- "$temporary"
+    demo_fail 'tailnet Web bootstrap config could not be installed'
+    return 1
+  fi
 }
 
 demo_reload_edge() {
@@ -1028,6 +1118,7 @@ demo_reload_tailnet_edge() {
       demo_tailnet_compose stop edge-tailnet || return 1
       demo_tailnet_compose rm -f edge-tailnet || return 1
     fi
+    demo_persist_tailnet_enabled false || return 1
     return 0
   fi
 
@@ -1058,6 +1149,7 @@ demo_reload_tailnet_edge() {
     demo_fail 'tailnet edge nginx graceful reload failed'
     return 1
   }
+  demo_persist_tailnet_enabled true
 }
 
 demo_current_web_release() {
@@ -1159,7 +1251,7 @@ demo_haproxy_control() {
 }
 
 demo_compose_with_file() {
-  local compose_file="$1" image_ref enabled
+  local compose_file="$1" image_ref enabled=false
   local -a compose_args=(
     --env-file "$DEMO_ENV_FILE"
     --project-directory "$DEMO_REPO_ROOT"
@@ -1172,20 +1264,20 @@ demo_compose_with_file() {
   else
     compose_args+=(--file "$DEMO_REPO_ROOT/docker-compose.yml")
   fi
-  if [[ "$compose_file" == "$DEMO_REPO_ROOT/docker-compose.yml" &&
-    "$DEMO_DEPLOY_TARGET" != lima ]]; then
+  if [[ "$DEMO_DEPLOY_TARGET" != lima ]]; then
     if [[ "${DEMO_FORCE_TAILNET_COMPOSE:-false}" == true ]]; then
       enabled=true
     else
       enabled=$(demo_tailnet_enabled) || return 1
     fi
-    if [[ "$enabled" == true ]]; then
-      [[ -f "$DEMO_TAILNET_COMPOSE_FILE" && ! -L "$DEMO_TAILNET_COMPOSE_FILE" ]] || {
-        demo_fail 'teagram-dev tailnet Compose overlay is missing or unsafe'
-        return 1
-      }
-      compose_args+=(--file "$DEMO_TAILNET_COMPOSE_FILE")
-    fi
+  fi
+  if [[ "$compose_file" == "$DEMO_REPO_ROOT/docker-compose.yml" &&
+    "$DEMO_DEPLOY_TARGET" != lima && "$enabled" == true ]]; then
+    [[ -f "$DEMO_TAILNET_COMPOSE_FILE" && ! -L "$DEMO_TAILNET_COMPOSE_FILE" ]] || {
+      demo_fail 'teagram-dev tailnet Compose overlay is missing or unsafe'
+      return 1
+    }
+    compose_args+=(--file "$DEMO_TAILNET_COMPOSE_FILE")
   fi
   if [[ "$DEMO_DEPLOY_TARGET" != lima ]]; then
     compose_args+=(--profile demo)
@@ -1200,6 +1292,7 @@ demo_compose_with_file() {
     -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
     -u TEAGRAM_DEMO_EDGE_BIND -u TEAGRAM_DEMO_EDGE_CONFIG_SHA256 \
     -u DEMO_FORCE_TAILNET_COMPOSE \
+    "TEAGRAM_DEV_TAILNET_ENABLED=$enabled" \
     "TEAGRAM_DEMO_IMAGE_REF=$image_ref" \
     docker compose "${compose_args[@]}" "$@" </dev/null
 }

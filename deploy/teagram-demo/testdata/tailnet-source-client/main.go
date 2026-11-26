@@ -22,6 +22,17 @@ type forwardedHeaders struct {
 	XRealIP        string `json:"xRealIp"`
 }
 
+type webBootstrap struct {
+	Server    string `json:"server"`
+	AutoGuest bool   `json:"autoGuest"`
+}
+
+type clientDiscovery struct {
+	Websocket struct {
+		Endpoint string `json:"endpoint"`
+	} `json:"websocket"`
+}
+
 func failf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, format+"\n", args...)
 	os.Exit(1)
@@ -104,7 +115,53 @@ func assertUntrustedPeerRejected() {
 	}
 }
 
-func assertWebSocketHandshake(port int) {
+func readJSON(port int, path, host string, target any) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, //nolint:gosec // The harness connects only to the local published edge.
+		"http://"+net.JoinHostPort("127.0.0.1", strconv.Itoa(port))+path, nil)
+	if err != nil {
+		failf("create %s request: %v", path, err)
+	}
+	request.Host = host
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			Proxy: nil,
+		},
+	}
+	response, err := client.Do(request) //nolint:gosec // The harness connects only to the local published edge.
+	if err != nil {
+		failf("GET %s: %v", path, err)
+	}
+	defer func() { _ = response.Body.Close() }() //nolint:errcheck // The response body is decoded below.
+	if response.StatusCode != http.StatusOK {
+		failf("GET %s returned HTTP %d, want 200", path, response.StatusCode)
+	}
+	if response.Header.Get("Content-Type") != "application/json" {
+		failf("GET %s Content-Type=%q, want application/json", path, response.Header.Get("Content-Type"))
+	}
+	if err := json.NewDecoder(response.Body).Decode(target); err != nil {
+		failf("decode %s: %v", path, err)
+	}
+}
+
+func assertTailnetWebBootstrap(port int) string {
+	const expectedServer = "teagram-dev.tailaa4918.ts.net"
+	var bootstrap webBootstrap
+	readJSON(port, "/teagram-config.json", expectedServer, &bootstrap)
+	if bootstrap.Server != expectedServer || !bootstrap.AutoGuest {
+		failf("tailnet Web bootstrap=%+v, want server %q with autoGuest enabled", bootstrap, expectedServer)
+	}
+	var discovery clientDiscovery
+	readJSON(port, "/.well-known/teagramd/client", bootstrap.Server, &discovery)
+	if discovery.Websocket.Endpoint != "wss://"+bootstrap.Server+"/apiws" {
+		failf("tailnet discovery endpoint=%q, want wss://%s/apiws", discovery.Websocket.Endpoint, bootstrap.Server)
+	}
+	return bootstrap.Server
+}
+
+func assertWebSocketHandshake(port int, server string) {
 	dialer := &net.Dialer{Timeout: 5 * time.Second}
 	connection, err := dialer.DialContext(context.Background(), "tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
 	if err != nil {
@@ -116,12 +173,12 @@ func assertWebSocketHandshake(port int) {
 	}
 	key := base64.StdEncoding.EncodeToString([]byte("tailnet-source-test-key"))
 	if _, err := fmt.Fprintf(connection,
-		"GET /apiws HTTP/1.1\r\nHost: teagram-dev.tailaa4918.ts.net\r\n"+
-			"Origin: https://teagram-dev.tailaa4918.ts.net\r\n"+
+		"GET /apiws HTTP/1.1\r\nHost: %s\r\n"+
+			"Origin: https://%s\r\n"+
 			"Connection: Upgrade\r\nUpgrade: websocket\r\n"+
 			"Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: %s\r\n"+
 			"X-Forwarded-For: 203.0.113.8, 192.0.2.44\r\n"+
-			"CF-Connecting-IP: 198.51.100.99\r\n\r\n", key); err != nil {
+			"CF-Connecting-IP: 198.51.100.99\r\n\r\n", server, server, key); err != nil {
 		failf("write WebSocket handshake: %v", err)
 	}
 	reader := bufio.NewReader(connection)
@@ -169,6 +226,7 @@ func main() {
 	assertForwardedHeaders(port)
 	assertRejectedForwardedHeaders(port)
 	assertRejectedPublicOrigins(port)
-	assertWebSocketHandshake(port)
+	server := assertTailnetWebBootstrap(port)
+	assertWebSocketHandshake(port, server)
 	fmt.Println("tailnet Nginx source-address, origin, and WebSocket checks pass")
 }

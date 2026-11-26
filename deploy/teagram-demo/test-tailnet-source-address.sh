@@ -11,6 +11,7 @@ CLIENT_CONTAINER_NAME="teagram-tailnet-client-$$"
 PEER_CONTAINER_NAME="teagram-tailnet-peer-$$"
 ALPINE_IMAGE=alpine:3.22
 NGINX_IMAGE=${TEAGRAM_TEST_NGINX_IMAGE:-mirror.gcr.io/library/nginx:1.28.0-alpine@sha256:09ab424a8c788f8d0fe3a64429f6d19dfa526885c8609b748d0943a75dcb9f8c}
+WEB_CONFIG_DIR="$TMP_DIR/teagramd"
 
 cleanup() {
   docker rm -f "$NGINX_CONTAINER_NAME" "$ECHO_CONTAINER_NAME" "$CLIENT_CONTAINER_NAME" "$PEER_CONTAINER_NAME" >/dev/null 2>&1 || true
@@ -41,6 +42,12 @@ chmod 0555 "$TMP_DIR/echo"
 GOOS=linux CGO_ENABLED=0 GOARCH="$GOARCH" go build \
   -trimpath -o "$TMP_DIR/client" "$SCRIPT_DIR/testdata/tailnet-source-client/main.go"
 chmod 0555 "$TMP_DIR/client"
+mkdir -m 0755 "$WEB_CONFIG_DIR"
+printf '%s\n' '{"server":"teagram-dev.tailaa4918.ts.net","autoGuest":true}' \
+  > "$WEB_CONFIG_DIR/teagram-config-tailnet.json"
+printf '%s\n' '{"version":1,"websocket":{"endpoint":"wss://teagram-dev.tailaa4918.ts.net/apiws"}}' \
+  > "$WEB_CONFIG_DIR/client-tailnet"
+chmod 0644 "$WEB_CONFIG_DIR/teagram-config-tailnet.json" "$WEB_CONFIG_DIR/client-tailnet"
 
 docker network create --internal \
   --subnet 198.18.130.0/24 \
@@ -70,6 +77,12 @@ docker cp "$SCRIPT_DIR/nginx-tailnet.conf" \
   "$NGINX_CONTAINER_NAME:/etc/nginx/nginx.conf" >/dev/null
 docker cp "$SCRIPT_DIR/nginx-config" "$NGINX_CONTAINER_NAME:/etc/nginx/demo" >/dev/null
 docker start "$NGINX_CONTAINER_NAME" >/dev/null
+docker exec --user 0:0 "$NGINX_CONTAINER_NAME" \
+  mkdir -p /usr/share/nginx/html/.well-known/teagramd
+docker cp "$WEB_CONFIG_DIR/teagram-config-tailnet.json" \
+  "$NGINX_CONTAINER_NAME:/usr/share/nginx/html/.well-known/teagramd/teagram-config-tailnet.json" >/dev/null
+docker cp "$WEB_CONFIG_DIR/client-tailnet" \
+  "$NGINX_CONTAINER_NAME:/usr/share/nginx/html/.well-known/teagramd/client-tailnet" >/dev/null
 docker network connect "$NETWORK_NAME" "$NGINX_CONTAINER_NAME"
 docker exec "$NGINX_CONTAINER_NAME" nginx -c /etc/nginx/nginx.conf -t
 docker exec -d "$NGINX_CONTAINER_NAME" nginx -c /etc/nginx/nginx.conf -g 'daemon off;'

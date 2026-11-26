@@ -291,6 +291,10 @@ bridge without outbound masquerading and reaches HAProxy through the private
 backend network. Its trusted forwarded-IP hop is the dedicated bridge gateway
 `198.18.134.1`, verified by the Compose policy test. After the dev deploy is
 verified, the host's `tailscale serve` can be pointed at that loopback port.
+The tailnet edge serves its own Web bootstrap config and discovery document so
+the Web client finds `/apiws` on the tailnet host. The deploy persists the chosen
+tailnet setting under `.state/teagram-demo`; weekly maintenance uses it when it
+recreates a server container without a deploy environment variable.
 
 When the dev deploy is unavailable, `Deploy demo.` also accepts a manual
 dispatch with an issue key. It deploys only the current `main` SHA after that

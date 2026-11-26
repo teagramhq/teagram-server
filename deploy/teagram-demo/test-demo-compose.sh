@@ -360,6 +360,7 @@ jq -e \
   DEMO_CLIENT_CONFIG="$DEMO_CLIENT_CONFIG_DIR/client"
   DEMO_TAILNET_CLIENT_CONFIG="$DEMO_CLIENT_CONFIG_DIR/client-tailnet"
   mkdir -p "$DEMO_CLIENT_CONFIG_DIR"
+  printf '%s\n' '{"server":"demo.teagram.io","autoGuest":true}' > "$DEMO_CLIENT_CONFIG_DIR/teagram-config.json"
   cat > "$DEMO_CLIENT_CONFIG" <<'JSON'
 {"version":1,"mtproto":{"endpoint":"demo.teagram.io:443"},"websocket":{"endpoint":"wss://demo.teagram.io/apiws"},"demo":{"guest_sign_up":true}}
 JSON
@@ -370,9 +371,12 @@ JSON
     and .websocket.endpoint == "wss://teagram-dev.tailaa4918.ts.net/apiws"
     and .demo.guest_sign_up == true
   ' "$DEMO_TAILNET_CLIENT_CONFIG" >/dev/null
+  jq -e '.server == "teagram-dev.tailaa4918.ts.net" and .autoGuest == true' \
+    "$DEMO_CLIENT_CONFIG_DIR/teagram-config-tailnet.json" >/dev/null
   jq -e '.websocket.endpoint == "wss://demo.teagram.io/apiws"' "$DEMO_CLIENT_CONFIG" >/dev/null
 
   original_tailnet_config=$(cat "$DEMO_TAILNET_CLIENT_CONFIG")
+  original_tailnet_bootstrap=$(cat "$DEMO_CLIENT_CONFIG_DIR/teagram-config-tailnet.json")
   if (
     mktemp() { return 1; }
     demo_prepare_tailnet_client_config >/dev/null 2>&1
@@ -381,6 +385,7 @@ JSON
     exit 1
   fi
   [[ "$(cat "$DEMO_TAILNET_CLIENT_CONFIG")" == "$original_tailnet_config" ]]
+  [[ "$(cat "$DEMO_CLIENT_CONFIG_DIR/teagram-config-tailnet.json")" == "$original_tailnet_bootstrap" ]]
   if (
     chmod() { return 1; }
     demo_prepare_tailnet_client_config >/dev/null 2>&1
@@ -389,7 +394,9 @@ JSON
     exit 1
   fi
   [[ "$(cat "$DEMO_TAILNET_CLIENT_CONFIG")" == "$original_tailnet_config" ]]
+  [[ "$(cat "$DEMO_CLIENT_CONFIG_DIR/teagram-config-tailnet.json")" == "$original_tailnet_bootstrap" ]]
   [[ -z "$(find "$DEMO_CLIENT_CONFIG_DIR" -maxdepth 1 -name '.client-tailnet.*' -print -quit)" ]]
+  [[ -z "$(find "$DEMO_CLIENT_CONFIG_DIR" -maxdepth 1 -name '.teagram-config-tailnet.*' -print -quit)" ]]
 )
 
 # shellcheck disable=SC2030,SC2031 # Tailnet enablement is isolated to the test subshells below.
@@ -398,9 +405,12 @@ JSON
   DEMO_CLIENT_CONFIG_DIR="$TMP_DIR/tailnet-reload-client"
   DEMO_CLIENT_CONFIG="$DEMO_CLIENT_CONFIG_DIR/client"
   DEMO_TAILNET_CLIENT_CONFIG="$DEMO_CLIENT_CONFIG_DIR/client-tailnet"
+  DEMO_STATE_DIR="$TMP_DIR/tailnet-reload-state"
+  DEMO_TAILNET_ENABLED_FILE="$DEMO_STATE_DIR/tailnet-enabled"
   TAILNET_DOCKER_LOG="$TMP_DIR/tailnet-reload-docker.log"
   TAILNET_DOCKER_STUB_DIR="$TMP_DIR/tailnet-reload-bin"
-  mkdir -p "$DEMO_CLIENT_CONFIG_DIR" "$TAILNET_DOCKER_STUB_DIR"
+  mkdir -p "$DEMO_CLIENT_CONFIG_DIR" "$DEMO_STATE_DIR" "$TAILNET_DOCKER_STUB_DIR"
+  printf '%s\n' '{"server":"demo.teagram.io","autoGuest":true}' > "$DEMO_CLIENT_CONFIG_DIR/teagram-config.json"
   cat > "$DEMO_CLIENT_CONFIG" <<'JSON'
 {"version":1,"websocket":{"endpoint":"wss://demo.teagram.io/apiws"}}
 JSON
@@ -438,6 +448,27 @@ DOCKER
   [[ "${tailnet_calls[2]}" == compose*' ps --status running -q edge-tailnet' ]]
   [[ "${tailnet_calls[3]}" == 'exec tailnet-edge nginx -c /etc/nginx/tailnet/nginx.conf -t' ]]
   [[ "${tailnet_calls[4]}" == 'exec tailnet-edge nginx -c /etc/nginx/tailnet/nginx.conf -s reload' ]]
+  [[ "$(<"$DEMO_TAILNET_ENABLED_FILE")" == true ]]
+  [[ "$(stat -c '%a' "$DEMO_TAILNET_ENABLED_FILE")" == 600 ]]
+  unset TEAGRAM_DEV_TAILNET_ENABLED
+  [[ "$(demo_tailnet_enabled)" == true ]]
+)
+
+(
+  DEMO_STATE_DIR="$TMP_DIR/tailnet-maintenance-state"
+  DEMO_TAILNET_ENABLED_FILE="$DEMO_STATE_DIR/tailnet-enabled"
+  DEMO_ENV_FILE="$TMP_DIR/demo.env"
+  DEMO_COMPOSE_ARGS=(--env-file "$DEMO_ENV_FILE" --project-directory "$REPO_ROOT" --project-name teagram-demo --file "$REPO_ROOT/docker-compose.yml" --profile demo)
+  TEAGRAM_DEMO_IMAGE_REF=teagramd:local
+  mkdir -p "$DEMO_STATE_DIR"
+  demo_persist_tailnet_enabled true
+  unset TEAGRAM_DEV_TAILNET_ENABLED
+  demo_prepare_runtime_tmp_dirs_for_up() { :; }
+  demo_compose config --format json > "$TMP_DIR/tailnet-maintenance-recreate.json"
+  jq -e '
+    .services["edge-tailnet"] != null
+    and .services.teagramd.environment.TG_WEBSOCKET_ALLOWED_ORIGINS == "https://web.teagram.io,https://demo.teagram.io,https://teagram-dev.tailaa4918.ts.net"
+  ' "$TMP_DIR/tailnet-maintenance-recreate.json" >/dev/null
 )
 
 # shellcheck disable=SC2031 # Environment overrides are scoped to these test function calls.
@@ -1430,6 +1461,12 @@ grep -Fq 'include /etc/nginx/demo/common-locations.conf;' "$SCRIPT_DIR/nginx-con
 grep -Fq 'if ($http_origin = "https://teagram-dev.tailaa4918.ts.net") { return 403; }' "$SCRIPT_DIR/nginx-config/nginx.conf"
 grep -Fq 'include /etc/nginx/demo/common-locations.conf;' "$SCRIPT_DIR/nginx-tailnet.conf"
 # shellcheck disable=SC2016 # Nginx variables are literal config text.
+grep -Fq 'set $teagramd_bootstrap_config /usr/share/nginx/html/.well-known/teagramd/teagram-config.json;' "$SCRIPT_DIR/nginx-config/nginx.conf"
+# shellcheck disable=SC2016 # Nginx variables are literal config text.
+grep -Fq 'set $teagramd_bootstrap_config /usr/share/nginx/html/.well-known/teagramd/teagram-config-tailnet.json;' "$SCRIPT_DIR/nginx-tailnet.conf"
+# shellcheck disable=SC2016 # Nginx variables are literal config text.
+grep -Fq 'alias $teagramd_bootstrap_config;' "$SCRIPT_DIR/nginx-config/common-locations.conf"
+# shellcheck disable=SC2016 # Nginx variables are literal config text.
 grep -Fq 'set $teagramd_client_discovery /usr/share/nginx/html/.well-known/teagramd/client;' "$SCRIPT_DIR/nginx-config/nginx.conf"
 # shellcheck disable=SC2016 # Nginx variables are literal config text.
 grep -Fq 'set $teagramd_client_discovery /usr/share/nginx/html/.well-known/teagramd/client-tailnet;' "$SCRIPT_DIR/nginx-tailnet.conf"
@@ -1493,6 +1530,9 @@ PY
 grep -Fq 'cf_connecting_ip: str | None = "192.0.2.1"' "$SCRIPT_DIR/smoke.py"
 grep -Fq 'return 200 "Teagram demo server";' "$SCRIPT_DIR/nginx-config/common-locations.conf"
 grep -Fq 'args.tailnet_port' "$SCRIPT_DIR/smoke.py"
+grep -Fq 'tailnet_url + "/teagram-config.json"' "$SCRIPT_DIR/smoke.py"
+grep -Fq 'tailnet_bootstrap["server"]' "$SCRIPT_DIR/smoke.py"
+grep -Fq 'tailnet Web bootstrap does not lead to the advertised /apiws endpoint' "$SCRIPT_DIR/smoke.py"
 grep -Fq 'tailnet_url + "/.well-known/teagramd/client"' "$SCRIPT_DIR/smoke.py"
 grep -Fq 'TAILNET_WEBSOCKET_ENDPOINT = "wss://teagram-dev.tailaa4918.ts.net/apiws"' "$SCRIPT_DIR/smoke.py"
 grep -Fq 'TAILNET_CSP = DEMO_CSP.replace(' "$SCRIPT_DIR/smoke.py"
