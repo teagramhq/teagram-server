@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -131,6 +130,23 @@ func (p scalePlan) accessSummary() []string {
 		accesses = append(accesses, child.accessSummary()...)
 	}
 	return accesses
+}
+
+func TestScalePlanCountsBitmapIndexCandidates(t *testing.T) {
+	const explain = `[{"Plan":{"Node Type":"Bitmap Heap Scan","Relation Name":"channel_messages","Actual Rows":500,"Actual Loops":1,"Plans":[{"Node Type":"Bitmap Index Scan","Index Name":"channel_messages_pkey","Actual Rows":20000,"Actual Loops":1}]}}]`
+	var plans []struct {
+		Plan scalePlan `json:"Plan"`
+	}
+	if err := json.Unmarshal([]byte(explain), &plans); err != nil {
+		t.Fatalf("decode canned plan: %v", err)
+	}
+	if len(plans) != 1 {
+		t.Fatalf("canned plan count = %d, want 1", len(plans))
+	}
+	rows := plans[0].Plan.rowsReadFrom("channel_messages") + plans[0].Plan.indexRowsReadFrom("channel_messages")
+	if rows <= 800 {
+		t.Fatalf("canned pkey bitmap plan read %.0f channel_messages rows, want more than 800", rows)
+	}
 }
 
 func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtScale(t *testing.T) {
@@ -299,13 +315,18 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 	if !ok {
 		t.Fatalf("historical emoji query is missing its sqlc header: %s", queries[0].SQL)
 	}
-	// Plan one visible ID; the full result call also includes a popular ID from
-	// the hidden channel, which skews the global GIN estimate.
-	planArgs := append([]any(nil), queries[0].Args...)
-	planFileIDs := []string{strconv.FormatInt(fileIDs[100], 10)}
-	planArgs[0] = planFileIDs
+	// Plan the production array, including both hot IDs: 1000200 occurs in the
+	// hidden channel and 1000201 in another owner's messages. Table-wide
+	// expression statistics can skew both GIN estimates for this array.
+	planFileIDs, ok := queries[0].Args[0].([]string)
+	if !ok {
+		t.Fatalf("historical emoji query ID argument has type %T, want []string", queries[0].Args[0])
+	}
+	if len(planFileIDs) != len(fileIDs) {
+		t.Fatalf("historical emoji query has %d IDs, want the production call's full %d-ID array", len(planFileIDs), len(fileIDs))
+	}
 	var raw []byte
-	if err := pool.QueryRow(ctx, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "+query, planArgs...).Scan(&raw); err != nil {
+	if err := pool.QueryRow(ctx, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "+query, queries[0].Args...).Scan(&raw); err != nil {
 		t.Fatalf("explain historical emoji references: %v", err)
 	}
 	var plans []struct {

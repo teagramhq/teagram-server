@@ -286,11 +286,13 @@ visible_channels AS MATERIALIZED (
       AND c.deleted_at IS NULL
 ), channel_candidates AS MATERIALIZED (
     SELECT cm.entities
-    FROM visible_channels vc
-    JOIN channel_messages cm
-      ON cm.channel_id = vc.channel_id
+    FROM channel_messages cm
+    JOIN visible_channels vc
+      ON vc.channel_id = cm.channel_id
      AND cm.local_id > vc.available_min_id
-    WHERE cm.deleted = false
+    -- Keep the visible channel IDs indexable with the document-ID predicate.
+    WHERE cm.channel_id = ANY(ARRAY(SELECT channel_id FROM visible_channels))
+      AND cm.deleted = false
       AND cm.entities IS NOT NULL
       AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
       AND cardinality(message_custom_emoji_document_ids(cm.entities)) > 0
