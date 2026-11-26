@@ -185,7 +185,7 @@ install_key_file "$KEY_LINE"
 
 visudo -c -f "$SUDOERS_FILE" >/dev/null || fail 'deploy sudoers rule failed validation'
 visudo -c >/dev/null || fail 'complete sudoers configuration failed validation'
-sudo -l -U "$DEPLOY_USER" > "$TMP_DIR/sudo-list" || fail 'deploy sudoers rule is not effective'
+sudo -l -U "$DEPLOY_USER" | tee "$TMP_DIR/sudo-list" >/dev/null || fail 'deploy sudoers rule is not effective'
 grep -Fq 'env_reset' "$TMP_DIR/sudo-list" || fail 'sudo env_reset must remain enabled'
 ! grep -Eq '!env_reset|SETENV' "$TMP_DIR/sudo-list" || fail 'deploy sudo rule must not disable env_reset or allow SETENV'
 grep -Fq 'NOPASSWD: /usr/local/sbin/teagram-demo-deploy' "$TMP_DIR/sudo-list" ||

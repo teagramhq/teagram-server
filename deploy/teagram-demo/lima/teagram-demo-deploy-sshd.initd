@@ -1,4 +1,7 @@
 #!/sbin/openrc-run
+# shellcheck shell=sh
+# OpenRC consumes these values when it loads the service script.
+# shellcheck disable=SC2034
 
 description="Teagram demo deploy SSH listener"
 supervisor=supervise-daemon
