@@ -140,19 +140,22 @@ func setup() {
 // ones. waitAccepting asks Postgres itself instead, which nothing can rotate
 // away, and asks over the same DSN the tests use.
 func containerOptions() []testcontainers.ContainerCustomizer {
-	name := os.Getenv(containerNameEnv)
-	if name == "" {
-		name = defaultContainerName
-	}
-
 	return []testcontainers.ContainerCustomizer{
-		testcontainers.WithReuseByName(name),
+		testcontainers.WithReuseByName(ContainerName()),
 		tcnet.WithBridgeNetwork(),
 		postgres.WithDatabase("postgres"),
 		postgres.WithUsername("postgres"),
 		postgres.WithPassword("postgres"),
 		postgres.WithConfigFile(fastConfPath()),
 	}
+}
+
+// ContainerName returns the configured name of the reusable Postgres test container.
+func ContainerName() string {
+	if name := os.Getenv(containerNameEnv); name != "" {
+		return name
+	}
+	return defaultContainerName
 }
 
 // bridgeRoutable reports whether the container's bridge address is reachable

@@ -15,6 +15,9 @@ import (
 func TestContainerOptionsUseConfiguredContainerName(t *testing.T) {
 	const configuredName = "tg-test-pg-e2e"
 	t.Setenv("TG_PGTEST_CONTAINER_NAME", configuredName)
+	if got := ContainerName(); got != configuredName {
+		t.Fatalf("configured container name = %q, want %q", got, configuredName)
+	}
 
 	var request testcontainers.GenericContainerRequest
 	for _, option := range containerOptions() {
