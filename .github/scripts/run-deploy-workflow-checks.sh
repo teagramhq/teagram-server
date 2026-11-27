@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Keep this pool below the ubuntu-26.04 runner's core count; never size it from nproc.
-readonly WORKER_COUNT=3
+# Keep this worker pool fixed; never size it from nproc.
+readonly WORKER_COUNT=5
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -P "$SCRIPT_DIR/../.." && pwd)
 readonly SCRIPT_DIR REPO_ROOT
@@ -44,7 +44,15 @@ CHECKS=(
   'Check demo web publication ordering'
   'Check demo Turnstile secret access'
   'Check demo image release pinning'
+  'Lint deployment, performance, and real-client workflows'
 )
+
+# Assign all checks once across a fixed pool, balanced using measured CI task times.
+readonly -a WORKER_1_TASKS=(9)
+readonly -a WORKER_2_TASKS=(27 23 31 16 2 35 11 25)
+readonly -a WORKER_3_TASKS=(28 8 21 3 19 4 18 29 17 15)
+readonly -a WORKER_4_TASKS=(12 0 20 7 33 5 10 6 26)
+readonly -a WORKER_5_TASKS=(36 22 14 13 24 34 30 32 1)
 
 run_with_loopback_port_lock() (
   # These fixtures select a free port, release it, then bind it; keep their assignments distinct.
@@ -335,6 +343,7 @@ run_check() {
       deploy/teagram/test-teagram-ops.sh
       ;;
     'Check QA password timestamp operation')
+      bash .github/scripts/pull-base-images.sh --image mirror.gcr.io/library/postgres:18-alpine
       deploy/teagram/test-qa-password-timestamps.sh
       ;;
     'Check Bot API QA bot and relay fixtures')
@@ -354,6 +363,8 @@ run_check() {
       ;;
     'Check media dump validation against PostgreSQL 18')
       # Each invocation uses private temp files, random container names, and an isolated network.
+      bash .github/scripts/pull-base-images.sh \
+        --image mirror.gcr.io/library/postgres:18-alpine@sha256:10a5c69a83035ab5239f5620d708520e8b28f5aa1f2b20143e6024532edadfb5
       PG18_IMAGE=mirror.gcr.io/library/postgres:18-alpine@sha256:10a5c69a83035ab5239f5620d708520e8b28f5aa1f2b20143e6024532edadfb5 \
         bash deploy/teagram/test-media-encryption-pg18.sh
       ;;
@@ -396,12 +407,123 @@ run_check() {
     'Check demo image release pinning')
       deploy/teagram-demo/test-image-release.sh
       ;;
+    'Lint deployment, performance, and real-client workflows')
+      go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+      actionlint -ignore 'label "ubuntu-26.04" is unknown' \
+        .github/workflows/deploy-qa-invite.yml \
+        .github/workflows/deploy-demo-target.yml \
+        .github/workflows/deploy-dev-target.yml \
+        .github/workflows/perf.yml \
+        .github/workflows/real-client-browser-flow.yml
+      # actionlint v1.7.12 predates GitHub's concurrency.queue key.
+      # The deploy and QA contracts validate the permitted value and location.
+      actionlint -ignore 'label "ubuntu-26.04" is unknown' \
+        -ignore '^unexpected key "queue" for "concurrency" section' \
+        .github/workflows/deploy-demo.yml .github/workflows/deploy.yml .github/workflows/qa-bot.yml
+      actionlint -shellcheck= -ignore 'label "ubuntu-26.04" is unknown' .github/workflows/ci.yml
+      node --check test/e2e/real_server_fixture/run_real_client_browser_flow.mjs
+      ;;
     *)
       printf 'unknown deployment workflow check: %s\n' "$1" >&2
       return 64
       ;;
   esac
 }
+
+format_duration() {
+  local milliseconds=$1
+  printf '%d.%03ds' "$((milliseconds / 1000))" "$((milliseconds % 1000))"
+}
+
+validate_worker_assignments() {
+  local task_index
+  local -A seen=()
+  for task_index in \
+    "${WORKER_1_TASKS[@]}" "${WORKER_2_TASKS[@]}" "${WORKER_3_TASKS[@]}" \
+    "${WORKER_4_TASKS[@]}" "${WORKER_5_TASKS[@]}"; do
+    [[ $task_index =~ ^[0-9]+$ && $task_index -lt ${#CHECKS[@]} ]] || {
+      printf 'invalid deploy workflow task index: %s\n' "$task_index" >&2
+      return 1
+    }
+    [[ ! ${seen[$task_index]+present} ]] || {
+      printf 'deploy workflow task assigned more than once: %s\n' "${CHECKS[$task_index]}" >&2
+      return 1
+    }
+    seen[$task_index]=1
+  done
+  [[ ${#seen[@]} -eq ${#CHECKS[@]} ]] || {
+    printf 'worker assignments cover %d of %d deploy workflow checks\n' \
+      "${#seen[@]}" "${#CHECKS[@]}" >&2
+    return 1
+  }
+}
+
+run_worker() {
+  local worker=$1 task_index task_name task_log started_ns finished_ns elapsed_ms task_status failed=0
+  local -a task_indices=() summary_rows=()
+  case "$worker" in
+    1) task_indices=("${WORKER_1_TASKS[@]}") ;;
+    2) task_indices=("${WORKER_2_TASKS[@]}") ;;
+    3) task_indices=("${WORKER_3_TASKS[@]}") ;;
+    4) task_indices=("${WORKER_4_TASKS[@]}") ;;
+    5) task_indices=("${WORKER_5_TASKS[@]}") ;;
+    *) printf 'worker must be between 1 and %d\n' "$WORKER_COUNT" >&2; return 64 ;;
+  esac
+  validate_worker_assignments
+  local worker_dir="${DEPLOY_CHECK_POOL_DIR:?worker pool directory is required}/worker-$worker"
+  mkdir -p "$worker_dir"
+  exec >"$worker_dir/output.log" 2>&1
+  cd "$REPO_ROOT"
+
+  for task_index in "${task_indices[@]}"; do
+    task_name=${CHECKS[$task_index]}
+    task_log="$worker_dir/$task_index.task.log"
+    started_ns=$(date +%s%N)
+    if (set -Eeuo pipefail; run_check "$task_name") >"$task_log" 2>&1; then
+      task_status=0
+    else
+      task_status=$?
+      failed=1
+    fi
+    finished_ns=$(date +%s%N)
+    elapsed_ms=$(((finished_ns - started_ns) / 1000000))
+    printf '\n===== %s =====\n' "$task_name"
+    [[ ! -s $task_log ]] || cat "$task_log"
+    if [[ $task_status == 0 ]]; then
+      printf 'PASS: %s (%s)\n' "$task_name" "$(format_duration "$elapsed_ms")"
+      summary_rows+=("| $task_name | $(format_duration "$elapsed_ms") | passed |")
+    else
+      printf 'FAILED: %s (exit %s, %s)\n' \
+        "$task_name" "$task_status" "$(format_duration "$elapsed_ms")"
+      summary_rows+=("| $task_name | $(format_duration "$elapsed_ms") | failed |")
+    fi
+  done
+
+  {
+    printf '\n### Deploy workflow checks: worker %s/%s\n\n' "$worker" "$WORKER_COUNT"
+    printf '| Check | Worker time | Result |\n| --- | ---: | --- |\n'
+    printf '%s\n' "${summary_rows[@]}"
+  } > "$worker_dir/summary.md"
+  printf '%s\n' "$failed" > "$worker_dir/status"
+  return "$failed"
+}
+
+if [[ "${1:-}" == '--check-groups' ]]; then
+  [[ $# -eq 1 ]] || { printf 'usage: %s --check-groups\n' "${BASH_SOURCE[0]}" >&2; exit 64; }
+  validate_worker_assignments
+  printf '%d workers cover all %d deploy workflow checks exactly once\n' \
+    "$WORKER_COUNT" "${#CHECKS[@]}"
+  exit 0
+fi
+
+if [[ "${1:-}" == '--worker' ]]; then
+  [[ $# -eq 2 ]] || { printf 'usage: %s --worker <1-%d>\n' "${BASH_SOURCE[0]}" "$WORKER_COUNT" >&2; exit 64; }
+  if run_worker "$2"; then
+    exit 0
+  else
+    exit 1
+  fi
+fi
 
 if [[ "${1:-}" == '--task' ]]; then
   task_index=${2:?task index is required}
@@ -433,13 +555,13 @@ cleanup() { rm -rf -- "$pool_dir"; }
 trap cleanup EXIT
 export DEPLOY_CHECK_POOL_DIR=$pool_dir
 pool_started_ns=$(date +%s%N)
-task_count=${#CHECKS[@]}
+validate_worker_assignments
 xargs_status=0
 if {
-  for ((task_index = 0; task_index < task_count; task_index++)); do
-    printf '%s\n' "$task_index"
+  for ((worker = 1; worker <= WORKER_COUNT; worker++)); do
+    printf '%s\n' "$worker"
   done
-} | xargs -r -n 1 -P "$WORKER_COUNT" bash "$SCRIPT_DIR/run-deploy-workflow-checks.sh" --task \
+} | xargs -r -n 1 -P "$WORKER_COUNT" bash "$SCRIPT_DIR/run-deploy-workflow-checks.sh" --worker \
   > "$pool_dir/xargs.log" 2>&1; then
   xargs_status=0
 else
@@ -448,34 +570,17 @@ fi
 pool_finished_ns=$(date +%s%N)
 pool_elapsed_ms=$(((pool_finished_ns - pool_started_ns) / 1000000))
 pool_failed=0
-summary_rows=()
-
-format_duration() {
-  local milliseconds=$1
-  printf '%d.%03ds' "$((milliseconds / 1000))" "$((milliseconds % 1000))"
-}
-
-for ((task_index = 0; task_index < task_count; task_index++)); do
-  task_name=${CHECKS[$task_index]}
-  status_file="$pool_dir/$task_index.status"
-  log_file="$pool_dir/$task_index.log"
-  printf '\n===== %s =====\n' "$task_name"
-  if [[ ! -f $status_file ]]; then
-    printf 'FAILED: %s did not report a result\n' "$task_name"
+for ((worker = 1; worker <= WORKER_COUNT; worker++)); do
+  worker_dir="$pool_dir/worker-$worker"
+  printf '\n===== Worker %d/%d =====\n' "$worker" "$WORKER_COUNT"
+  if [[ ! -f $worker_dir/status ]]; then
+    printf 'FAILED: worker %d did not report a result\n' "$worker"
     pool_failed=1
-    summary_rows+=("| $task_name | unknown | failed |")
     continue
   fi
-
-  IFS=$'\t' read -r task_status task_started_ns task_finished_ns < "$status_file"
-  task_elapsed_ms=$(((task_finished_ns - task_started_ns) / 1000000))
-  [[ ! -s $log_file ]] || cat "$log_file"
-  if [[ $task_status == 0 ]]; then
-    printf 'PASS: %s (%s)\n' "$task_name" "$(format_duration "$task_elapsed_ms")"
-    summary_rows+=("| $task_name | $(format_duration "$task_elapsed_ms") | passed |")
-  else
-    printf 'FAILED: %s (exit %s, %s)\n' "$task_name" "$task_status" "$(format_duration "$task_elapsed_ms")"
-    summary_rows+=("| $task_name | $(format_duration "$task_elapsed_ms") | failed |")
+  [[ ! -s $worker_dir/output.log ]] || cat "$worker_dir/output.log"
+  [[ ! -s $worker_dir/summary.md || -z ${GITHUB_STEP_SUMMARY:-} ]] || cat "$worker_dir/summary.md" >> "$GITHUB_STEP_SUMMARY"
+  if [[ $(<"$worker_dir/status") != 0 ]]; then
     pool_failed=1
   fi
 done
@@ -494,9 +599,7 @@ printf '\nDeployment workflow checks used %d fixed workers; pool wall time %s.\n
   "$WORKER_COUNT" "$(format_duration "$pool_elapsed_ms")"
 if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then
   {
-    printf '\n### Deployment workflow contract check timings\n\n'
-    printf '| Check | Worker time | Result |\n| --- | ---: | --- |\n'
-    printf '%s\n' "${summary_rows[@]}"
+    printf '\n### Deploy workflow worker pool\n\n'
     printf '| %d-worker pool wall time | %s | %s |\n' \
       "$WORKER_COUNT" "$(format_duration "$pool_elapsed_ms")" \
       "$([[ $pool_failed == 0 ]] && printf passed || printf failed)"

@@ -90,10 +90,16 @@ ci_query() {
 check_ci_contract() {
   [[ "$(ci_query '.on | keys | sort | join(",")')" == 'merge_group,pull_request,push' ]] ||
     ci_fail 'triggers must be exactly merge_group, pull_request, and push'
-  [[ "$(ci_query '.jobs."check-deploy-workflow".steps[] | select(.name == "Run independent deploy workflow checks in a fixed 3-worker pool") | .run')" == 'bash .github/scripts/run-deploy-workflow-checks.sh' ]] ||
+  [[ "$(ci_query '.jobs."check-deploy-workflow".name')" == 'check: deploy-workflow' ]] ||
+    ci_fail 'the deploy workflow check name must stay unchanged'
+  [[ "$(ci_query '.jobs."check-deploy-workflow".steps[] | select(.name == "Run independent deploy workflow checks in a fixed 5-worker pool") | .run')" == 'bash .github/scripts/run-deploy-workflow-checks.sh' ]] ||
     ci_fail 'the deploy workflow contracts must use the bounded check runner'
-  grep -Fq 'readonly WORKER_COUNT=3' .github/scripts/run-deploy-workflow-checks.sh ||
-    ci_fail 'the deploy workflow contract worker count must remain fixed at three'
+  grep -Fq 'readonly WORKER_COUNT=5' .github/scripts/run-deploy-workflow-checks.sh ||
+    ci_fail 'the deploy workflow contract worker count must remain fixed at five'
+  [[ "$(.github/scripts/run-deploy-workflow-checks.sh --check-groups)" == '5 workers cover all 37 deploy workflow checks exactly once' ]] ||
+    ci_fail 'every deploy workflow check must be assigned to exactly one fixed worker'
+  [[ "$(ci_query '.jobs.ci.needs | to_entries[] | select(.value == "check-deploy-workflow") | .key')" == '19' ]] ||
+    ci_fail 'the deploy workflow check must remain in its existing position in ci.needs'
   grep -Fq 'sudo -n unshare --mount --propagation private' .github/scripts/run-deploy-workflow-checks.sh ||
     ci_fail 'the alpha bootstrap fixture must receive a private root filesystem in the worker pool'
   grep -Fq "GOPROXY='https://proxy.golang.org|direct' .github/scripts/test-perf-workflow-contract.sh" .github/scripts/run-deploy-workflow-checks.sh ||
@@ -137,14 +143,14 @@ check_ci_contract() {
     ci_fail 'the demo publication job must record its result after failures'
   [[ "$(ci_query '.jobs."check-demo-web-pin".steps[] | select(.id == "publication_result").env.PUBLICATION_JOB_STATUS')" == '${{ job.status }}' ]] ||
     ci_fail 'the publisher result must preserve the raw publication job status'
-  local actionlint_deploy_run
-  actionlint_deploy_run="$(ci_query '.jobs."check-deploy-workflow".steps[] | select(.name == "Lint deployment, performance, and real-client workflows") | .run')"
-  grep -Fq '.github/workflows/deploy-demo-target.yml' <<< "$actionlint_deploy_run" ||
+  grep -Fq '.github/workflows/deploy-demo-target.yml' .github/scripts/run-deploy-workflow-checks.sh ||
     ci_fail 'CI must actionlint the reusable demo target workflow'
-  grep -Fq '.github/workflows/deploy-dev-target.yml' <<< "$actionlint_deploy_run" ||
+  grep -Fq '.github/workflows/deploy-dev-target.yml' .github/scripts/run-deploy-workflow-checks.sh ||
     ci_fail 'CI must actionlint the reusable dev target workflow'
-  grep -Fq '.github/workflows/deploy-demo.yml' <<< "$actionlint_deploy_run" ||
+  grep -Fq '.github/workflows/deploy-demo.yml' .github/scripts/run-deploy-workflow-checks.sh ||
     ci_fail 'CI must actionlint the demo queue caller with the queue schema exception'
+  grep -Fq "'Lint deployment, performance, and real-client workflows'" .github/scripts/run-deploy-workflow-checks.sh ||
+    ci_fail 'the workflow lint step must remain in the fixed worker pool'
   [[ "$(ci_query '.jobs.ci.needs | join(",")')" == *'test-migrations'* ]] ||
     ci_fail 'the required CI gate must include the migrations lane'
   [[ "$(ci_query '.jobs.ci.needs | join(",")')" == *'test-git-hooks'* ]] ||
@@ -183,13 +189,10 @@ check_ci_contract() {
     ci_fail 'the git-hooks lane must run the commit-message regression fixture'
   [[ "$(ci_query '.jobs."test-git-hooks".steps[] | select(.name == "Test selective pre-push checks") | .run')" == 'python3 -B .github/scripts/test_git_hooks.py' ]] ||
     ci_fail 'the git-hooks lane must run the pre-push regression fixture'
-  local qa_password_step_names qa_password_pull
-  qa_password_step_names="$(ci_query '.jobs."check-deploy-workflow".steps | map(.name) | join("|")')"
-  [[ "$qa_password_step_names" == *'Pull PostgreSQL image for QA password timestamp check|Pull PostgreSQL 18 image for media dump validation|Run independent deploy workflow checks in a fixed 3-worker pool'* ]] ||
-    ci_fail 'the QA password timestamp check must preload PostgreSQL through the retry/fallback helper'
-  qa_password_pull="$(ci_query '.jobs."check-deploy-workflow".steps[] | select(.name == "Pull PostgreSQL image for QA password timestamp check") | .run')"
-  [[ "$qa_password_pull" == 'bash .github/scripts/pull-base-images.sh --image mirror.gcr.io/library/postgres:18-alpine' ]] ||
-    ci_fail 'the QA password timestamp check must use the canonical PostgreSQL image through the pull helper'
+  grep -Fq 'bash .github/scripts/pull-base-images.sh --image mirror.gcr.io/library/postgres:18-alpine' .github/scripts/run-deploy-workflow-checks.sh ||
+    ci_fail 'the QA password timestamp check must pull PostgreSQL through the canonical retry/fallback helper'
+  grep -Fq 'bash .github/scripts/pull-base-images.sh \' .github/scripts/run-deploy-workflow-checks.sh ||
+    ci_fail 'the media dump check must pull its digest-pinned PostgreSQL image through the canonical helper'
   grep -Fq 'deploy/teagram/test-qa-password-timestamps.sh' .github/scripts/run-deploy-workflow-checks.sh ||
     ci_fail 'the QA password timestamp check must stay in the deploy workflow worker pool'
   [[ "$(ci_query '.jobs."check-demo-web-pin".permissions.contents')" == 'read' ]] ||
