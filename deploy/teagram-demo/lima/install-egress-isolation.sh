@@ -306,6 +306,15 @@ raise SystemExit(
 PY
 }
 
+rule_has_comment() {
+  local rule=$1 comment=$2 quoted unquoted
+  quoted="--comment \"$comment\""
+  unquoted="--comment $comment"
+  [[ "$rule" == *"$quoted"* \
+    || "$rule" == *"$unquoted "* \
+    || "$rule" == *"$unquoted" ]]
+}
+
 apply_family() {
   local binary=$1 family=$2
   shift 2
@@ -453,7 +462,7 @@ ensure_source_hooks() {
   for ((index = ${#parent_rules[@]} - 1; index >= 0; index--)); do
     if [[ "${parent_rules[$index]}" == *" -j $hook_chain" ]] \
       || [[ -n $stale_chain && "${parent_rules[$index]}" == *" -j $stale_chain" ]]; then
-      if [[ "${parent_rules[$index]}" == *"--comment $staging_comment"* ]]; then
+      if rule_has_comment "${parent_rules[$index]}" "$staging_comment"; then
         continue
       fi
       delete_listed_rule "$binary" "$parent_chain" "${parent_rules[$index]}"
@@ -474,7 +483,7 @@ ensure_source_hooks() {
   fi
   mapfile -t parent_rules < <(sed -n "/^-A $parent_chain /p" <<<"$listing")
   for line in "${parent_rules[@]}"; do
-    if [[ "$line" == *"--comment $staging_comment"* && "$line" == *" -j $hook_chain" ]]; then
+    if rule_has_comment "$line" "$staging_comment" && [[ "$line" == *" -j $hook_chain" ]]; then
       delete_listed_rule "$binary" "$parent_chain" "$line"
     fi
   done

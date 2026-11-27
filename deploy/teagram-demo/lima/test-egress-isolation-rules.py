@@ -39,6 +39,7 @@ FAKE_FIREWALL = r'''#!/usr/bin/env python3
 import json
 import os
 import pathlib
+import re
 import sys
 import time
 
@@ -133,7 +134,12 @@ if operation == "-S":
     if chain not in firewall:
         missing_chain(chain)
     print(f"-N {chain}")
-    print("\n".join(firewall[chain]))
+    print(
+        "\n".join(
+            re.sub(r"(--comment )([^ ]+)", r'\1"\2"', rule)
+            for rule in firewall[chain]
+        )
+    )
 elif operation == "-C":
     chain = args[1]
     if chain not in firewall:
