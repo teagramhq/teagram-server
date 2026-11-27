@@ -1,8 +1,19 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-apt_cache_dir=${1:?usage: install-playwright-apt-fallback.sh APT_CACHE_DIR}
+apt_cache_dir=${1:?usage: install-playwright-apt-fallback.sh APT_CACHE_DIR PACKAGE_LIST}
+apt_package_list=${2:?usage: install-playwright-apt-fallback.sh APT_CACHE_DIR PACKAGE_LIST}
 script_dir=$(dirname -- "${BASH_SOURCE[0]}")
+
+if [[ ! -s "$apt_package_list" ]]; then
+  echo "::error::the original Playwright dependency list is missing or empty"
+  exit 1
+fi
+mapfile -t original_apt_packages <"$apt_package_list"
+if ((${#original_apt_packages[@]} == 0)); then
+  echo "::error::the original Playwright dependency list is empty"
+  exit 1
+fi
 
 bash "$script_dir/prepare-playwright-apt-cache.sh" "$apt_cache_dir"
 case "$apt_cache_dir" in
@@ -40,6 +51,13 @@ if [[ -s apt-install-packages.txt ]]; then
     -o "Dir::Cache::archives=$apt_archive_dir" \
     "${apt_packages[@]}"
 fi
+
+# dpkg may have installed some cached packages before another archive failed.
+# The current runner then treats those packages as satisfied, so explicitly
+# download the original dependency set again for the next runner's cache.
+sudo apt-get install -y --no-install-recommends --download-only --reinstall \
+  -o "Dir::Cache::archives=$apt_archive_dir" \
+  "${original_apt_packages[@]}"
 
 # Cache saving follows this helper, so verify the repaired package set here
 # before allowing the workflow to publish it.

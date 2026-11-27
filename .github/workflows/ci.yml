@@ -3372,7 +3372,7 @@ jobs:
             # install and report the attempt as a success.
             set -e
             if [ "$MODE" = "packages" ]; then
-              bash .github/scripts/install-playwright-apt-fallback.sh .apt-cache
+              bash .github/scripts/install-playwright-apt-fallback.sh .apt-cache apt-packages.txt
             else
               pnpm exec playwright install-deps chromium
             fi

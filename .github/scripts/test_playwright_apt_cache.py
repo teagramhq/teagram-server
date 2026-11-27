@@ -56,6 +56,7 @@ else:
         "deconfigured": False,
         "auto_deconfigured": False,
         "playwright_packages": ["libnss3-tools"] if installed else [],
+        "installed_packages": [],
         "apt_updated": False,
     }
 
@@ -126,6 +127,10 @@ for path in args[2:]:
         save()
         print("corrupt cached package: " + package_path.name, file=sys.stderr)
         sys.exit(1)
+    state["installed_packages"] = sorted(
+        set(state["installed_packages"]) | {match.group(1)}
+    )
+    save()
 
 if state["data_version"] != state["t64_version"]:
     print(
@@ -155,7 +160,9 @@ def save_package(package, version):
         print("package install did not set the archive directory", file=sys.stderr)
         sys.exit(1)
     archive_dir = Path(archive_dir_arg)
-    architecture = "all" if package == "libasound2-data" else "amd64"
+    architecture = (
+        "all" if package in {"libasound2-data", "fonts-freefont-ttf"} else "amd64"
+    )
     archive_dir.mkdir(parents=True, exist_ok=True)
     archive = archive_dir / f"{package}_{version}_{architecture}.deb"
     archive.write_bytes(f"{package}:{version}".encode())
@@ -182,6 +189,22 @@ elif args[:4] == ["-f", "install", "-y", "--no-install-recommends"]:
     save_package("libasound2-data", version)
     save_package("libasound2t64", version)
     record("repair")
+elif "--download-only" in args and "--reinstall" in args:
+    if not state["configured"] or state["data_version"] != state["t64_version"]:
+        print("cannot refresh package cache while dpkg is broken", file=sys.stderr)
+        sys.exit(1)
+    package_start = args.index("install") + 1
+    packages = [
+        arg
+        for arg in args[package_start:]
+        if not arg.startswith("-") and not arg.startswith("Dir::")
+    ]
+    if not packages or not any(arg.startswith("Dir::Cache::archives=") for arg in args):
+        print("cache refresh needs packages and an archive directory", file=sys.stderr)
+        sys.exit(1)
+    for package in packages:
+        save_package(package, os.environ["NETWORK_PACKAGE_VERSION"])
+    record("download")
 elif args[:1] == ["install"]:
     if not state["configured"] or state["data_version"] != state["t64_version"]:
         print("cannot install while dpkg is broken", file=sys.stderr)
@@ -191,6 +214,9 @@ elif args[:1] == ["install"]:
         sys.exit(1)
     state["playwright_packages"] = sorted(
         set(state["playwright_packages"]) | {"libnss3-tools"}
+    )
+    state["installed_packages"] = sorted(
+        set(state["installed_packages"]) | {"libnss3-tools"}
     )
     for package in args:
         if package == "libnss3-tools":
@@ -334,6 +360,8 @@ class PlaywrightAptCacheTests(unittest.TestCase):
             self._write_cached_alsa_packages(
                 cache, cached_data_version, runner_version
             )
+            font_archive = cache / "fonts-freefont-ttf_1.0_all.deb"
+            font_archive.write_bytes(b"fonts-freefont-ttf:1.0")
             corrupt_archive = cache / f"libasound2-data_{cached_data_version}_all.deb"
             corrupt_archive.write_bytes(b"superseded corrupt archive")
             env, state_path, apt_log = self._fake_package_environment(
@@ -344,6 +372,9 @@ class PlaywrightAptCacheTests(unittest.TestCase):
             )
             output = root / "github-output"
             output.write_text("", encoding="utf-8")
+            (root / "apt-packages.txt").write_text(
+                "fonts-freefont-ttf\nlibnss3-tools\n", encoding="utf-8"
+            )
 
             cached_install = subprocess.run(
                 ["bash", str(INSTALL_CACHE), str(cache)],
@@ -359,6 +390,7 @@ class PlaywrightAptCacheTests(unittest.TestCase):
             self.assertEqual(broken_state["t64_version"], runner_version)
             self.assertFalse(broken_state["configured"])
             self.assertTrue(broken_state["auto_deconfigured"])
+            self.assertIn("fonts-freefont-ttf", broken_state["installed_packages"])
 
             discard = subprocess.run(
                 ["bash", str(DISCARD_CACHE), str(cache)],
@@ -371,7 +403,7 @@ class PlaywrightAptCacheTests(unittest.TestCase):
             self.assertEqual(list(cache.glob("*.deb")), [])
 
             fallback = subprocess.run(
-                ["bash", str(INSTALL_FALLBACK), str(cache)],
+                ["bash", str(INSTALL_FALLBACK), str(cache), "apt-packages.txt"],
                 cwd=root,
                 env=env,
                 capture_output=True,
@@ -387,6 +419,7 @@ class PlaywrightAptCacheTests(unittest.TestCase):
                 {
                     f"libasound2-data_{network_version}_all.deb",
                     f"libasound2t64_{network_version}_amd64.deb",
+                    f"fonts-freefont-ttf_{network_version}_all.deb",
                     f"{PLAYWRIGHT_PACKAGE}_{network_version}_amd64.deb",
                 },
             )
@@ -412,7 +445,8 @@ class PlaywrightAptCacheTests(unittest.TestCase):
             self.assertTrue(repaired_state["configured"])
             self.assertIn(PLAYWRIGHT_PACKAGE, repaired_state["playwright_packages"])
             self.assertEqual(
-                apt_log.read_text(encoding="utf-8"), "update\nrepair\ninstall\n"
+                apt_log.read_text(encoding="utf-8"),
+                "update\nrepair\ninstall\ndownload\n",
             )
 
             fresh_root = root / "fresh-runner"
@@ -442,6 +476,7 @@ class PlaywrightAptCacheTests(unittest.TestCase):
             self.assertEqual(fresh_state["data_version"], network_version)
             self.assertEqual(fresh_state["t64_version"], network_version)
             self.assertIn(PLAYWRIGHT_PACKAGE, fresh_state["playwright_packages"])
+            self.assertIn("fonts-freefont-ttf", fresh_state["installed_packages"])
             self.assertTrue(fresh_state["configured"])
             self.assertFalse(
                 fresh_apt_log.exists(), "restoring the repaired cache must stay offline"
@@ -582,7 +617,7 @@ class PlaywrightAptCacheTests(unittest.TestCase):
             network_install.group("body"),
         )
         self.assertIn(
-            "bash .github/scripts/install-playwright-apt-fallback.sh .apt-cache",
+            "bash .github/scripts/install-playwright-apt-fallback.sh .apt-cache apt-packages.txt",
             network_install.group("body"),
         )
         self.assertNotIn("GH_TOKEN", body)
@@ -626,7 +661,7 @@ class PlaywrightAptCacheTests(unittest.TestCase):
         )
         self.assertIsNotNone(step, "network dependency install step is missing")
         self.assertIn(
-            "bash .github/scripts/install-playwright-apt-fallback.sh .apt-cache",
+            "bash .github/scripts/install-playwright-apt-fallback.sh .apt-cache apt-packages.txt",
             step.group("body"),
         )
         fallback_script = INSTALL_FALLBACK.read_text(encoding="utf-8")
@@ -643,6 +678,7 @@ class PlaywrightAptCacheTests(unittest.TestCase):
             fallback_script.rindex(verification_command),
             fallback_script.index("sudo apt-get install -y --no-install-recommends"),
         )
+        self.assertIn("--download-only --reinstall", fallback_script)
 
     def test_retry_cleanup_keeps_complete_packages_and_clears_partial_downloads(
         self,
@@ -720,7 +756,7 @@ class PlaywrightAptCacheTests(unittest.TestCase):
             workflow,
         )
         self.assertIn(
-            "bash ../.github/scripts/install-playwright-apt-fallback.sh ../.apt-cache",
+            "bash ../.github/scripts/install-playwright-apt-fallback.sh ../.apt-cache apt-packages.txt",
             workflow,
         )
         self.assertIn(
