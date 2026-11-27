@@ -34,6 +34,7 @@ cp "$SCRIPT_DIR/haproxy.cfg" "$TEST_SCRIPT_DIR/haproxy.cfg"
 cp "$SCRIPT_DIR/render-haproxy-config.py" "$TEST_SCRIPT_DIR/render-haproxy-config.py"
 mkdir -p "$TEST_SCRIPT_DIR/nginx-config"
 cp "$SCRIPT_DIR/nginx-config/nginx.conf" "$TEST_SCRIPT_DIR/nginx-config/nginx.conf"
+cp "$SCRIPT_DIR/nginx-config/common-locations.conf" "$TEST_SCRIPT_DIR/nginx-config/common-locations.conf"
 cp "$SCRIPT_DIR/lima/compose.yaml" "$TEST_SCRIPT_DIR/lima/compose.yaml"
 chmod 0755 "$TEST_INIT"
 

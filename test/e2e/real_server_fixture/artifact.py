@@ -24,6 +24,8 @@ MAX_ARTIFACT_BYTES = 128 * 1024 * 1024
 MAX_ARTIFACT_DEPTH = 64
 MAX_PRODUCT_REFERENCES = 200
 ENDPOINT = "wss://teagramd.test/apiws"
+TAILNET_ENDPOINT = "wss://teagram-dev.tailaa4918.ts.net/apiws"
+ALLOWED_ENDPOINTS = {ENDPOINT, TAILNET_ENDPOINT}
 RESERVED_ROUTES = {"healthz", "_fixture_probe"}
 AUTH_PROGRESS_ARTIFACT_SOURCE_REVISION = "569529c1f36923c098760ef727808254dcb6a662"
 PRODUCTION_IDENTIFIERS = (b"teagram.tailaa4918.ts.net", b"fbb62871f07fae2a")
@@ -546,7 +548,7 @@ def _audit(directory: Path, args: argparse.Namespace) -> dict[str, object]:
 
     checks: dict[str, bool] = {
         "manifestMode": manifest.get("mode") == "private",
-        "manifestEndpoint": manifest.get("endpoint") == args.endpoint == ENDPOINT,
+        "manifestEndpoint": manifest.get("endpoint") == args.endpoint and args.endpoint in ALLOWED_ENDPOINTS,
         "manifestFingerprint": manifest.get("fingerprint") == args.fingerprint,
         "manifestSourceCommit": manifest.get("sourceCommit") == args.web_revision,
         "artifactDigest": False,
@@ -630,7 +632,7 @@ def stage(args: argparse.Namespace) -> dict[str, object]:
         raise ArtifactError("web revision must be a full lowercase 40-character SHA")
     if not re.fullmatch(r"[0-9a-f]{16}", args.fingerprint):
         raise ArtifactError("fixture fingerprint is invalid")
-    if args.endpoint != ENDPOINT:
+    if args.endpoint not in ALLOWED_ENDPOINTS:
         raise ArtifactError("fixture endpoint is invalid")
 
     source = _resolved(args.source, "artifact path")

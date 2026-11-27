@@ -18,6 +18,7 @@ import urllib.request
 
 
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+TAILNET_WEBSOCKET_ENDPOINT = "wss://teagram-dev.tailaa4918.ts.net/apiws"
 DEMO_CSP = (
     "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; "
     "frame-src 'self' https://challenges.cloudflare.com; object-src 'none'; "
@@ -25,6 +26,10 @@ DEMO_CSP = (
     "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; "
     "media-src 'self' blob:; worker-src 'self' blob:; manifest-src 'self'; "
     "connect-src 'self' wss://demo.teagram.io https://challenges.cloudflare.com;"
+)
+TAILNET_CSP = DEMO_CSP.replace(
+    "wss://demo.teagram.io",
+    "wss://demo.teagram.io wss://teagram-dev.tailaa4918.ts.net",
 )
 
 
@@ -45,9 +50,9 @@ def read_response(url: str, *, headers: dict[str, str] | None = None) -> tuple[i
         return response.status, response.headers, response.read()
 
 
-def check_security_headers(headers: object) -> None:
+def check_security_headers(headers: object, *, expected_csp: str = DEMO_CSP) -> None:
     csp = headers.get("Content-Security-Policy", "")
-    if csp != DEMO_CSP:
+    if csp != expected_csp:
         fail("Content-Security-Policy differs from the approved demo web policy")
     for name, expected in (
         ("X-Content-Type-Options", "nosniff"),
@@ -65,31 +70,39 @@ def websocket_handshake(
     expected_policy: str | None = None,
     *,
     public: bool = False,
+    host: str | None = None,
+    cf_connecting_ip: str | None = "192.0.2.1",
+    duplicate_cf_connecting_ip: str | None = None,
+    x_forwarded_for: str | None = None,
 ) -> None:
     key = base64.b64encode(secrets.token_bytes(16)).decode("ascii")
-    host = "demo.teagram.io" if public else "127.0.0.1"
+    host = host or "demo.teagram.io"
     connection_type = http.client.HTTPSConnection if public else http.client.HTTPConnection
-    connection = connection_type(host, 443 if public else port, timeout=5)
+    connect_host = "demo.teagram.io" if public else "127.0.0.1"
+    connection = connection_type(connect_host, 443 if public else port, timeout=5)
     source = f"to wss://demo.teagram.io/apiws from {origin}" if public else f"from {origin}"
     if origin is None:
         source = f"to wss://demo.teagram.io/apiws without Origin" if public else "without Origin"
     headers = {
-        "Host": "demo.teagram.io",
+        "Host": host,
         "Connection": "Upgrade",
         "Upgrade": "websocket",
         "Sec-WebSocket-Key": key,
         "Sec-WebSocket-Version": "13",
     }
-    if not public:
-        headers["CF-Connecting-IP"] = "192.0.2.1"
+    if not public and cf_connecting_ip is not None:
+        headers["CF-Connecting-IP"] = cf_connecting_ip
+    if not public and x_forwarded_for is not None:
+        headers["X-Forwarded-For"] = x_forwarded_for
     if origin is not None:
         headers["Origin"] = origin
     try:
-        connection.request(
-            "GET",
-            "/apiws",
-            headers=headers,
-        )
+        connection.putrequest("GET", "/apiws", skip_host=True)
+        for name, value in headers.items():
+            connection.putheader(name, value)
+        if not public and duplicate_cf_connecting_ip is not None:
+            connection.putheader("CF-Connecting-IP", duplicate_cf_connecting_ip)
+        connection.endheaders()
         response = connection.getresponse()
         if response.status != expected_status:
             fail(f"WebSocket handshake {source} returned HTTP {response.status}, want {expected_status}")
@@ -115,6 +128,7 @@ def main() -> None:
     parser.add_argument("--bootstrap", action="store_true")
     parser.add_argument("--web-source-commit")
     parser.add_argument("--web-artifact-digest")
+    parser.add_argument("--tailnet-port", type=int)
     parser.add_argument("client_config")
     parser.add_argument("loopback_port", nargs="?", type=int, default=8080)
     args = parser.parse_args()
@@ -129,6 +143,8 @@ def main() -> None:
     port = args.loopback_port
     if not 1 <= port <= 65535:
         fail("loopback-port must be between 1 and 65535")
+    if args.tailnet_port is not None and not 1 <= args.tailnet_port <= 65535:
+        fail("tailnet-port must be between 1 and 65535")
 
     base_url = f"http://127.0.0.1:{port}"
     try:
@@ -225,15 +241,104 @@ def main() -> None:
     websocket_handshake(port, "https://demo.teagram.io", 101)
     websocket_handshake(port, "https://web.teagram.io", 101)
     websocket_handshake(port, "https://foreign.example", 403)
+    websocket_handshake(port, "https://teagram-dev.tailaa4918.ts.net", 403)
+    websocket_handshake(port, "https://demo.teagram.io", 400, cf_connecting_ip=None, x_forwarded_for="192.0.2.44")
+    websocket_handshake(port, "https://demo.teagram.io", 400, cf_connecting_ip="not-an-ip")
+    websocket_handshake(
+        port,
+        "https://demo.teagram.io",
+        400,
+        cf_connecting_ip="192.0.2.44",
+        duplicate_cf_connecting_ip="192.0.2.45",
+    )
     websocket_handshake(443, None, 403, "browser-only", public=True)
     websocket_handshake(443, "https://demo.teagram.io", 101, public=True)
     websocket_handshake(443, "https://web.teagram.io", 101, public=True)
+    websocket_handshake(443, "https://teagram-dev.tailaa4918.ts.net", 403, public=True)
+
+    if args.tailnet_port is not None:
+        tailnet_url = f"http://127.0.0.1:{args.tailnet_port}"
+        tailnet_host = "teagram-dev.tailaa4918.ts.net"
+        tailnet_status, tailnet_headers, tailnet_body = read_response(tailnet_url + "/")
+        if tailnet_status != 200 or tailnet_body != body:
+            fail("tailnet edge root response differs from the public edge")
+        check_security_headers(tailnet_headers, expected_csp=TAILNET_CSP)
+        tailnet_admin_status, _, _ = read_response(tailnet_url + "/admin/")
+        if tailnet_admin_status != 404:
+            fail(f"tailnet /admin/ returned HTTP {tailnet_admin_status}, want 404")
+        bootstrap_status, bootstrap_headers, bootstrap_body = read_response(
+            tailnet_url + "/teagram-config.json", headers={"Host": tailnet_host}
+        )
+        if bootstrap_status != 200 or bootstrap_headers.get("Content-Type", "").split(";", 1)[0] != "application/json":
+            fail("tailnet /teagram-config.json did not return application/json")
+        try:
+            tailnet_bootstrap = json.loads(bootstrap_body)
+        except json.JSONDecodeError as error:
+            fail(f"tailnet Web bootstrap config is invalid: {error}")
+        if tailnet_bootstrap != {"server": tailnet_host, "autoGuest": True}:
+            fail("tailnet Web bootstrap config does not select the tailnet server")
+        tailnet_discovery_status, _, tailnet_discovery_body = read_response(
+            tailnet_url + "/.well-known/teagramd/client",
+            headers={"Host": tailnet_bootstrap["server"]},
+        )
+        if tailnet_discovery_status != 200:
+            fail(f"tailnet discovery HTTP status is {tailnet_discovery_status}")
+        try:
+            tailnet_discovery = json.loads(tailnet_discovery_body)
+            expected_tailnet_discovery = json.loads(json.dumps(expected))
+            expected_tailnet_discovery["websocket"]["endpoint"] = TAILNET_WEBSOCKET_ENDPOINT
+        except (json.JSONDecodeError, KeyError, TypeError) as error:
+            fail(f"tailnet discovery document is invalid: {error}")
+        if tailnet_discovery != expected_tailnet_discovery:
+            fail("tailnet discovery document differs from the dev-specific client config")
+        if tailnet_discovery.get("websocket", {}).get("endpoint") != TAILNET_WEBSOCKET_ENDPOINT:
+            fail("tailnet discovery WebSocket endpoint is incorrect")
+        websocket_endpoint = urllib.parse.urlsplit(tailnet_discovery["websocket"]["endpoint"])
+        if (
+            websocket_endpoint.scheme != "wss"
+            or websocket_endpoint.hostname != tailnet_bootstrap["server"]
+            or websocket_endpoint.path != "/apiws"
+        ):
+            fail("tailnet Web bootstrap does not lead to the advertised /apiws endpoint")
+        websocket_handshake(
+            args.tailnet_port,
+            f"https://{tailnet_bootstrap['server']}",
+            101,
+            host=websocket_endpoint.hostname,
+            cf_connecting_ip="198.51.100.9",
+            x_forwarded_for="203.0.113.8, 192.0.2.44",
+        )
+        websocket_handshake(
+            args.tailnet_port,
+            "https://foreign.example",
+            403,
+            host=tailnet_bootstrap["server"],
+            cf_connecting_ip="198.51.100.9",
+            x_forwarded_for="192.0.2.44",
+        )
+        websocket_handshake(
+            args.tailnet_port,
+            f"https://{tailnet_bootstrap['server']}",
+            400,
+            host=tailnet_bootstrap["server"],
+            x_forwarded_for=None,
+        )
+        websocket_handshake(
+            args.tailnet_port,
+            f"https://{tailnet_bootstrap['server']}",
+            400,
+            host=tailnet_bootstrap["server"],
+            x_forwarded_for="not-an-ip",
+        )
     print(
         "demo smoke=passed app=html config=valid discovery=cors health=200 "
         "local_websocket=101 public_websocket=101 no_origin=403 "
         "browser_only=present public_demo_origin=101 public_web_origin=101 "
-        "foreign_origin=403 admin=404"
+        "foreign_origin=403 public_tailnet_origin=403 missing_cf_ip=400 "
+        "invalid_cf_ip=400 duplicate_cf_ip=400 admin=404"
     )
+    if args.tailnet_port is not None:
+        print("tailnet_websocket=101 tailnet_foreign_origin=403 tailnet_missing_xff=400 tailnet_invalid_xff=400")
 
 
 if __name__ == "__main__":

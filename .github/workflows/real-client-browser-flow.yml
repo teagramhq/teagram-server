@@ -382,10 +382,11 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      - name: Run fresh-browser guest signup with the sign-in gate enabled
+      - name: Run fresh-browser tailnet guest signup with the sign-in gate enabled
         id: guest-signup-flow
         env:
           REAL_CLIENT_GUEST_SIGNUP_ONLY: '1'
+          REAL_CLIENT_GUEST_SIGNUP_TAILNET: '1'
           REAL_CLIENT_WEB_REVISION: ${{ env.REAL_CLIENT_GUEST_WEB_REVISION }}
           REAL_CLIENT_WEB_ROOT: ${{ env.REAL_CLIENT_GUEST_WEB_ROOT }}
         run: node test/e2e/real_server_fixture/run_real_client_browser_flow.mjs

@@ -1,0 +1,75 @@
+services:
+  teagramd:
+    environment:
+      TG_WEBSOCKET_ALLOWED_ORIGINS: https://web.teagram.io,https://demo.teagram.io,https://teagram-dev.tailaa4918.ts.net
+      TG_TURNSTILE_HOSTNAMES: web.teagram.io,demo.teagram.io,teagram-dev.tailaa4918.ts.net
+
+  teagramd-next:
+    environment:
+      TG_WEBSOCKET_ALLOWED_ORIGINS: https://web.teagram.io,https://demo.teagram.io,https://teagram-dev.tailaa4918.ts.net
+      TG_TURNSTILE_HOSTNAMES: web.teagram.io,demo.teagram.io,teagram-dev.tailaa4918.ts.net
+
+  edge-tailnet:
+    profiles: [demo]
+    image: mirror.gcr.io/library/nginx:1.28.0-alpine@sha256:09ab424a8c788f8d0fe3a64429f6d19dfa526885c8609b748d0943a75dcb9f8c
+    platform: linux/amd64
+    entrypoint: ["nginx", "-c", "/etc/nginx/tailnet/nginx.conf", "-g", "daemon off;"]
+    user: "101:101"
+    ports:
+      - "127.0.0.1:8081:8081"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 96m
+    memswap_limit: 96m
+    cpus: "0.25"
+    pids_limit: 64
+    volumes:
+      - type: bind
+        source: ./.state/teagram-demo/tmp/edge-tailnet
+        target: /tmp
+        read_only: false
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./deploy/teagram-demo/nginx-config
+        target: /etc/nginx/demo
+        read_only: true
+      - type: bind
+        source: ./deploy/teagram-demo/nginx-tailnet.conf
+        target: /etc/nginx/tailnet/nginx.conf
+        read_only: true
+      - type: bind
+        source: ./.state/teagram-demo/public-client
+        target: /usr/share/nginx/html/.well-known/teagramd
+        read_only: true
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8081/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      haproxy:
+        condition: service_healthy
+    networks:
+      backend: {}
+      teagram-dev-tailnet: {}
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  teagram-dev-tailnet:
+    driver: bridge
+    internal: false
+    ipam:
+      config:
+        - subnet: 198.18.134.0/24
+          ip_range: 198.18.134.128/26
+          gateway: 198.18.134.1
+    driver_opts:
+      com.docker.network.bridge.enable_ip_masquerade: "false"
