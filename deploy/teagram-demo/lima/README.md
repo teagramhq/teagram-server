@@ -13,6 +13,7 @@ charlie demo files are unchanged; this directory is a separate Compose file.
 | `prepare-blobs.sh` | Root, idempotent: fully allocated 4 GiB ext4 filesystem at `/srv/teagram-demo-blobs`, preserving 100 MiB free on the host filesystem, and proxy runtime directories outside the privileged checkout. Run once before starting the stack. |
 | `install-egress-isolation.sh` | Root, idempotent: installs source-scoped `FORWARD`, `DOCKER-USER`, and host `INPUT` rules and enables ordered OpenRC firewall and stack services. |
 | `egress-isolation-threat-model.md` | Scope, trust boundaries, controls, and residual risks for the Lima demo firewall policy. |
+| `deploy-access-threat-model.md` | Key custody and revocation, forced-command effects, listener isolation, and recovery for root SSH deployment access. |
 | `check.sh` | Read-only preflight. Pulls nothing, starts and stops nothing, writes nothing. Ends with `would_apply` or `would_reject`. |
 | `test-lima-compose.sh` | Renders the stack against fixture values and asserts the acceptance criteria. CI runs it through `test-demo-compose.sh`. |
 | `deploy-main.sh` | Stops the old server, migrates, starts one new server, checks `/healthz`, and restores the previous image if the new release fails. |
