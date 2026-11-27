@@ -202,7 +202,7 @@ cgroup_sampler_pid=$!
 lima_memory_sample_runtime_metrics_loop "$runtime_cgroup/memory.current" "$((512 * 1024))" "$runtime_ready" \
   "$runtime_file" "$runtime_sample_current" "$runtime_error" "$runtime_stop" 0.01 &
 runtime_sampler_pid=$!
-for attempt in $(seq 200); do
+for _ in $(seq 200); do
   if [[ -e "$runtime_request_started" ]]; then
     break
   fi
