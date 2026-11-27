@@ -12,6 +12,7 @@ BLOB_VOLUME=tg-lima-memory-blobs
 EXPECTED_LIMIT=$((46 * 1024 * 1024))
 MIN_HEADROOM=$((2 * 1024 * 1024))
 MEMORY_SAMPLE_INTERVAL_MS=10
+RUNTIME_SAMPLE_INTERVAL_BYTES=$((512 * 1024))
 LIMA_GOMEMLIMIT=20MiB
 LIMA_MEMORY_PROBE_ATTEMPTS=${LIMA_MEMORY_PROBE_ATTEMPTS:-3}
 MEMORY_CGROUP_DIR=
@@ -27,6 +28,9 @@ MEMORY_SAMPLE_ANON_FILE=
 MEMORY_SAMPLE_FILE_FILE=
 MEMORY_SAMPLE_KERNEL_FILE=
 MEMORY_SAMPLE_PROCESS_FILE=
+MEMORY_SAMPLE_RUNTIME_FILE=
+MEMORY_SAMPLE_RUNTIME_PEAK_FILE=
+MEMORY_SAMPLE_RUNTIME_READY_FILE=
 MEMORY_SAMPLE_ERROR_FILE=
 MEMORY_SAMPLE_STOP_FILE=
 MEMORY_SAMPLER_PID=
@@ -51,6 +55,16 @@ finish() {
   set +e
 
   stop_memory_sampler
+
+  local runtime_sample=unavailable runtime_sample_current=unknown
+  if [[ -r $MEMORY_SAMPLE_RUNTIME_FILE && -r $MEMORY_SAMPLE_RUNTIME_PEAK_FILE ]]; then
+    runtime_sample=$(<"$MEMORY_SAMPLE_RUNTIME_FILE")
+    runtime_sample_current=$(<"$MEMORY_SAMPLE_RUNTIME_PEAK_FILE")
+  fi
+  if [[ $status -eq 0 && $runtime_sample == unavailable ]]; then
+    status=1
+    printf 'Lima probe completed without a Go runtime memory sample at a cgroup peak\n' >&2
+  fi
 
   local peak_bytes='' events=''
   if [[ -r $MEMORY_PEAK_FILE && -r $MEMORY_EVENTS_FILE ]]; then
@@ -105,6 +119,7 @@ finish() {
       "$([[ $status -eq 0 ]] && printf passed || printf failed)" "${LIMA_MEMORY_PROBE_ATTEMPT:-1}" "$LIMA_MEMORY_PROBE_ATTEMPTS" "$PROBE_PHASE" "$UPLOAD_OUTCOME" \
       "$LIMA_SERVICE_IMAGE" "${IMAGE_ID:-unknown}" "$IMAGE_REVISION" "$LIMA_GOMEMLIMIT" "$peak_mib" "$peak_bytes" "$memory_peak_unattributed_bytes" "$MEMORY_SAMPLE_INTERVAL_MS" "$stat_sample_peak_bytes" "$sample_current_bytes" "$stat_anon_bytes" "$stat_file_bytes" "$stat_kernel_bytes" "$MEMORY_MAX_BYTES" "$MEMORY_METRICS_SOURCE" \
       "${max_events:-unknown}" "${oom:-unknown}" "${oom_kill:-unknown}" "$process_sample_peak_bytes" "$process_attribution" "$process_incomplete_pids" "$server_process_pid" "$server_process_rss_bytes" "$server_process_anon_bytes" "$photo_worker_process_count" "$photo_worker_processes"
+    printf 'LIMA_GO_RUNTIME_MEMORY sample_current_bytes=%s metrics=%s\n' "$runtime_sample_current" "$runtime_sample"
     if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then
       {
         printf '\n### Lima service memory probe\n\n'
@@ -114,6 +129,8 @@ finish() {
           "${LIMA_MEMORY_PROBE_ATTEMPT:-1}" "$LIMA_MEMORY_PROBE_ATTEMPTS" "$([[ $status -eq 0 ]] && printf passed || printf failed)" "$PROBE_PHASE" "$UPLOAD_OUTCOME" \
           "$LIMA_SERVICE_IMAGE" "${IMAGE_ID:-unknown}" "$IMAGE_REVISION" "$LIMA_GOMEMLIMIT" "$peak_mib" "$peak_bytes" "$memory_peak_unattributed_bytes" "$MEMORY_SAMPLE_INTERVAL_MS" "$stat_sample_peak_bytes" "$sample_current_bytes" "$stat_anon_bytes" "$stat_file_bytes" "$stat_kernel_bytes" "$MEMORY_MAX_BYTES" \
           "$MEMORY_METRICS_SOURCE" "${max_events:-unknown}" "${oom:-unknown}" "${oom_kill:-unknown}" "$process_sample_peak_bytes" "$process_attribution" "$process_incomplete_pids" "$server_process_pid" "$server_process_rss_bytes" "$server_process_anon_bytes" "$photo_worker_process_count" "$photo_worker_processes"
+        printf '\nGo runtime memory sample at sampled current peak (%s bytes):\n\n%s\n' \
+          "$runtime_sample_current" "$runtime_sample"
       } >>"$GITHUB_STEP_SUMMARY"
     fi
   fi
@@ -141,7 +158,9 @@ rm -f "$RUNNER_TEMP/lima-memory-start-gate" "$RUNNER_TEMP/lima-memory-photo.jpg"
   "$RUNNER_TEMP/lima-memory-sampled-current" "$RUNNER_TEMP/lima-memory-sampled-anon" \
   "$RUNNER_TEMP/lima-memory-sampled-file" "$RUNNER_TEMP/lima-memory-sampled-kernel" \
   "$RUNNER_TEMP/lima-memory-sampled-processes" "$RUNNER_TEMP/lima-memory-sampled-error" \
-  "$RUNNER_TEMP/lima-memory-sampled-stop"
+  "$RUNNER_TEMP/lima-memory-sampled-stop" "$RUNNER_TEMP/lima-memory-sampled-runtime" \
+  "$RUNNER_TEMP/lima-memory-sampled-runtime-peak" "$RUNNER_TEMP/lima-memory-sampled-runtime-ready" \
+  "$RUNNER_TEMP/lima-memory-sampled-runtime.tmp"
 if ! docker image inspect "$LIMA_SERVICE_IMAGE" >/dev/null 2>&1; then
   printf 'Lima service image is not present in the local daemon: %s\n' "$LIMA_SERVICE_IMAGE" >&2
   exit 1
@@ -180,6 +199,7 @@ docker run --detach --name "$CONTAINER" \
   --env TG_WEBSOCKET_LISTEN_ADDR=127.0.0.1:2446 \
   --env TG_WEBSOCKET_ALLOWED_ORIGINS=https://web.teagram.io \
   --env TG_WEBSOCKET_BROWSER_ONLY=false \
+  --env TG_LIMA_MEMORY_DIAGNOSTICS=1 \
   --env TG_REGISTRATION=closed --env TG_PG_MAX_CONNS=3 \
   --env TG_RATE_LIMIT_SEND_CODE_IP=40 --env TG_RATE_LIMIT_SEND_CODE_IP_PHONES=40 \
   --env TG_RATE_LIMIT_CHECK_PASSWORD_IP=40 --env TG_RATE_LIMIT_GET_PASSWORD_IP=40 \
@@ -213,11 +233,31 @@ run_setup_command() {
 }
 
 sample_memory_cgroup() {
+  local last_runtime_sample_current=0 sampled_current runtime_sample_tmp
   while [[ ! -e $MEMORY_SAMPLE_STOP_FILE && -r $MEMORY_PEAK_FILE && -r $MEMORY_EVENTS_FILE ]]; do
     if ! lima_memory_record_cgroup_sample "$MEMORY_CGROUP_DIR" /proc "$container_pid" \
       "$RUNNER_TEMP/lima-memory-sampled"; then
       printf 'failed to capture a complete cgroup sample\n' >"$MEMORY_SAMPLE_ERROR_FILE"
       break
+    fi
+    if [[ -e $MEMORY_SAMPLE_RUNTIME_READY_FILE && -r $MEMORY_SAMPLE_STAT_PEAK_FILE ]]; then
+      sampled_current=$(<"$MEMORY_SAMPLE_STAT_PEAK_FILE")
+      if [[ $sampled_current =~ ^[0-9]+$ ]] &&
+        (( sampled_current >= last_runtime_sample_current + RUNTIME_SAMPLE_INTERVAL_BYTES )); then
+        runtime_sample_tmp="$MEMORY_SAMPLE_RUNTIME_FILE.tmp"
+        if curl --noproxy '*' --fail --connect-timeout 1 --max-time 2 --silent --show-error \
+          --output "$runtime_sample_tmp" http://127.0.0.1:2447/debug/runtime-memory &&
+          [[ -s $runtime_sample_tmp ]]; then
+          mv -- "$runtime_sample_tmp" "$MEMORY_SAMPLE_RUNTIME_FILE"
+          printf '%s\n' "$sampled_current" >"$MEMORY_SAMPLE_RUNTIME_PEAK_FILE"
+          last_runtime_sample_current=$sampled_current
+        else
+          rm -f -- "$runtime_sample_tmp"
+          printf 'failed to capture Go runtime memory metrics at %s cgroup bytes\n' \
+            "$sampled_current" >"$MEMORY_SAMPLE_ERROR_FILE"
+          break
+        fi
+      fi
     fi
     sleep 0.01
   done
@@ -240,6 +280,9 @@ if [[ $container_pid =~ ^[1-9][0-9]*$ ]]; then
     MEMORY_SAMPLE_FILE_FILE="$RUNNER_TEMP/lima-memory-sampled-file"
     MEMORY_SAMPLE_KERNEL_FILE="$RUNNER_TEMP/lima-memory-sampled-kernel"
     MEMORY_SAMPLE_PROCESS_FILE="$RUNNER_TEMP/lima-memory-sampled-processes"
+    MEMORY_SAMPLE_RUNTIME_FILE="$RUNNER_TEMP/lima-memory-sampled-runtime"
+    MEMORY_SAMPLE_RUNTIME_PEAK_FILE="$RUNNER_TEMP/lima-memory-sampled-runtime-peak"
+    MEMORY_SAMPLE_RUNTIME_READY_FILE="$RUNNER_TEMP/lima-memory-sampled-runtime-ready"
     MEMORY_SAMPLE_ERROR_FILE="$RUNNER_TEMP/lima-memory-sampled-error"
     MEMORY_SAMPLE_STOP_FILE="$RUNNER_TEMP/lima-memory-sampled-stop"
     if [[ -r $MEMORY_PEAK_FILE && -r $MEMORY_EVENTS_FILE && -r $MEMORY_CURRENT_FILE && -r $MEMORY_STAT_FILE && -r $MEMORY_CGROUP_DIR/memory.max && -r $MEMORY_CGROUP_DIR/cgroup.procs ]]; then
@@ -294,6 +337,12 @@ if [[ $websocket_listener_ready != true ]]; then
   echo 'Lima WebSocket listener did not accept an HTTP connection on 127.0.0.1:2446' >&2
   exit 1
 fi
+if ! curl --noproxy '*' --fail --connect-timeout 1 --max-time 2 --silent --show-error \
+  --output /dev/null http://127.0.0.1:2447/debug/runtime-memory; then
+  echo 'Lima runtime memory diagnostics did not accept a request on 127.0.0.1:2447' >&2
+  exit 1
+fi
+touch "$MEMORY_SAMPLE_RUNTIME_READY_FILE"
 
 run_setup_command client-config >"$RUNNER_TEMP/lima-memory-client.json"
 chmod 600 "$RUNNER_TEMP/lima-memory-client.json"

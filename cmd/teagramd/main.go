@@ -1086,6 +1086,11 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	stopLimaMemoryDiagnostics, err := startLimaRuntimeMemoryDiagnostics(log)
+	if err != nil {
+		return err
+	}
+	defer stopLimaMemoryDiagnostics()
 	stopShutdownWatchdog := startProcessShutdownWatchdog(ctx, processShutdownTimeout)
 	defer stopShutdownWatchdog()
 	serviceCtx, cancelService := context.WithCancel(context.Background())
