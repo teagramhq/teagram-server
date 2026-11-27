@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import collections
+import ipaddress
 import json
 import os
 import pathlib
@@ -1824,7 +1825,7 @@ compose_stack "$active_ref" config
         self.assertEqual(rules[-1], f"-A {INPUT_CHAIN} -j RETURN")
         self.assertIn(
             f"-A {IPTABLES_CHAIN} -m conntrack "
-            "--ctstate RELATED,ESTABLISHED -j RETURN",
+            "--ctstate RELATED,ESTABLISHED --ctdir REPLY -j RETURN",
             rules,
         )
         self.assertFalse(any("ACCEPT" in rule or "REJECT" in rule for rule in rules))
@@ -1860,22 +1861,44 @@ compose_stack "$active_ref" config
         self.assertIn(f"-A {IPTABLES_CHAIN} -j RETURN", rules)
         self.assertEqual(rules[-1], f"-A {INPUT_CHAIN} -j RETURN")
 
-    def test_established_replies_return_before_private_destination_drops(self) -> None:
+    def test_reply_only_conntrack_exemption_preserves_inbound_replies_and_drops_established_egress(
+        self,
+    ) -> None:
         established_rule = (
             f"-A {IPTABLES_CHAIN} -m conntrack "
-            "--ctstate RELATED,ESTABLISHED -j RETURN"
+            "--ctstate RELATED,ESTABLISHED --ctdir REPLY -j RETURN"
         )
         established_input_rule = (
             f"-A {INPUT_CHAIN} -m conntrack "
-            "--ctstate RELATED,ESTABLISHED -j RETURN"
+            "--ctstate RELATED,ESTABLISHED --ctdir REPLY -j RETURN"
         )
+
+        def egress_verdict(rules: list[str], direction: str, destination: str) -> str:
+            address = ipaddress.ip_address(destination)
+            for rule in rules:
+                if rule == established_rule and direction == "REPLY":
+                    return "RETURN"
+                if rule.startswith(f"-A {IPTABLES_CHAIN} -d ") and rule.endswith(
+                    " -j DROP"
+                ):
+                    network = ipaddress.ip_network(
+                        rule.split(" -d ", 1)[1].split(" -j ", 1)[0]
+                    )
+                    if address in network:
+                        return "DROP"
+                if rule == f"-A {IPTABLES_CHAIN} -j RETURN":
+                    return "RETURN"
+            return "NO_MATCH"
+
         for family, subnet, blocked_cidrs in (
             ("v4", EXAMPLE_IPV4_SUBNET, PRIVATE_IPV4_CIDRS),
             ("v6", EXAMPLE_IPV6_SUBNET, PRIVATE_IPV6_CIDRS),
         ):
             with self.subTest(family=family):
                 rules = render(family, subnet)
+                blocked_destination = "192.168.1.20" if family == "v4" else "fd00::20"
                 established_index = rules.index(established_rule)
+                input_established_index = rules.index(established_input_rule)
                 self.assertLess(
                     rules.index(f"-A {IPTABLES_CHAIN} -d {subnet} -j RETURN"),
                     established_index,
@@ -1887,12 +1910,17 @@ compose_stack "$active_ref" config
                             f"-A {IPTABLES_CHAIN} -d {destination} -j DROP"
                         ),
                     )
-                input_established_index = rules.index(established_input_rule)
                 for destination in blocked_cidrs:
                     self.assertLess(
                         input_established_index,
                         rules.index(f"-A {INPUT_CHAIN} -d {destination} -j DROP"),
                     )
+                self.assertEqual(
+                    egress_verdict(rules, "REPLY", blocked_destination), "RETURN"
+                )
+                self.assertEqual(
+                    egress_verdict(rules, "ORIGINAL", blocked_destination), "DROP"
+                )
 
     def test_rendering_is_stable_and_contains_no_duplicate_rules(self) -> None:
         first = render("v4", EXAMPLE_IPV4_SUBNET)
