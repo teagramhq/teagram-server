@@ -1368,27 +1368,11 @@ jobs:
         uses: actions/cache/restore@v6.1.0
         with:
           path: ~/.cache/go-build
-          key: go-build-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: go-build-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-
+          key: go-build-v2-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: go-build-v2-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-
 
       - name: Require shellcheck and yq
         run: shellcheck --version && yq --version
-
-      - name: Lint deployment, performance, and real-client workflows
-        run: |
-          actionlint -ignore 'label "ubuntu-26.04" is unknown' \
-            .github/workflows/deploy-qa-invite.yml \
-            .github/workflows/deploy-demo-target.yml \
-            .github/workflows/deploy-dev-target.yml \
-            .github/workflows/perf.yml \
-            .github/workflows/real-client-browser-flow.yml
-          # actionlint v1.7.12 predates GitHub's concurrency.queue key.
-          # The deploy and QA contracts validate the permitted value and location.
-          actionlint -ignore 'label "ubuntu-26.04" is unknown' \
-            -ignore '^unexpected key "queue" for "concurrency" section' \
-            .github/workflows/deploy-demo.yml .github/workflows/deploy.yml .github/workflows/qa-bot.yml
-          actionlint -shellcheck= -ignore 'label "ubuntu-26.04" is unknown' .github/workflows/ci.yml
-          node --check test/e2e/real_server_fixture/run_real_client_browser_flow.mjs
 
       - name: Check Playwright cache script syntax
         run: |

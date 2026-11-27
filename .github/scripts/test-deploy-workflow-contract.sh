@@ -161,6 +161,8 @@ check_ci_contract() {
     ci_fail 'CI must actionlint the demo queue caller with the queue schema exception'
   grep -Fq "'Lint deployment, performance, and real-client workflows'" .github/scripts/run-deploy-workflow-checks.sh ||
     ci_fail 'the workflow lint step must remain in the fixed worker pool'
+  [[ "$(ci_query '.jobs."check-deploy-workflow".steps | map(select(.name == "Lint deployment, performance, and real-client workflows")) | length')" == '0' ]] ||
+    ci_fail 'the workflow lint must run only through the fixed worker pool'
   [[ "$(ci_query '.jobs.ci.needs | join(",")')" == *'test-migrations'* ]] ||
     ci_fail 'the required CI gate must include the migrations lane'
   [[ "$(ci_query '.jobs.ci.needs | join(",")')" == *'test-git-hooks'* ]] ||
