@@ -382,6 +382,27 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 	for i := range fileIDs {
 		fileIDs[i] = 1_000_001 + int64(i)
 	}
+	expectedReferences := make(map[int64]struct{}, 101)
+	for _, fileID := range fileIDs[:101] {
+		expectedReferences[fileID] = struct{}{}
+	}
+	assertResolvedSet := func(label string, resolved map[int64]struct{}) {
+		t.Helper()
+		if len(resolved) != len(expectedReferences) {
+			t.Errorf("%s resolved %d historical emoji references, want exactly %d: %v",
+				label, len(resolved), len(expectedReferences), resolved)
+		}
+		for fileID := range expectedReferences {
+			if _, found := resolved[fileID]; !found {
+				t.Errorf("%s did not resolve expected historical emoji %d", label, fileID)
+			}
+		}
+		for fileID := range resolved {
+			if _, expected := expectedReferences[fileID]; !expected {
+				t.Errorf("%s resolved unexpected historical emoji %d", label, fileID)
+			}
+		}
+	}
 	recorded := &scaleQueries{}
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
@@ -398,9 +419,7 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 	if err != nil {
 		t.Fatalf("resolve scale historical emoji references: %v", err)
 	}
-	if len(referenced) != 101 {
-		t.Fatalf("resolved %d historical emoji references, want 100 private and 1 above-floor channel ID", len(referenced))
-	}
+	assertResolvedSet("one-channel history", referenced)
 	if _, found := referenced[fileIDs[len(fileIDs)-1]]; found {
 		t.Fatalf("historical emoji %d resolved from another owner's private messages", fileIDs[len(fileIDs)-1])
 	}
@@ -518,6 +537,11 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 	if floorGroups != expectedFloorGroups {
 		t.Fatalf("visible channel history floor groups = %d, want %d", floorGroups, expectedFloorGroups)
 	}
+	scaledReferences, err := store.UserStickerSetMessageReferencedFileIDs(ctx, ownerID, fileIDs)
+	if err != nil {
+		t.Fatalf("resolve 500-channel mixed-floor emoji references: %v", err)
+	}
+	assertResolvedSet("500-channel mixed-floor history", scaledReferences)
 	if err := pool.QueryRow(ctx, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "+query, queries[0].Args...).Scan(&raw); err != nil {
 		t.Fatalf("explain 500-channel historical emoji references: %v", err)
 	}
