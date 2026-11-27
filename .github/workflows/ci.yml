@@ -1336,6 +1336,23 @@ jobs:
           go-version-file: go.mod
           cache: false
 
+      - name: Restore Go module cache
+        uses: actions/cache/restore@v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: go-mod-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: go-mod-${{ runner.os }}-
+
+      - name: Download Go modules
+        run: go mod download
+
+      - name: Restore Go build cache
+        uses: actions/cache/restore@v6.1.0
+        with:
+          path: ~/.cache/go-build
+          key: go-build-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: go-build-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-
+
       - name: Install actionlint
         run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
 

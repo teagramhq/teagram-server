@@ -15,6 +15,20 @@ WORKFLOW = Path(__file__).parents[1] / "workflows" / "ci.yml"
 
 
 class ActionsCachePolicyTests(unittest.TestCase):
+    def test_deploy_workflow_diagnostic_only_restores_go_caches(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        match = re.search(
+            r"(?ms)^  check-deploy-workflow:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+            workflow,
+        )
+        self.assertIsNotNone(match, "missing deploy workflow diagnostic job")
+        body = match.group("body")
+        self.assertEqual(body.count("uses: actions/cache/restore@v6.1.0"), 2)
+        self.assertIn("path: ~/go/pkg/mod", body)
+        self.assertIn("path: ~/.cache/go-build", body)
+        self.assertIn("run: go mod download", body)
+        self.assertNotIn("uses: actions/cache@", body)
+
     def test_buildkit_cache_writes_are_main_only(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         cache_to_values = re.findall(r"(?m)^\s*cache-to:\s*(.+)$", workflow)

@@ -13,6 +13,8 @@ dev_workflow="${DEV_DEPLOY_WORKFLOW:-.github/workflows/deploy-dev-target.yml}"
 qa_workflow="${QA_INVITE_DEPLOY_WORKFLOW:-.github/workflows/deploy-qa-invite.yml}"
 ci_workflow="${CI_WORKFLOW:-.github/workflows/ci.yml}"
 demo_forced_command="deploy/teagram-demo/forced-command.sh"
+query_cache_dir=$(mktemp -d)
+trap 'rm -rf -- "$query_cache_dir"' EXIT
 expected_if="\${{ vars.K3S_TAILNET_API_READY == 'true' && (github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')) }}"
 expected_disabled_if="\${{ vars.K3S_TAILNET_API_READY != 'true' && (github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')) }}"
 expected_demo_resolver_ref='${{ github.workflow_sha }}'
@@ -31,37 +33,49 @@ expected_run_name="\${{ inputs.issue && format('{0} [{1}]', github.workflow, inp
 expected_demo_run_name="\${{ inputs.issue && format('{0} [{1}]{2}', github.workflow, inputs.issue, inputs.web_rollback_run_id && format(' [web-rollback={0}]', inputs.web_rollback_run_id) || '') || '' }}"
 expected_issue_description='Issue key to report this run to (e.g. MAIN-123). Leave empty for no report.'
 
+cached_query() {
+  local source=$1 expression=$2 cache_file
+  cache_file="$query_cache_dir/$(basename "$source").json"
+  if [[ ! -f "$cache_file" ]]; then
+    yq -o=json '.' "$source" > "$cache_file"
+  fi
+  expression=$(sed -E \
+    -e 's/\.([A-Za-z_][A-Za-z0-9_]*-[A-Za-z0-9_-]*)/."\1"/g' \
+    -e 's/to_json/tojson/g' <<< "$expression")
+  jq -r "$expression" "$cache_file"
+}
+
 fail() {
   printf '%s: %s\n' "$workflow" "$1" >&2
   exit 1
 }
 
 query() {
+  local source="$workflow"
   if [[ "$1" == *'.jobs.deploy-demo'* ]]; then
-    yq -r "$1" "$demo_workflow"
-    return
+    source="$demo_workflow"
   fi
-  yq -r "$1" "$workflow"
+  cached_query "$source" "$1"
 }
 
 demo_query() {
   if [[ "$1" == *'deploy-dev'* || "$1" == *'check-dev-deploy-target'* ]]; then
-    yq -r "$1" "$dev_workflow"
+    cached_query "$dev_workflow" "$1"
     return
   fi
-  yq -r "$1" "$demo_workflow"
+  cached_query "$demo_workflow" "$1"
 }
 
 dev_query() {
-  yq -r "$1" "$dev_workflow"
+  cached_query "$dev_workflow" "$1"
 }
 
 demo_entry_query() {
-  yq -r "$1" "$demo_entrypoint_workflow"
+  cached_query "$demo_entrypoint_workflow" "$1"
 }
 
 qa_query() {
-  yq -r "$1" "$qa_workflow"
+  cached_query "$qa_workflow" "$1"
 }
 
 ci_fail() {
@@ -70,7 +84,7 @@ ci_fail() {
 }
 
 ci_query() {
-  yq -r "$1" "$ci_workflow"
+  cached_query "$ci_workflow" "$1"
 }
 
 check_ci_contract() {
@@ -752,8 +766,7 @@ check_demo_credential_gate() (
   run_gate false '' '' false '::notice::Public demo deployment is disabled'
 )
 
-check_contract() {
-  local qa_create_account_run qa_operation_run qa_key_install_run demo_dev_run qa_validate_index qa_tailnet_index dev_target_index dev_tailnet_index
+check_server_deploy_contract() {
   [[ "$(query '.on | keys | sort | join(",")')" == 'workflow_dispatch,workflow_run' ]] ||
     fail 'triggers must be exactly workflow_run and workflow_dispatch'
   [[ "$(query '.on.workflow_dispatch.inputs | keys | join(",")')" == 'issue' ]] ||
@@ -812,6 +825,8 @@ check_contract() {
     fail 'the dev job must run only on dispatch or a successful CI push run'
   [[ "$(query '.jobs."deploy-server".environment')" == 'k3s-prod' ]] ||
     fail 'the k3s deploy job must use environment: k3s-prod'
+  [[ "$(query '.jobs."deploy-server".steps[] | select(.id == "target") | .env.RUN_HEAD_SHA')" == '${{ github.event.workflow_run.head_sha }}' ]] ||
+    fail 'the production deploy must begin from the commit whose CI completed'
   [[ "$(query '.jobs."deploy-server".permissions // {} | to_entries | map(select(.value != "read")) | length')" == 0 ]] ||
     fail 'the dev job must not request write permissions'
   [[ "$(query '.jobs."deploy-server".permissions | to_entries | map(.key + "=" + .value) | join(",")')" == 'actions=read,attestations=read,contents=read' ]] ||
@@ -899,6 +914,11 @@ check_contract() {
   [[ "$(query '.jobs.deploy-server.steps[] | select(.name == "Deploy, wait for workloads, and smoke the tested release") | .run')" == *'deploy/k8s/deploy-release.sh'* ]] ||
     fail 'the production workflow must delegate apply, rollback, and smoke to the release runner'
 
+  check_target_selection
+}
+
+check_qa_invite_contract() {
+  local qa_create_account_run qa_operation_run qa_key_install_run qa_validate_index qa_tailnet_index
   [[ "$(qa_query '.name')" == 'Deploy qa-invite.' ]] ||
     fail 'the QA invite workflow name must remain stable'
   [[ "$(qa_query '.jobs.qa-invite.environment')" == 'demo' ]] ||
@@ -954,6 +974,10 @@ check_contract() {
     fail 'QA operation SSH must verify the configured QA invite host pin'
   fi
 
+}
+
+check_demo_contract() {
+  local demo_dev_run dev_target_index dev_tailnet_index
   [[ "$(demo_entry_query '.name')" == 'Deploy demo.' ]] ||
     fail 'the demo must have its own workflow status and router result'
   [[ "$(demo_entry_query '.run-name')" == "$expected_demo_run_name" ]] ||
@@ -1229,7 +1253,7 @@ check_contract() {
     grep -Fq 'actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=1' ||
     fail 'a manual run must resolve the newest successful CI push run on main'
   local ssh_steps demo_ssh_steps demo_port_run
-  ssh_steps="$(query '[.jobs."deploy-server".steps[] | select(.run // "" | test("(^|\s)ssh\s"))] | length')"
+  ssh_steps="$(query '[.jobs."deploy-server".steps[] | select(.run // "" | test("(^|\\s)ssh\\s"))] | length')"
   [[ "$ssh_steps" == 0 ]] || fail 'the production deploy must apply to k3s instead of SSHing to the Compose host'
   local checkout_steps dev_step_names
   checkout_steps="$(query '[.jobs."deploy-server".steps[] | select(.uses // "" | test("^actions/checkout@"))] | length')"
@@ -1257,7 +1281,7 @@ check_contract() {
     fail 'the kubeconfig step must expose the API host output'
   ! grep -Fq '100.124.236.66' "$workflow" ||
     fail 'the deploy workflow must not name the deleted teagram LXC address'
-  demo_ssh_steps="$(query '[.jobs.deploy-demo.steps[] | select(.run // "" | test("(^|\s)ssh\s"))] | length')"
+  demo_ssh_steps="$(query '[.jobs.deploy-demo.steps[] | select(.run // "" | test("(^|\\s)ssh\\s"))] | length')"
   [[ "$demo_ssh_steps" == 2 ]] || fail "expected server and web demo ssh steps, found $demo_ssh_steps"
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Deploy the tested server commit to demo") | .env.DEPLOY_SHA')" == '${{ needs.check-demo-deploy-target.outputs.sha }}' ]] ||
     fail 'the demo ssh step must deploy the exact SHA from the Deploy. run'
@@ -1329,7 +1353,7 @@ check_contract() {
     fail 'demo SSH port must be validated by the shared deploy target validator'
   grep -Fq 'DEMO_DEPLOY_USER "$DEMO_DEPLOY_USER"' <<< "$demo_port_run" ||
     fail 'demo SSH user must be validated by the shared deploy target validator'
-  query '.jobs.deploy-demo.steps[] | select(.run // "" | test("(^|\s)ssh\s")) | .run' |
+  query '.jobs.deploy-demo.steps[] | select(.run // "" | test("(^|\\s)ssh\\s")) | .run' |
     grep -F 'StrictHostKeyChecking=yes' >/dev/null || fail 'the demo ssh step must verify the host key'
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Install the demo deploy key") | .env.DEMO_DEPLOY_SSH_KEY')" == '${{ secrets.DEMO_DEPLOY_SSH_KEY }}' ]] ||
     fail 'the demo job must use its environment-scoped deploy key'
@@ -1475,11 +1499,11 @@ SSH
     fail 'the public demo deploy must not depend on the independent dev deploy'
   ! grep -Fq 'deploy-demo' < <(demo_query '.jobs.deploy-dev.needs[]') ||
     fail 'the dev deploy must not depend on the independent public demo deploy'
-  [[ "$(query '[.jobs[].steps[].run // "" | select(test("\$\{\{"))] | length')" == 0 ]] ||
+  [[ "$(query '[.jobs[].steps[].run // "" | select(test("\\$\\{\\{"))] | length')" == 0 ]] ||
     fail 'run blocks must not interpolate ${{ }}; pass values through env'
-  [[ "$(demo_query '[.jobs[].steps[].run // "" | select(test("\$\{\{"))] | length')" == 0 ]] ||
+  [[ "$(demo_query '[.jobs[].steps[].run // "" | select(test("\\$\\{\\{"))] | length')" == 0 ]] ||
     fail 'demo run blocks must not interpolate ${{ }}; pass values through env'
-  [[ "$(dev_query '[.jobs[].steps[].run // "" | select(test("\$\{\{"))] | length')" == 0 ]] ||
+  [[ "$(dev_query '[.jobs[].steps[].run // "" | select(test("\\$\\{\\{"))] | length')" == 0 ]] ||
     fail 'dev run blocks must not interpolate ${{ }}; pass values through env'
 
   local uses
@@ -1499,8 +1523,13 @@ SSH
     [[ -n "$uses" ]] || continue
     [[ "$uses" =~ ^[^@]+@[0-9a-f]{40}$ ]] || fail "action not pinned to a commit SHA: $uses"
   done < <(dev_query '.jobs[].steps[].uses // ""')
-  check_target_selection
   check_demo_image_digest_download
+}
+
+check_contract() {
+  check_server_deploy_contract
+  check_qa_invite_contract
+  check_demo_contract
 }
 
 # Each mutation breaks one rule; the contract must reject all of them.
@@ -1558,7 +1587,7 @@ self_test() {
   )
   for mutation in "${mutations[@]}"; do
     yq "$mutation" "$workflow" > "$tmp/deploy.yml"
-    if DEPLOY_WORKFLOW="$tmp/deploy.yml" "$0" --contract-only 2>/dev/null; then
+    if DEPLOY_WORKFLOW="$tmp/deploy.yml" CONTRACT_ONLY_TARGET=deploy "$0" --contract-only 2>/dev/null; then
       printf 'contract accepted a broken workflow: %s\n' "$mutation" >&2
       exit 1
     fi
@@ -1578,7 +1607,7 @@ self_test() {
   )
   for mutation in "${qa_mutations[@]}"; do
     yq "$mutation" "$qa_workflow" > "$tmp/deploy-qa-invite.yml"
-    if QA_INVITE_DEPLOY_WORKFLOW="$tmp/deploy-qa-invite.yml" "$0" --contract-only 2>/dev/null; then
+    if QA_INVITE_DEPLOY_WORKFLOW="$tmp/deploy-qa-invite.yml" CONTRACT_ONLY_TARGET=qa "$0" --contract-only 2>/dev/null; then
       printf 'contract accepted a broken QA invite workflow: %s\n' "$mutation" >&2
       exit 1
     fi
@@ -1627,7 +1656,7 @@ self_test() {
   )
   for mutation in "${demo_mutations[@]}"; do
     yq "$mutation" "$demo_workflow" > "$tmp/deploy-demo.yml"
-    if DEMO_DEPLOY_WORKFLOW="$tmp/deploy-demo.yml" "$0" --contract-only 2>/dev/null; then
+    if DEMO_DEPLOY_WORKFLOW="$tmp/deploy-demo.yml" CONTRACT_ONLY_TARGET=demo "$0" --contract-only 2>/dev/null; then
       printf 'contract accepted a broken demo workflow: %s\n' "$mutation" >&2
       exit 1
     fi
@@ -1658,7 +1687,7 @@ self_test() {
   )
   for mutation in "${demo_entry_mutations[@]}"; do
     yq "$mutation" "$demo_entrypoint_workflow" > "$tmp/deploy-demo-entry.yml"
-    if DEMO_ENTRYPOINT_WORKFLOW="$tmp/deploy-demo-entry.yml" "$0" --contract-only 2>/dev/null; then
+    if DEMO_ENTRYPOINT_WORKFLOW="$tmp/deploy-demo-entry.yml" CONTRACT_ONLY_TARGET=demo "$0" --contract-only 2>/dev/null; then
       printf 'contract accepted a broken demo queue caller: %s\n' "$mutation" >&2
       exit 1
     fi
@@ -1677,7 +1706,7 @@ self_test() {
   )
   for mutation in "${dev_mutations[@]}"; do
     yq "$mutation" "$dev_workflow" > "$tmp/deploy-dev-target.yml"
-    if DEV_DEPLOY_WORKFLOW="$tmp/deploy-dev-target.yml" "$0" --contract-only 2>/dev/null; then
+    if DEV_DEPLOY_WORKFLOW="$tmp/deploy-dev-target.yml" CONTRACT_ONLY_TARGET=demo "$0" --contract-only 2>/dev/null; then
       printf 'contract accepted a broken queued dev target workflow: %s\n' "$mutation" >&2
       exit 1
     fi
@@ -1698,12 +1727,31 @@ self_test() {
   )
   for mutation in "${ci_mutations[@]}"; do
     yq "$mutation" "$ci_workflow" > "$tmp/ci.yml"
-    if CI_WORKFLOW="$tmp/ci.yml" "$0" --contract-only 2>/dev/null; then
+    if CI_WORKFLOW="$tmp/ci.yml" CONTRACT_ONLY_TARGET=ci "$0" --contract-only 2>/dev/null; then
       printf 'contract accepted a broken CI workflow: %s\n' "$mutation" >&2
       exit 1
     fi
   done
 }
+
+run_contract_target() {
+  case "${CONTRACT_ONLY_TARGET:-all}" in
+    all)
+      check_contract
+      check_ci_contract
+      ;;
+    deploy) check_server_deploy_contract ;;
+    qa) check_qa_invite_contract ;;
+    demo) check_demo_contract ;;
+    ci) check_ci_contract ;;
+    *) fail "unknown contract target: $CONTRACT_ONLY_TARGET" ;;
+  esac
+}
+
+if [[ "${1:-}" == '--contract-only' ]]; then
+  run_contract_target
+  exit 0
+fi
 
 check_contract
 check_ci_contract
