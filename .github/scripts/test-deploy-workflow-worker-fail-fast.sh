@@ -46,3 +46,33 @@ grep -Fq 'FAILED: Check workflow contract script syntax' "$worker_log" || {
 }
 
 printf 'worker failed the named check after its first command failed\n'
+
+cat > "$shim_dir/xargs" <<'MOCK_XARGS'
+#!/usr/bin/bash
+set -Eeuo pipefail
+: "${DEPLOY_CHECK_POOL_DIR:?}"
+for worker in 1 2 3 4 5; do
+  worker_dir="$DEPLOY_CHECK_POOL_DIR/worker-$worker"
+  mkdir -p "$worker_dir"
+  if [[ $worker == 1 ]]; then
+    printf '1\n' > "$worker_dir/status"
+  else
+    printf '0\n' > "$worker_dir/status"
+  fi
+done
+MOCK_XARGS
+chmod 0755 "$shim_dir/xargs"
+
+pool_output="$tmp_dir/pool-output.log"
+if TMPDIR="$tmp_dir" PATH="$shim_dir:$PATH" \
+  /usr/bin/bash "$script_dir/run-deploy-workflow-checks.sh" > "$pool_output" 2>&1; then
+  printf 'worker pool reported success after a worker status failed\n' >&2
+  exit 1
+fi
+
+grep -Fq 'FAILED:' "$pool_output" || {
+  printf 'worker pool exited non-zero without reporting the failed worker\n' >&2
+  exit 1
+}
+
+printf 'worker pool reported a failed worker status\n'

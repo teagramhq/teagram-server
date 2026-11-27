@@ -56,7 +56,9 @@ readonly -a WORKER_5_TASKS=(13 19)
 
 run_with_loopback_port_lock() (
   # These fixtures select a free port, release it, then bind it; keep their assignments distinct.
-  exec 9>"$DEPLOY_CHECK_POOL_DIR/loopback-port.lock"
+  local lock_dir=${DEPLOY_CHECK_LOCK_DIR:-${DEPLOY_CHECK_POOL_DIR:?worker pool directory is required}}
+  mkdir -p "$lock_dir"
+  exec 9>"$lock_dir/loopback-port.lock"
   flock -x 9
   "$@"
 )
@@ -107,7 +109,8 @@ run_check() {
       bash -n .github/scripts/perf-run.sh .github/scripts/test-perf-workflow-contract.sh .github/scripts/test-ci-main-priority.sh
       shellcheck .github/scripts/test-perf-workflow-contract.sh .github/scripts/test-ci-main-priority.sh
       bash -n .github/scripts/test-deploy-workflow-worker-fail-fast.sh
-      shellcheck .github/scripts/test-deploy-workflow-worker-fail-fast.sh
+      bash -n .github/scripts/test-deploy-workflow-loopback-port-lock.sh
+      shellcheck .github/scripts/test-deploy-workflow-worker-fail-fast.sh .github/scripts/test-deploy-workflow-loopback-port-lock.sh
       bash -n .github/scripts/publish-k8s-image-digests.sh .github/scripts/test-k8s-image-digests.sh
       shellcheck .github/scripts/publish-k8s-image-digests.sh .github/scripts/test-k8s-image-digests.sh
       bash -n deploy/k8s/deploy-release.sh \
@@ -140,6 +143,7 @@ run_check() {
       ;;
     'Test deploy workflow worker preserves command failures')
       .github/scripts/test-deploy-workflow-worker-fail-fast.sh
+      bash .github/scripts/test-deploy-workflow-loopback-port-lock.sh
       ;;
     'Test the alpha Incus host compatibility')
       # Fixed /tmp fixture paths are inside this check's fresh anonymous container.
@@ -593,6 +597,7 @@ pool_dir=$(mktemp -d)
 cleanup() { rm -rf -- "$pool_dir"; }
 trap cleanup EXIT
 export DEPLOY_CHECK_POOL_DIR=$pool_dir
+export DEPLOY_CHECK_LOCK_DIR=$pool_dir
 pool_started_ns=$(date +%s%N)
 validate_worker_assignments
 xargs_status=0
@@ -619,7 +624,9 @@ for ((worker = 1; worker <= WORKER_COUNT; worker++)); do
   fi
   [[ ! -s $worker_dir/output.log ]] || cat "$worker_dir/output.log"
   [[ ! -s $worker_dir/summary.md || -z ${GITHUB_STEP_SUMMARY:-} ]] || cat "$worker_dir/summary.md" >> "$GITHUB_STEP_SUMMARY"
-  if [[ $(<"$worker_dir/status") != 0 ]]; then
+  worker_status=$(<"$worker_dir/status")
+  if [[ $worker_status != 0 ]]; then
+    printf 'FAILED: worker %d reported status %s\n' "$worker" "$worker_status"
     pool_failed=1
   fi
 done
