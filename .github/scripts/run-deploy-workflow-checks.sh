@@ -368,7 +368,7 @@ run_check() {
       deploy/teagram/test-target-failure-report.sh
       ;;
     'Check public demo Compose policy')
-      false
+      deploy/teagram-demo/test-demo-compose.sh
       ;;
     'Check Lima demo egress isolation')
       python3 -B deploy/teagram-demo/lima/test-egress-isolation-rules.py
