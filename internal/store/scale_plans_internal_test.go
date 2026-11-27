@@ -211,6 +211,7 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 	}
 	visibleChannelID := int64(9_000_000_000_000_000_001)
 	hiddenChannelID := int64(9_000_000_000_000_000_002)
+	const visibleChannelHistoryFloor int64 = 19_901
 	for _, channel := range []struct {
 		id        int64
 		creatorID int64
@@ -228,7 +229,8 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 		}
 	}
 	if _, err := pool.Exec(ctx,
-		"INSERT INTO channel_participants (channel_id, user_id) VALUES ($1, $2)", visibleChannelID, ownerID,
+		"INSERT INTO channel_participants (channel_id, user_id, available_min_id) VALUES ($1, $2, $3)",
+		visibleChannelID, ownerID, visibleChannelHistoryFloor,
 	); err != nil {
 		t.Fatalf("seed visible scale channel membership: %v", err)
 	}
@@ -252,13 +254,19 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 		 FROM generate_series(1, 20000) AS n`, args: []any{peerID, ownerID}},
 		{query: "ALTER TABLE messages ENABLE TRIGGER USER"},
 		{query: "ALTER TABLE channel_messages DISABLE TRIGGER USER"},
+		// A popular requested ID appears throughout the hidden part of this
+		// member's channel history; the floor must keep that history out of the scan.
 		{query: `INSERT INTO channel_messages (channel_id, local_id, from_id, message, entities)
 		 SELECT $1, n, $2, 'visible scale emoji',
 		        jsonb_build_object('version', 1, 'entities', jsonb_build_array(jsonb_build_object(
 		            'type', 18, 'offset', 0, 'length', 1,
-		            'argument', CASE WHEN n <= 99 THEN 1000100 + n ELSE 50000000 + n END
+		            'argument', CASE
+		                WHEN n <= 99 THEN 1000100 + n
+		                WHEN n <= $3 THEN 1000200
+		                ELSE 1000100 + n - $3
+		            END
 		        )))
-		 FROM generate_series(1, 20000) AS n`, args: []any{visibleChannelID, ownerID}},
+		 FROM generate_series(1, 20000) AS n`, args: []any{visibleChannelID, ownerID, visibleChannelHistoryFloor}},
 		{query: `INSERT INTO channel_messages (channel_id, local_id, from_id, message, entities)
 		 SELECT $1, n, $2, 'popular hidden scale emoji',
 		        jsonb_build_object('version', 1, 'entities', jsonb_build_array(jsonb_build_object(
@@ -328,7 +336,7 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 		t.Fatalf("historical emoji %d resolved from another owner's private messages", fileIDs[len(fileIDs)-1])
 	}
 	if _, found := referenced[fileIDs[len(fileIDs)-2]]; found {
-		t.Fatalf("historical emoji %d resolved from a channel the owner cannot see", fileIDs[len(fileIDs)-2])
+		t.Fatalf("historical emoji %d resolved below the history floor or from a channel the owner cannot see", fileIDs[len(fileIDs)-2])
 	}
 	recorded.mu.Lock()
 	queries := append([]pgx.TraceQueryStartData(nil), recorded.queries...)
@@ -359,14 +367,18 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 	if err := json.Unmarshal(raw, &plans); err != nil {
 		t.Fatalf("decode historical emoji plan: %v", err)
 	}
-	// Exact index-name assertions keep dropped or unusable GIN indexes failing.
+	// The private-message branch uses the document GIN index. The channel branch
+	// starts from its channel-local history floor using the primary key.
+	if !plans[0].Plan.usesIndex("messages_owner_custom_emoji_document_ids_gin_idx") {
+		t.Errorf("historical emoji plan does not use the private-message GIN index: %s", strings.Join(plans[0].Plan.accessSummary(), "; "))
+	}
+	if !plans[0].Plan.usesIndex("channel_messages_pkey") {
+		t.Errorf("historical emoji plan does not use the channel history primary key: %s", strings.Join(plans[0].Plan.accessSummary(), "; "))
+	}
 	for _, index := range []string{
 		"messages_owner_custom_emoji_document_ids_gin_idx",
 		"channel_messages_channel_custom_emoji_document_ids_gin_idx",
 	} {
-		if !plans[0].Plan.usesIndex(index) {
-			t.Errorf("historical emoji plan does not use %s: %s", index, strings.Join(plans[0].Plan.accessSummary(), "; "))
-		}
 		var predicate string
 		if err := pool.QueryRow(ctx, `
 			SELECT pg_get_expr(index_info.indpred, index_info.indrelid)
