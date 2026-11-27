@@ -177,6 +177,11 @@ printf '3145728\n' >"$runtime_cgroup/memory.peak"
 printf 'low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\n' >"$runtime_cgroup/memory.events"
 printf '2500000\n' >"$runtime_cgroup/memory.current"
 printf 'anon 2000000\nfile 100000\nkernel 400000\n' >"$runtime_cgroup/memory.stat"
+lima_memory_record_cgroup_sample "$runtime_cgroup" "$proc_root" 101 "$runtime_prefix"
+# The runtime request must carry the selected cgroup sample, even if the live
+# current value advances before the request finishes.
+printf '2600000\n' >"$runtime_cgroup/memory.current"
+printf 'anon 2100000\nfile 100000\nkernel 400000\n' >"$runtime_cgroup/memory.stat"
 touch "$runtime_ready"
 
 curl() {
@@ -196,10 +201,7 @@ curl() {
   printf '{"heap_live_bytes":1}\n' >"$output"
 }
 
-lima_memory_sample_cgroup_loop "$runtime_cgroup" "$proc_root" 101 "$runtime_prefix" \
-  "$runtime_stop" "$runtime_error" 0.01 &
-cgroup_sampler_pid=$!
-lima_memory_sample_runtime_metrics_loop "$runtime_cgroup/memory.current" "$((512 * 1024))" "$runtime_ready" \
+lima_memory_sample_runtime_metrics_loop "$runtime_prefix-stat-peak" "$((512 * 1024))" "$runtime_ready" \
   "$runtime_file" "$runtime_sample_current" "$runtime_error" "$runtime_stop" 0.01 &
 runtime_sampler_pid=$!
 for _ in $(seq 200); do
@@ -212,10 +214,12 @@ if [[ ! -e "$runtime_request_started" ]]; then
   printf 'runtime sampler did not begin the blocking metrics request\n' >&2
   : >"$runtime_request_release"
   : >"$runtime_stop"
-  wait "$cgroup_sampler_pid" 2>/dev/null || true
   wait "$runtime_sampler_pid" 2>/dev/null || true
   exit 1
 fi
+lima_memory_sample_cgroup_loop "$runtime_cgroup" "$proc_root" 101 "$runtime_prefix" \
+  "$runtime_stop" "$runtime_error" 0.01 &
+cgroup_sampler_pid=$!
 
 # A delayed runtime request must not pause 10 ms process snapshots. Capture a
 # short-lived worker at the higher current, then lower current before it exits.

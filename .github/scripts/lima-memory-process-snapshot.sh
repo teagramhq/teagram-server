@@ -242,7 +242,7 @@ lima_memory_sample_cgroup_loop() {
 }
 
 lima_memory_sample_runtime_metrics_loop() {
-  local current_file="$1" sample_interval_bytes="$2" ready_file="$3"
+  local sampled_peak_file="$1" sample_interval_bytes="$2" ready_file="$3"
   local runtime_file="$4" runtime_sample_current_file="$5" error_file="$6" stop_file="$7"
   local interval_seconds="${8:-0.01}" last_runtime_sample_current=0 sampled_current runtime_sample_tmp
 
@@ -251,8 +251,8 @@ lima_memory_sample_runtime_metrics_loop() {
       sleep "$interval_seconds"
       continue
     fi
-    if ! sampled_current=$(<"$current_file") || [[ ! "$sampled_current" =~ ^[0-9]+$ ]]; then
-      printf 'failed to read cgroup current before Go runtime memory metrics request\n' >"$error_file"
+    if ! sampled_current=$(<"$sampled_peak_file") || [[ ! "$sampled_current" =~ ^[0-9]+$ ]]; then
+      printf 'failed to read sampled cgroup current peak before Go runtime memory metrics request\n' >"$error_file"
       return 1
     fi
     if (( sampled_current >= last_runtime_sample_current + sample_interval_bytes )); then

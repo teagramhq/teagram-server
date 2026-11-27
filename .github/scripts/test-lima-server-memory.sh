@@ -272,7 +272,7 @@ if [[ $container_pid =~ ^[1-9][0-9]*$ ]]; then
       "$RUNNER_TEMP/lima-memory-sampled" "$MEMORY_SAMPLE_STOP_FILE" "$MEMORY_SAMPLE_ERROR_FILE" \
       0.01 &
     MEMORY_SAMPLER_PID=$!
-    lima_memory_sample_runtime_metrics_loop "$MEMORY_CURRENT_FILE" "$RUNTIME_SAMPLE_INTERVAL_BYTES" \
+    lima_memory_sample_runtime_metrics_loop "$MEMORY_SAMPLE_STAT_PEAK_FILE" "$RUNTIME_SAMPLE_INTERVAL_BYTES" \
       "$MEMORY_SAMPLE_RUNTIME_READY_FILE" "$MEMORY_SAMPLE_RUNTIME_FILE" \
       "$MEMORY_SAMPLE_RUNTIME_PEAK_FILE" "$MEMORY_SAMPLE_ERROR_FILE" "$MEMORY_SAMPLE_STOP_FILE" \
       0.01 &
