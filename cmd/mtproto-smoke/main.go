@@ -69,6 +69,7 @@ func main() {
 	mediaUploadFile := flag.String("media-upload-file", "", "upload a document after sign-in and save its reference to --media-manifest-file")
 	mediaDownloadFile := flag.String("media-download-file", "", "download the document in --media-manifest-file after sign-in")
 	mediaPhotoUploadFile := flag.String("media-photo-upload-file", "", "send an uploaded JPEG photo after sign-in")
+	mediaPhotoRequireThumbnails := flag.Bool("media-photo-require-thumbnails", false, "require m and stripped thumbnails in the uploaded photo response")
 	mediaPhotoStartGateFile := flag.String("media-photo-start-gate-file", "", "wait for this file before sending the uploaded photo")
 	profilePhotoUploadFile := flag.String("profile-photo-upload-file", "", "upload a profile photo after sign-in")
 	profilePhotoStartGateFile := flag.String("profile-photo-start-gate-file", "", "wait for this file before submitting the profile photo RPC")
@@ -107,7 +108,7 @@ func main() {
 			log.Fatal("--websocket-origin is required with --websocket-endpoint")
 		}
 		if *usernameFile != "" || *passwordFile != "" || *mediaUploadFile != "" || *mediaDownloadFile != "" ||
-			*mediaPhotoUploadFile != "" || *mediaPhotoStartGateFile != "" || *profilePhotoUploadFile != "" ||
+			*mediaPhotoUploadFile != "" || *mediaPhotoRequireThumbnails || *mediaPhotoStartGateFile != "" || *profilePhotoUploadFile != "" ||
 			*profilePhotoStartGateFile != "" || *mediaManifestFile != "" {
 			log.Fatal("--websocket-endpoint cannot be used with credential or media smoke options")
 		}
@@ -134,6 +135,9 @@ func main() {
 	if *mediaPhotoStartGateFile != "" && *mediaPhotoUploadFile == "" {
 		log.Fatal("--media-photo-start-gate-file requires --media-photo-upload-file")
 	}
+	if *mediaPhotoRequireThumbnails && *mediaPhotoUploadFile == "" {
+		log.Fatal("--media-photo-require-thumbnails requires --media-photo-upload-file")
+	}
 	if *profilePhotoStartGateFile != "" && *profilePhotoUploadFile == "" {
 		log.Fatal("--profile-photo-start-gate-file requires --profile-photo-upload-file")
 	}
@@ -147,7 +151,8 @@ func main() {
 	if err := run(*endpoint, *websocketEndpoint, *websocketOrigin, *discoveryURL, *discoveryFile,
 		*expectedInviteQuota, *expectedRegistrationMode,
 		*usernameFile, *passwordFile, *mediaUploadFile, *mediaDownloadFile, *mediaPhotoUploadFile,
-		*mediaPhotoStartGateFile, *profilePhotoUploadFile, *profilePhotoStartGateFile, *mediaManifestFile); err != nil {
+		*mediaPhotoStartGateFile, *mediaPhotoRequireThumbnails, *profilePhotoUploadFile,
+		*profilePhotoStartGateFile, *mediaManifestFile); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -155,7 +160,8 @@ func main() {
 func run(endpoint, websocketEndpoint, websocketOrigin, discoveryURL, discoveryFile string,
 	expectedInviteQuota int, expectedRegistrationMode string,
 	usernameFile, passwordFile, mediaUploadFile, mediaDownloadFile, mediaPhotoUploadFile,
-	mediaPhotoStartGateFile, profilePhotoUploadFile, profilePhotoStartGateFile, mediaManifestFile string) error {
+	mediaPhotoStartGateFile string, mediaPhotoRequireThumbnails bool,
+	profilePhotoUploadFile, profilePhotoStartGateFile, mediaManifestFile string) error {
 	if expectedInviteQuota < -1 {
 		return errors.New("expected user invite quota must be non-negative")
 	}
@@ -178,7 +184,7 @@ func run(endpoint, websocketEndpoint, websocketOrigin, discoveryURL, discoveryFi
 			}
 		case mediaPhotoUploadFile != "":
 			action = func(ctx context.Context, client *telegram.Client, _ *tg.User) error {
-				return uploadMediaPhotoSmoke(ctx, client.API(), mediaPhotoUploadFile, mediaPhotoStartGateFile)
+				return uploadMediaPhotoSmoke(ctx, client.API(), mediaPhotoUploadFile, mediaPhotoStartGateFile, mediaPhotoRequireThumbnails)
 			}
 		case profilePhotoUploadFile != "":
 			action = func(ctx context.Context, client *telegram.Client, user *tg.User) error {

@@ -20,7 +20,11 @@ const (
 	mediaPartSize = 512 * 1024
 	maxSmokeMedia = 64 * 1024 * 1024
 	// Keep profile photo uploads within the server's accepted encoded-JPEG cap.
-	maxSmokePhoto = 10 * 1024 * 1024
+	maxSmokePhoto                 = 10 * 1024 * 1024
+	maxSmokePhotoMBytes           = 65_536
+	maxSmokePhotoStrippedBytes    = 2_048
+	maxSmokePhotoMLongSide        = 320
+	maxSmokePhotoStrippedLongSide = 40
 )
 
 type mediaReference struct {
@@ -127,7 +131,7 @@ func uploadProfilePhotoSmoke(ctx context.Context, api *tg.Client, username, payl
 	return fmt.Errorf("profile photo response omitted user %s", username)
 }
 
-func uploadMediaPhotoSmoke(ctx context.Context, api *tg.Client, payloadPath, startGateFile string) error {
+func uploadMediaPhotoSmoke(ctx context.Context, api *tg.Client, payloadPath, startGateFile string, requireThumbnails bool) error {
 	payload, err := readSmokeMediaPhoto(payloadPath)
 	if err != nil {
 		return err
@@ -155,7 +159,7 @@ func uploadMediaPhotoSmoke(ctx context.Context, api *tg.Client, payloadPath, sta
 	if err != nil {
 		return fmt.Errorf("send uploaded media photo: %w", err)
 	}
-	if err := validateMediaPhotoUpdates(updates); err != nil {
+	if err := validateMediaPhotoUpdates(updates, requireThumbnails); err != nil {
 		return err
 	}
 	return nil
@@ -184,7 +188,7 @@ func uploadPhotoParts(ctx context.Context, api *tg.Client, payload []byte) (int6
 	return fileID, parts, hex.EncodeToString(checksum[:]), nil
 }
 
-func validateMediaPhotoUpdates(updates tg.UpdatesClass) error {
+func validateMediaPhotoUpdates(updates tg.UpdatesClass, requireThumbnails bool) error {
 	var entries []tg.UpdateClass
 	switch result := updates.(type) {
 	case *tg.Updates:
@@ -210,6 +214,29 @@ func validateMediaPhotoUpdates(updates tg.UpdatesClass) error {
 		photo, ok := media.Photo.(*tg.Photo)
 		if !ok || photo.ID <= 0 {
 			return fmt.Errorf("send uploaded media photo returned invalid photo %T", media.Photo)
+		}
+		if !requireThumbnails {
+			return nil
+		}
+		hasStrippedThumbnail := false
+		hasMThumbnail := false
+		for _, sizeClass := range photo.Sizes {
+			switch size := sizeClass.(type) {
+			case *tg.PhotoStrippedSize:
+				if size != nil && size.Type == "i" && len(size.Bytes) >= 4 && len(size.Bytes) <= maxSmokePhotoStrippedBytes && size.Bytes[0] == 1 && size.Bytes[1] > 0 && size.Bytes[1] <= maxSmokePhotoStrippedLongSide && size.Bytes[2] > 0 && size.Bytes[2] <= maxSmokePhotoStrippedLongSide {
+					hasStrippedThumbnail = true
+				}
+			case *tg.PhotoSize:
+				if size != nil && size.Type == "m" && size.W > 0 && size.H > 0 && max(size.W, size.H) == maxSmokePhotoMLongSide && size.Size > 0 && size.Size <= maxSmokePhotoMBytes {
+					hasMThumbnail = true
+				}
+			}
+		}
+		if !hasStrippedThumbnail {
+			return errors.New("send uploaded media photo omitted a valid stripped thumbnail")
+		}
+		if !hasMThumbnail {
+			return errors.New("send uploaded media photo omitted a valid m thumbnail")
 		}
 		return nil
 	}

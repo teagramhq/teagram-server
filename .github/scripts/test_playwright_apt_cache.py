@@ -104,6 +104,10 @@ class PlaywrightAptCacheTests(unittest.TestCase):
         )
         self.assertIn("if: steps.apt-cache.outputs.cache-hit == 'true'", workflow)
         self.assertIn(
+            "if sudo dpkg --auto-deconfigure -i ../.apt-cache/*.deb",
+            workflow,
+        )
+        self.assertIn(
             "steps.apt-cached-install.outputs.installed != 'true'", workflow
         )
         self.assertIn("timeout --signal=KILL 9m bash -c attempt_install", workflow)
