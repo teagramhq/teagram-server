@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 PREPARE_CACHE = ROOT / ".github/scripts/prepare-playwright-apt-cache.sh"
 INSTALL_CACHE = ROOT / ".github/scripts/install-playwright-apt-cache.sh"
 INSTALL_FALLBACK = ROOT / ".github/scripts/install-playwright-apt-fallback.sh"
+REBUILD_CACHE = ROOT / ".github/scripts/rebuild-playwright-apt-cache.sh"
 DISCARD_CACHE = ROOT / ".github/scripts/discard-playwright-apt-cache.sh"
 WORKFLOW = ROOT / ".github/workflows/ci.yml"
 REAL_CLIENT_WORKFLOW = ROOT / ".github/workflows/real-client-browser-flow.yml"
@@ -147,6 +148,7 @@ FAKE_APT_GET = """#!/usr/bin/env python3
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 state_path = Path(os.environ["PACKAGE_STATE_FILE"])
@@ -206,6 +208,9 @@ elif "--download-only" in args and "--reinstall" in args:
         print("cache refresh needs packages and an archive directory", file=sys.stderr)
         sys.exit(1)
     disappeared_package = os.environ.get("DISAPPEARED_APT_PACKAGE")
+    sleep_seconds = os.environ.get("APT_REBUILD_SLEEP_SECONDS")
+    if sleep_seconds is not None:
+        time.sleep(float(sleep_seconds))
     if state["apt_updated"] and disappeared_package in packages:
         record("download-failed")
         print(
@@ -213,8 +218,10 @@ elif "--download-only" in args and "--reinstall" in args:
             file=sys.stderr,
         )
         sys.exit(100)
+    omitted_package = os.environ.get("OMIT_APT_PACKAGE")
     for package in packages:
-        save_package(package, os.environ["NETWORK_PACKAGE_VERSION"])
+        if package != omitted_package:
+            save_package(package, os.environ["NETWORK_PACKAGE_VERSION"])
     record("download")
 elif args[:1] == ["install"]:
     if not state["configured"] or state["data_version"] != state["t64_version"]:
@@ -243,6 +250,21 @@ else:
     sys.exit(64)
 
 state_path.write_text(json.dumps(state), encoding="utf-8")
+"""
+
+FAKE_DPKG_DEB = """#!/usr/bin/env python3
+import sys
+from pathlib import Path
+
+args = sys.argv[1:]
+if len(args) != 3 or args[0] != "--field" or args[2] != "Package":
+    print("unexpected dpkg-deb arguments: " + " ".join(args), file=sys.stderr)
+    sys.exit(64)
+parts = Path(args[1]).name.rsplit("_", 2)
+if len(parts) != 3 or not parts[2].endswith(".deb"):
+    print("invalid Debian archive name: " + Path(args[1]).name, file=sys.stderr)
+    sys.exit(1)
+print(parts[0])
 """
 
 FAKE_PNPM = """#!/usr/bin/env python3
@@ -289,6 +311,7 @@ class PlaywrightAptCacheTests(unittest.TestCase):
         for name, contents in (
             ("sudo", FAKE_SUDO),
             ("dpkg", FAKE_DPKG),
+            ("dpkg-deb", FAKE_DPKG_DEB),
             ("apt-get", FAKE_APT_GET),
             ("pnpm", FAKE_PNPM),
         ):
@@ -426,15 +449,27 @@ class PlaywrightAptCacheTests(unittest.TestCase):
             fallback = subprocess.run(
                 ["bash", str(INSTALL_FALLBACK), str(cache), "apt-packages.txt"],
                 cwd=root,
-                env={**env, "GITHUB_OUTPUT": str(root / "fallback-output")},
+                env=env,
                 capture_output=True,
                 text=True,
                 check=False,
             )
             self.assertEqual(fallback.returncode, 0, fallback.stderr)
             self.assertIn("All system dependencies are installed", fallback.stdout)
+
+            rebuild_output = root / "rebuild-output"
+            rebuild_output.write_text("", encoding="utf-8")
+            rebuild = subprocess.run(
+                ["bash", str(REBUILD_CACHE), str(cache), "apt-packages.txt"],
+                cwd=root,
+                env={**env, "GITHUB_OUTPUT": str(rebuild_output)},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(rebuild.returncode, 0, rebuild.stderr)
             self.assertEqual(
-                (root / "fallback-output").read_text(encoding="utf-8"),
+                rebuild_output.read_text(encoding="utf-8"),
                 "cache_ready=true\n",
             )
 
@@ -565,8 +600,21 @@ class PlaywrightAptCacheTests(unittest.TestCase):
 
             self.assertEqual(fallback.returncode, 0, fallback.stderr)
             self.assertIn("All system dependencies are installed", fallback.stdout)
-            self.assertIn("::warning::APT cache rebuild failed", fallback.stdout)
-            self.assertIn("skipping cache publish", fallback.stdout)
+            self.assertEqual(
+                apt_log.read_text(encoding="utf-8"), "update\nrepair\ninstall\n"
+            )
+
+            rebuild = subprocess.run(
+                ["bash", str(REBUILD_CACHE), str(cache), str(package_list)],
+                cwd=root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(rebuild.returncode, 0, rebuild.stderr)
+            self.assertIn("::warning::APT cache rebuild failed", rebuild.stdout)
+            self.assertIn("skipping cache publish", rebuild.stdout)
             self.assertEqual(
                 output.read_text(encoding="utf-8"), "cache_ready=false\n"
             )
@@ -586,6 +634,161 @@ class PlaywrightAptCacheTests(unittest.TestCase):
                 )
             )
 
+            verification = subprocess.run(
+                ["pnpm", "exec", "playwright", "install-deps", "--dry-run", "chromium"],
+                cwd=root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(
+                verification.returncode,
+                0,
+                verification.stdout + verification.stderr,
+            )
+
+    def test_cache_rebuild_skips_publish_when_apt_omits_a_package(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="playwright-apt-omitted-package-"
+        ) as temporary:
+            root = Path(temporary)
+            cache = root / ".apt-cache"
+            cache.mkdir()
+            output = root / "github-output"
+            output.write_text("", encoding="utf-8")
+            package_list = root / "apt-packages.txt"
+            package_list.write_text(
+                "fonts-freefont-ttf\nlibnss3-tools\n", encoding="utf-8"
+            )
+            env, state_path, apt_log = self._fake_package_environment(
+                root, "1.2.15.3-1ubuntu1.2"
+            )
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "runner_version": "1.2.15.3-1ubuntu1.2",
+                        "data_version": "1.2.15.3-1ubuntu1.2",
+                        "t64_version": "1.2.15.3-1ubuntu1.2",
+                        "configured": True,
+                        "deconfigured": False,
+                        "auto_deconfigured": False,
+                        "playwright_packages": ["fonts-freefont-ttf", "libnss3-tools"],
+                        "required_packages": ["fonts-freefont-ttf", "libnss3-tools"],
+                        "installed_packages": [],
+                        "apt_updated": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            env.update(
+                {
+                    "GITHUB_OUTPUT": str(output),
+                    "OMIT_APT_PACKAGE": "fonts-freefont-ttf",
+                }
+            )
+
+            rebuild = subprocess.run(
+                ["bash", str(REBUILD_CACHE), str(cache), str(package_list)],
+                cwd=root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(rebuild.returncode, 0, rebuild.stderr)
+            self.assertIn("APT cache is missing fonts-freefont-ttf", rebuild.stdout)
+            self.assertEqual(
+                output.read_text(encoding="utf-8"), "cache_ready=false\n"
+            )
+            self.assertEqual(apt_log.read_text(encoding="utf-8"), "download\n")
+            self.assertFalse(list(cache.glob("fonts-freefont-ttf_*.deb")))
+
+    def test_cache_rebuild_timeout_does_not_prevent_playwright_verification(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="playwright-apt-rebuild-timeout-"
+        ) as temporary:
+            root = Path(temporary)
+            cache = root / ".apt-cache"
+            output = root / "github-output"
+            output.write_text("", encoding="utf-8")
+            package_list = root / "apt-packages.txt"
+            package_list.write_text("libnss3-tools\n", encoding="utf-8")
+            env, state_path, _ = self._fake_package_environment(
+                root,
+                "1.2.15.3-1ubuntu1.1",
+                playwright_package_installed=False,
+            )
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "runner_version": "1.2.15.3-1ubuntu1.1",
+                        "data_version": "1.2.15.3-1ubuntu1.1",
+                        "t64_version": "1.2.15.3-1ubuntu1.1",
+                        "configured": True,
+                        "deconfigured": False,
+                        "auto_deconfigured": False,
+                        "playwright_packages": [],
+                        "required_packages": ["libnss3-tools"],
+                        "installed_packages": [],
+                        "apt_updated": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            fallback = subprocess.run(
+                ["bash", str(INSTALL_FALLBACK), str(cache), str(package_list)],
+                cwd=root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(fallback.returncode, 0, fallback.stderr)
+            self.assertIn("All system dependencies are installed", fallback.stdout)
+
+            rebuild_env = {
+                **env,
+                "GITHUB_OUTPUT": str(output),
+                "APT_REBUILD_SLEEP_SECONDS": "5",
+            }
+            timed_out_rebuild = subprocess.run(
+                [
+                    "timeout",
+                    "--signal=TERM",
+                    "--kill-after=1s",
+                    "0.2s",
+                    "bash",
+                    str(REBUILD_CACHE),
+                    str(cache),
+                    str(package_list),
+                ],
+                cwd=root,
+                env=rebuild_env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(timed_out_rebuild.returncode, 124)
+
+            verification = subprocess.run(
+                ["pnpm", "exec", "playwright", "install-deps", "--dry-run", "chromium"],
+                cwd=root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(
+                verification.returncode,
+                0,
+                verification.stdout + verification.stderr,
+            )
+            self.assertIn("All system dependencies are installed", verification.stdout)
+            self.assertEqual(output.read_text(encoding="utf-8"), "")
+
     def test_failed_cache_restore_saves_repaired_packages_under_a_fresh_key(
         self,
     ) -> None:
@@ -594,7 +797,9 @@ class PlaywrightAptCacheTests(unittest.TestCase):
                 WORKFLOW,
                 "Cache the Playwright apt dependencies",
                 "Install the system dependencies from cache",
+                "Rebuild the Playwright apt cache",
                 "Save the Playwright apt dependencies",
+                "Verify the Playwright system dependencies",
                 "playwright-apt-${{ steps.playwright-deps.outputs.image }}-"
                 "${{ hashFiles('apt-packages.txt') }}",
             ),
@@ -602,16 +807,32 @@ class PlaywrightAptCacheTests(unittest.TestCase):
                 REAL_CLIENT_WORKFLOW,
                 "Cache Chromium apt dependencies",
                 "Install Chromium system dependencies from cache",
+                "Rebuild Chromium apt cache",
                 "Save Chromium apt dependencies",
+                "Verify Chromium system dependencies",
                 "playwright-apt-${{ steps.playwright-deps.outputs.image }}-"
                 "${{ hashFiles('web-source/apt-packages.txt') }}",
             ),
         )
-        for path, cache_name, install_name, save_name, key_prefix in workflows:
+        for (
+            path,
+            cache_name,
+            install_name,
+            rebuild_name,
+            save_name,
+            verify_name,
+            key_prefix,
+        ) in workflows:
             with self.subTest(workflow=path.name):
                 workflow = path.read_text(encoding="utf-8")
                 steps = {}
-                for name in (cache_name, install_name, save_name):
+                for name in (
+                    cache_name,
+                    install_name,
+                    rebuild_name,
+                    save_name,
+                    verify_name,
+                ):
                     step = re.search(
                         rf"(?ms)^      - name: {re.escape(name)}\n"
                         r"(?P<body>.*?)(?=^      - name:|\Z)",
@@ -643,7 +864,7 @@ class PlaywrightAptCacheTests(unittest.TestCase):
                     steps[save_name],
                 )
                 self.assertIn(
-                    "steps.apt-network-install.outputs.cache_ready == 'true'",
+                    "steps.apt-cache-rebuild.outputs.cache_ready == 'true'",
                     steps[save_name],
                 )
                 self.assertIn(
@@ -673,6 +894,23 @@ class PlaywrightAptCacheTests(unittest.TestCase):
                 self.assertLess(
                     workflow.index("- name: Discard the rejected apt cache"),
                     workflow.index(f"- name: {network_name}"),
+                )
+                rebuild = steps[rebuild_name]
+                self.assertIn("id: apt-cache-rebuild", rebuild)
+                self.assertIn("continue-on-error: true", rebuild)
+                self.assertIn("timeout-minutes: 5", rebuild)
+                self.assertIn("rebuild-playwright-apt-cache.sh", rebuild)
+                self.assertLess(
+                    workflow.index(f"- name: {network_name}"),
+                    workflow.index(f"- name: {rebuild_name}"),
+                )
+                self.assertLess(
+                    workflow.index(f"- name: {rebuild_name}"),
+                    workflow.index(f"- name: {save_name}"),
+                )
+                self.assertLess(
+                    workflow.index(f"- name: {save_name}"),
+                    workflow.index(f"- name: {verify_name}"),
                 )
 
     def test_e2e_admin_apt_cache_is_image_scoped_and_warm_path_stays_offline(
@@ -786,7 +1024,11 @@ class PlaywrightAptCacheTests(unittest.TestCase):
             fallback_script.rindex(verification_command),
             fallback_script.index("sudo apt-get install -y --no-install-recommends"),
         )
-        self.assertIn("--download-only --reinstall", fallback_script)
+        self.assertNotIn("--download-only --reinstall", fallback_script)
+        rebuild_script = REBUILD_CACHE.read_text(encoding="utf-8")
+        self.assertIn("--download-only --reinstall", rebuild_script)
+        self.assertIn("dpkg-deb --field", rebuild_script)
+        self.assertIn('echo "cache_ready=true"', rebuild_script)
 
     def test_retry_cleanup_keeps_complete_packages_and_clears_partial_downloads(
         self,

@@ -1405,9 +1405,11 @@ jobs:
         run: |
           bash -n .github/scripts/install-playwright-apt-cache.sh
           bash -n .github/scripts/install-playwright-apt-fallback.sh
+          bash -n .github/scripts/rebuild-playwright-apt-cache.sh
           bash -n .github/scripts/discard-playwright-apt-cache.sh
           shellcheck .github/scripts/install-playwright-apt-cache.sh
           shellcheck .github/scripts/install-playwright-apt-fallback.sh
+          shellcheck .github/scripts/rebuild-playwright-apt-cache.sh
           shellcheck .github/scripts/discard-playwright-apt-cache.sh
           bash -n .github/scripts/perf-run.sh .github/scripts/test-perf-workflow-contract.sh .github/scripts/test-ci-main-priority.sh
           shellcheck .github/scripts/test-perf-workflow-contract.sh .github/scripts/test-ci-main-priority.sh
@@ -3420,12 +3422,20 @@ jobs:
           echo "::error::system dependency install failed after 2 attempts"
           exit 1
 
-      # Save only on a miss or after a restored package set failed verification.
+      # Rebuild is separate from the required install timeout and is best effort.
+      # Publish only when every requested package has an archive.
+      - name: Rebuild the Playwright apt cache
+        id: apt-cache-rebuild
+        continue-on-error: true
+        if: ${{ steps.playwright-deps.outputs.mode == 'packages' && (steps.apt-cache.outputs.cache-matched-key == '' || steps.apt-cached-install.outputs.installed == 'false') }}
+        timeout-minutes: 5
+        run: bash .github/scripts/rebuild-playwright-apt-cache.sh .apt-cache apt-packages.txt
+
       # Cache entries are immutable; the run-scoped primary key makes a repaired
       # package set available to later runs without changing the restored entry.
       - name: Save the Playwright apt dependencies
         continue-on-error: true
-        if: ${{ steps.playwright-deps.outputs.mode == 'packages' && (steps.apt-cache.outputs.cache-matched-key == '' || steps.apt-cached-install.outputs.installed == 'false') && steps.apt-network-install.outputs.cache_ready == 'true' }}
+        if: ${{ steps.playwright-deps.outputs.mode == 'packages' && (steps.apt-cache.outputs.cache-matched-key == '' || steps.apt-cached-install.outputs.installed == 'false') && steps.apt-cache-rebuild.outputs.cache_ready == 'true' }}
         uses: actions/cache/save@v6.1.0
         with:
           path: .apt-cache/*.deb

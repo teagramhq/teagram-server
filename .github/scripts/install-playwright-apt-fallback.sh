@@ -3,7 +3,6 @@ set -Eeuo pipefail
 
 apt_cache_dir=${1:?usage: install-playwright-apt-fallback.sh APT_CACHE_DIR PACKAGE_LIST}
 apt_package_list=${2:?usage: install-playwright-apt-fallback.sh APT_CACHE_DIR PACKAGE_LIST}
-github_output=${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}
 script_dir=$(dirname -- "${BASH_SOURCE[0]}")
 
 if [[ ! -s "$apt_package_list" ]]; then
@@ -57,20 +56,3 @@ fi
 # reusable cache, since package names from the pre-update dependency list can
 # disappear from refreshed indexes.
 pnpm exec playwright install-deps --dry-run chromium
-
-# dpkg may have installed some cached packages before another archive failed.
-# The current runner then treats those packages as satisfied, so explicitly
-# download the original dependency set again for the next runner's cache.
-if sudo apt-get install -y --no-install-recommends --download-only --reinstall \
-  -o "Dir::Cache::archives=$apt_archive_dir" \
-  "${original_apt_packages[@]}"; then
-  :
-else
-  status=$?
-  echo "::warning::APT cache rebuild failed (exit $status); skipping cache publish"
-  echo "cache_ready=false" >>"$github_output"
-  exit 0
-fi
-
-sudo chown -R "$(id -u):$(id -g)" "$apt_cache_dir"
-echo "cache_ready=true" >>"$github_output"
