@@ -23,8 +23,8 @@ const (
 	limaMemoryDiagnosticsAddr             = "127.0.0.1:2447"
 	limaCgroupMemoryMaxPath               = "/sys/fs/cgroup/memory.max"
 	limaGoMemoryLimitCgroupThresholdBytes = 64 << 20
-	// Keep the Go target above the measured runtime baseline while leaving cgroup headroom.
-	limaGoMemoryLimitBytes = 28 << 20
+	// Cap the Go target without raising a lower operator-configured limit.
+	limaGoMemoryLimitCeilingBytes = 28 << 20
 )
 
 type limaRuntimeMemorySample struct {
@@ -144,8 +144,8 @@ func applyLimaGoMemoryLimit(log *slog.Logger, memoryMaxPath string) func() {
 
 	previousMemoryLimit := debug.SetMemoryLimit(-1)
 	effectiveMemoryLimit := previousMemoryLimit
-	if effectiveMemoryLimit <= 0 || effectiveMemoryLimit == math.MaxInt64 || effectiveMemoryLimit < limaGoMemoryLimitBytes {
-		effectiveMemoryLimit = limaGoMemoryLimitBytes
+	if effectiveMemoryLimit <= 0 || effectiveMemoryLimit == math.MaxInt64 || effectiveMemoryLimit > limaGoMemoryLimitCeilingBytes {
+		effectiveMemoryLimit = limaGoMemoryLimitCeilingBytes
 	}
 	debug.SetMemoryLimit(effectiveMemoryLimit)
 	log.Info("Lima Go memory cap applied", "path", memoryMaxPath, "cgroup_memory_max_bytes", cgroupMemoryLimit, "go_memory_limit_bytes", effectiveMemoryLimit)

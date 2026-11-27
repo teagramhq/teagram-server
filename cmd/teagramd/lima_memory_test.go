@@ -25,10 +25,11 @@ func TestApplyLimaGoMemoryLimitReadsCgroupMemoryMax(t *testing.T) {
 		wantLogLevel    string
 		wantLogMessage  string
 	}{
-		{name: "Lima cgroup", memoryMax: "48234496", writeMemoryMax: true, previousLimit: 20 << 20, wantMemoryLimit: 28 << 20, wantLogLevel: "level=INFO", wantLogMessage: "Lima Go memory cap applied"},
+		{name: "Lima cgroup", memoryMax: "48234496", writeMemoryMax: true, previousLimit: 20 << 20, wantMemoryLimit: 20 << 20, wantLogLevel: "level=INFO", wantLogMessage: "Lima Go memory cap applied"},
+		{name: "demo operator limit", memoryMax: "48234496", writeMemoryMax: true, previousLimit: 18 << 20, wantMemoryLimit: 18 << 20, wantLogLevel: "level=INFO", wantLogMessage: "Lima Go memory cap applied"},
 		{name: "unset Go memory target", memoryMax: "48234496", writeMemoryMax: true, previousLimit: math.MaxInt64, wantMemoryLimit: 28 << 20, wantLogLevel: "level=INFO", wantLogMessage: "Lima Go memory cap applied"},
-		{name: "threshold cgroup", memoryMax: "67108864", writeMemoryMax: true, previousLimit: 20 << 20, wantMemoryLimit: 28 << 20, wantLogLevel: "level=INFO", wantLogMessage: "Lima Go memory cap applied"},
-		{name: "higher existing limit", memoryMax: "48234496", writeMemoryMax: true, previousLimit: 32 << 20, wantMemoryLimit: 32 << 20, wantLogLevel: "level=INFO", wantLogMessage: "Lima Go memory cap applied"},
+		{name: "threshold cgroup", memoryMax: "67108864", writeMemoryMax: true, previousLimit: 20 << 20, wantMemoryLimit: 20 << 20, wantLogLevel: "level=INFO", wantLogMessage: "Lima Go memory cap applied"},
+		{name: "higher existing limit", memoryMax: "48234496", writeMemoryMax: true, previousLimit: 32 << 20, wantMemoryLimit: 28 << 20, wantLogLevel: "level=INFO", wantLogMessage: "Lima Go memory cap applied"},
 		{name: "production cgroup", memoryMax: "1073741824", writeMemoryMax: true, previousLimit: math.MaxInt64, wantMemoryLimit: math.MaxInt64, wantLogLevel: "level=INFO", wantLogMessage: "Lima Go memory cap not applied"},
 		{name: "unlimited cgroup", memoryMax: "max", writeMemoryMax: true, previousLimit: math.MaxInt64, wantMemoryLimit: math.MaxInt64, wantLogLevel: "level=WARN", wantLogMessage: "parse cgroup memory.max"},
 		{name: "missing cgroup file", previousLimit: 20 << 20, wantMemoryLimit: 20 << 20, wantLogLevel: "level=WARN", wantLogMessage: "read cgroup memory.max"},
@@ -61,7 +62,7 @@ func TestApplyLimaGoMemoryLimitReadsCgroupMemoryMax(t *testing.T) {
 	}
 }
 
-func TestApplyLimaGoMemoryLimitRaisesTargetAboveLowerGOMEMLIMIT(t *testing.T) {
+func TestApplyLimaGoMemoryLimitPreservesTargetBelowCgroupCeiling(t *testing.T) {
 	previousLimit := debug.SetMemoryLimit(10 << 20)
 	t.Cleanup(func() { debug.SetMemoryLimit(previousLimit) })
 
@@ -69,8 +70,8 @@ func TestApplyLimaGoMemoryLimitRaisesTargetAboveLowerGOMEMLIMIT(t *testing.T) {
 	var logOutput bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logOutput, nil))
 	restore := applyLimaGoMemoryLimit(logger, memoryMaxPath)
-	if got := currentLimaTestMemoryLimit(); got != 28<<20 {
-		t.Fatalf("Go memory limit = %d bytes, want target above measured runtime memory %d", got, 28<<20)
+	if got := currentLimaTestMemoryLimit(); got != 10<<20 {
+		t.Fatalf("Go memory limit = %d bytes, want explicit target %d", got, 10<<20)
 	}
 	restore()
 }
