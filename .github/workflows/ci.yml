@@ -1275,7 +1275,8 @@ jobs:
           bash -n deploy/link-edge/test-deploy-main.sh
           bash -n deploy/teagram-demo/test-turnstile-secret-access.sh
           bash -n .github/scripts/perf-postgres.sh .github/scripts/test-perf-postgres.sh
-          bash -n .github/scripts/test-lima-server-memory.sh
+          bash -n .github/scripts/test-lima-server-memory.sh .github/scripts/lima-memory-process-snapshot.sh .github/scripts/test-lima-memory-process-snapshot.sh
+          bash .github/scripts/test-lima-memory-process-snapshot.sh
           shellcheck \
             deploy/k8s/bootstrap-alpha.sh \
             deploy/k8s/alpha-incus.sh \
@@ -1360,6 +1361,8 @@ jobs:
             deploy/link-edge/test-deploy-main.sh \
             deploy/teagram-demo/test-turnstile-secret-access.sh \
             .github/scripts/test-lima-server-memory.sh \
+            .github/scripts/lima-memory-process-snapshot.sh \
+            .github/scripts/test-lima-memory-process-snapshot.sh \
             deploy/teagram/test-media-encryption-ops.sh \
             deploy/teagram/test-media-encryption-pg18.sh \
             .github/scripts/perf-postgres.sh \
@@ -3457,11 +3460,21 @@ jobs:
       - name: Measure the built Lima image with concurrent photo uploads and WebSocket
         env:
           LIMA_SERVICE_IMAGE: teagramd:ci
+          # Set the repository Actions variable to 10 only for opt-in diagnostics.
+          LIMA_MEMORY_PROBE_ATTEMPTS: ${{ vars.LIMA_MEMORY_PROBE_ATTEMPTS }}
         run: |
           probe_failed=0
-          for attempt in 1 2 3; do
-            echo "Lima service memory probe attempt $attempt/3"
-            if ! LIMA_MEMORY_PROBE_ATTEMPT="$attempt" .github/scripts/test-lima-server-memory.sh; then
+          probe_attempts="${LIMA_MEMORY_PROBE_ATTEMPTS:-3}"
+          case "$probe_attempts" in
+            3|10) ;;
+            *)
+              printf 'LIMA_MEMORY_PROBE_ATTEMPTS must be 3 or 10, got %s\n' "$probe_attempts" >&2
+              exit 2
+              ;;
+          esac
+          for attempt in $(seq "$probe_attempts"); do
+            echo "Lima service memory probe attempt $attempt/$probe_attempts"
+            if ! LIMA_MEMORY_PROBE_ATTEMPT="$attempt" LIMA_MEMORY_PROBE_ATTEMPTS="$probe_attempts" .github/scripts/test-lima-server-memory.sh; then
               probe_failed=1
             fi
           done
