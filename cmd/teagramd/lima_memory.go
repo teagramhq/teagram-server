@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -143,7 +144,7 @@ func applyLimaGoMemoryLimit(log *slog.Logger, memoryMaxPath string) func() {
 
 	previousMemoryLimit := debug.SetMemoryLimit(-1)
 	effectiveMemoryLimit := previousMemoryLimit
-	if effectiveMemoryLimit <= 0 || effectiveMemoryLimit < limaGoMemoryLimitBytes {
+	if effectiveMemoryLimit <= 0 || effectiveMemoryLimit == math.MaxInt64 || effectiveMemoryLimit < limaGoMemoryLimitBytes {
 		effectiveMemoryLimit = limaGoMemoryLimitBytes
 	}
 	debug.SetMemoryLimit(effectiveMemoryLimit)
