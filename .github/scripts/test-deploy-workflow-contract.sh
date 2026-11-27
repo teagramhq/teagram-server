@@ -201,12 +201,41 @@ check_ci_contract() {
     ci_fail 'the git-hooks lane must run the commit-message regression fixture'
   [[ "$(ci_query '.jobs."test-git-hooks".steps[] | select(.name == "Test selective pre-push checks") | .run')" == 'python3 -B .github/scripts/test_git_hooks.py' ]] ||
     ci_fail 'the git-hooks lane must run the pre-push regression fixture'
-  grep -Fq 'bash .github/scripts/pull-base-images.sh --image mirror.gcr.io/library/postgres:18-alpine' .github/scripts/run-deploy-workflow-checks.sh ||
-    ci_fail 'the QA password timestamp check must pull PostgreSQL through the canonical retry/fallback helper'
-  grep -Fq "bash .github/scripts/pull-base-images.sh \\" .github/scripts/run-deploy-workflow-checks.sh ||
-    ci_fail 'the media dump check must pull its digest-pinned PostgreSQL image through the canonical helper'
-  grep -Fq 'deploy/teagram/test-qa-password-timestamps.sh' .github/scripts/run-deploy-workflow-checks.sh ||
-    ci_fail 'the QA password timestamp check must stay in the deploy workflow worker pool'
+  if ci_query '.jobs."check-deploy-workflow".steps[] | select((.run // "") | contains("pull-base-images.sh")) | .name' | grep -q .; then
+    ci_fail 'PostgreSQL images must be pulled by their worker fixtures, not as standalone job steps'
+  fi
+  local qa_password_task qa_password_pull_line qa_password_fixture_line
+  local media_dump_task media_dump_pull_line media_dump_image_line media_dump_fixture_image_line media_dump_fixture_line
+  qa_password_task="$(sed -n \
+    "/^    'Check QA password timestamp operation')$/,/^      ;;$/p" \
+    .github/scripts/run-deploy-workflow-checks.sh)"
+  qa_password_pull_line="$(grep -n -E '^[[:space:]]+bash[[:space:]]+\.github/scripts/pull-base-images\.sh[[:space:]]+--image[[:space:]]+mirror\.gcr\.io/library/postgres:18-alpine$' \
+    <<< "$qa_password_task" | cut -d: -f1 || true)"
+  qa_password_fixture_line="$(grep -n -E '^[[:space:]]+deploy/teagram/test-qa-password-timestamps\.sh$' \
+    <<< "$qa_password_task" | cut -d: -f1 || true)"
+  [[ "$qa_password_pull_line" =~ ^[0-9]+$ &&
+     "$qa_password_fixture_line" =~ ^[0-9]+$ &&
+     "$qa_password_pull_line" -lt "$qa_password_fixture_line" ]] ||
+    ci_fail 'the QA password timestamp worker task must pull PostgreSQL before running its fixture'
+  media_dump_task="$(sed -n \
+    "/^    'Check media dump validation against PostgreSQL 18')$/,/^      ;;$/p" \
+    .github/scripts/run-deploy-workflow-checks.sh)"
+  media_dump_pull_line="$(grep -n -E '^[[:space:]]+bash[[:space:]]+[.]github/scripts/pull-base-images[.]sh' \
+    <<< "$media_dump_task" | cut -d: -f1 || true)"
+  media_dump_image_line="$(grep -n -E '^[[:space:]]+--image[[:space:]]+mirror[.]gcr[.]io/library/postgres:18-alpine@sha256:10a5c69a83035ab5239f5620d708520e8b28f5aa1f2b20143e6024532edadfb5$' \
+    <<< "$media_dump_task" | cut -d: -f1 || true)"
+  media_dump_fixture_image_line="$(grep -n -E '^[[:space:]]+PG18_IMAGE=mirror[.]gcr[.]io/library/postgres:18-alpine@sha256:10a5c69a83035ab5239f5620d708520e8b28f5aa1f2b20143e6024532edadfb5' \
+    <<< "$media_dump_task" | cut -d: -f1 || true)"
+  media_dump_fixture_line="$(grep -n -E '^[[:space:]]+bash[[:space:]]+deploy/teagram/test-media-encryption-pg18[.]sh$' \
+    <<< "$media_dump_task" | cut -d: -f1 || true)"
+  [[ "$media_dump_pull_line" =~ ^[0-9]+$ &&
+     "$media_dump_image_line" =~ ^[0-9]+$ &&
+     "$media_dump_fixture_image_line" =~ ^[0-9]+$ &&
+     "$media_dump_fixture_line" =~ ^[0-9]+$ &&
+     "$media_dump_pull_line" -lt "$media_dump_image_line" &&
+     "$media_dump_image_line" -lt "$media_dump_fixture_image_line" &&
+     "$media_dump_fixture_image_line" -lt "$media_dump_fixture_line" ]] ||
+    ci_fail 'the media dump worker task must pull its pinned PostgreSQL image before running its fixture'
   [[ "$(ci_query '.jobs."check-demo-web-pin".permissions.contents')" == 'read' ]] ||
     ci_fail 'the demo web artifact build must use read-only repository access'
   [[ "$(ci_query '.jobs."check-demo-web-pin".permissions | to_entries | map(.key + "=" + .value) | join(",")')" == 'contents=read' ]] ||

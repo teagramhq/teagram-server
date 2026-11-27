@@ -1223,11 +1223,25 @@ release_test_step="$(yq -r '.jobs."test-k8s-deploy".steps[] | select(.name == "V
    "$release_test_step" == *'test "$restored_image" = "$previous_image"'* ]] ||
   fail 'the K3s integration must force a bad deploy and verify automatic revision restoration'
 early_rollback_task='Test early post-apply release rollback'
-if ! grep --fixed-strings --quiet "'$early_rollback_task'" .github/scripts/run-deploy-workflow-checks.sh ||
-  ! grep --fixed-strings --quiet 'python3 -B deploy/k8s/test-deploy-release-early-rollback.py' \
-    .github/scripts/run-deploy-workflow-checks.sh ||
-  [[ ! -f deploy/k8s/test-deploy-release-early-rollback.py ]]; then
-  fail 'the deploy workflow must run the early post-apply template rollback regression'
+[[ -f deploy/k8s/test-deploy-release-early-rollback.py ]] ||
+  fail 'the early post-apply rollback fixture must exist'
+early_rollback_dispatch="$migration_fixture/early-rollback-worker"
+mkdir -p "$early_rollback_dispatch/bin" "$early_rollback_dispatch/pool"
+cat > "$early_rollback_dispatch/bin/python3" <<'PYTHON'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "$DEPLOY_WORKFLOW_PYTHON_CALLS"
+PYTHON
+chmod 0700 "$early_rollback_dispatch/bin/python3"
+if ! DEPLOY_CHECK_POOL_DIR="$early_rollback_dispatch/pool" \
+  DEPLOY_WORKFLOW_PYTHON_CALLS="$early_rollback_dispatch/python-calls" \
+  PATH="$early_rollback_dispatch/bin:$PATH" \
+  bash .github/scripts/run-deploy-workflow-checks.sh --task 8; then
+  fail 'dispatching the early release rollback worker task failed'
 fi
+grep --fixed-strings --quiet -- "Running $early_rollback_task" \
+  "$early_rollback_dispatch/pool/8.log" ||
+  fail 'the worker task index must dispatch the early post-apply release rollback check'
+[[ "$(cat "$early_rollback_dispatch/python-calls")" == '-B deploy/k8s/test-deploy-release-early-rollback.py' ]] ||
+  fail 'dispatching the early rollback worker task must invoke its Python fixture'
 
 printf 'K8s deployment contract passed\n'

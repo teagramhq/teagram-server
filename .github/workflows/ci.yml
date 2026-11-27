@@ -1388,16 +1388,6 @@ jobs:
           shellcheck .github/scripts/discard-playwright-apt-cache.sh
 
 
-      - name: Pull PostgreSQL image for QA password timestamp check
-        run: >-
-          bash .github/scripts/pull-base-images.sh
-          --image mirror.gcr.io/library/postgres:18-alpine
-
-      - name: Pull PostgreSQL 18 image for media dump validation
-        run: >-
-          bash .github/scripts/pull-base-images.sh
-          --image mirror.gcr.io/library/postgres:18-alpine@sha256:10a5c69a83035ab5239f5620d708520e8b28f5aa1f2b20143e6024532edadfb5
-
       - name: Run independent deploy workflow checks in a fixed 5-worker pool
         run: bash .github/scripts/run-deploy-workflow-checks.sh
 
