@@ -4,3 +4,5 @@
 # Synthetic bootstrap test fixtures in 2f8236a5, fake values, removed at 2a422d86 but still in the PR range.
 2f8236a558324e605bfcfa9794ea3e5563877326:deploy/k8s/test-bootstrap-alpha.sh:generic-api-key:30
 2f8236a558324e605bfcfa9794ea3e5563877326:deploy/k8s/test-bootstrap-alpha.sh:generic-api-key:35
+# Atlas migration checksum; the new hash is integrity metadata, not a credential.
+0da603edb279ce2b8e10ec47c862d2db5730292a:migrations/atlas.sum:generic-api-key:193
