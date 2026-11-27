@@ -303,11 +303,10 @@ jobs:
 
       - name: Rebuild Chromium apt cache
         id: apt-cache-rebuild
-        continue-on-error: true
         if: ${{ steps.playwright-deps.outputs.mode == 'packages' && (steps.apt-cache.outputs.cache-matched-key == '' || steps.apt-cached-install.outputs.installed == 'false') }}
-        timeout-minutes: 5
+        timeout-minutes: 6
         working-directory: web-source
-        run: bash ../.github/scripts/rebuild-playwright-apt-cache.sh ../.apt-cache apt-packages.txt
+        run: bash ../.github/scripts/run-playwright-apt-cache-rebuild.sh ../.apt-cache apt-packages.txt
 
       - name: Save Chromium apt dependencies
         continue-on-error: true

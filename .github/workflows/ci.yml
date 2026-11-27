@@ -1406,10 +1406,12 @@ jobs:
           bash -n .github/scripts/install-playwright-apt-cache.sh
           bash -n .github/scripts/install-playwright-apt-fallback.sh
           bash -n .github/scripts/rebuild-playwright-apt-cache.sh
+          bash -n .github/scripts/run-playwright-apt-cache-rebuild.sh
           bash -n .github/scripts/discard-playwright-apt-cache.sh
           shellcheck .github/scripts/install-playwright-apt-cache.sh
           shellcheck .github/scripts/install-playwright-apt-fallback.sh
           shellcheck .github/scripts/rebuild-playwright-apt-cache.sh
+          shellcheck .github/scripts/run-playwright-apt-cache-rebuild.sh
           shellcheck .github/scripts/discard-playwright-apt-cache.sh
           bash -n .github/scripts/perf-run.sh .github/scripts/test-perf-workflow-contract.sh .github/scripts/test-ci-main-priority.sh
           shellcheck .github/scripts/test-perf-workflow-contract.sh .github/scripts/test-ci-main-priority.sh
@@ -3426,10 +3428,9 @@ jobs:
       # Publish only when every requested package has an archive.
       - name: Rebuild the Playwright apt cache
         id: apt-cache-rebuild
-        continue-on-error: true
         if: ${{ steps.playwright-deps.outputs.mode == 'packages' && (steps.apt-cache.outputs.cache-matched-key == '' || steps.apt-cached-install.outputs.installed == 'false') }}
-        timeout-minutes: 5
-        run: bash .github/scripts/rebuild-playwright-apt-cache.sh .apt-cache apt-packages.txt
+        timeout-minutes: 6
+        run: bash .github/scripts/run-playwright-apt-cache-rebuild.sh .apt-cache apt-packages.txt
 
       # Cache entries are immutable; the run-scoped primary key makes a repaired
       # package set available to later runs without changing the restored entry.

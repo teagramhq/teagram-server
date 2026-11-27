@@ -18,6 +18,7 @@ PREPARE_CACHE = ROOT / ".github/scripts/prepare-playwright-apt-cache.sh"
 INSTALL_CACHE = ROOT / ".github/scripts/install-playwright-apt-cache.sh"
 INSTALL_FALLBACK = ROOT / ".github/scripts/install-playwright-apt-fallback.sh"
 REBUILD_CACHE = ROOT / ".github/scripts/rebuild-playwright-apt-cache.sh"
+RUN_REBUILD_CACHE = ROOT / ".github/scripts/run-playwright-apt-cache-rebuild.sh"
 DISCARD_CACHE = ROOT / ".github/scripts/discard-playwright-apt-cache.sh"
 WORKFLOW = ROOT / ".github/workflows/ci.yml"
 REAL_CLIENT_WORKFLOW = ROOT / ".github/workflows/real-client-browser-flow.yml"
@@ -31,7 +32,26 @@ shift
 case "$command" in
   rm|mkdir) exec "/bin/$command" "$@" ;;
   chown) exit 0 ;;
-  dpkg|apt-get) exec "$command" "$@" ;;
+  kill)
+    if [[ -n "${SUDO_COMMAND_LOG:-}" ]]; then
+      printf 'kill %s\n' "$*" >>"$SUDO_COMMAND_LOG"
+    fi
+    exec /bin/kill "$@"
+    ;;
+  */fuser)
+    if [[ -n "${SUDO_COMMAND_LOG:-}" ]]; then
+      printf 'fuser %s\n' "$*" >>"$SUDO_COMMAND_LOG"
+    fi
+    if [[ "${1:-}" == "-V" ]]; then exit 0; fi
+    exit 1
+    ;;
+  dpkg)
+    if [[ -n "${SUDO_COMMAND_LOG:-}" ]]; then
+      printf 'dpkg %s\n' "$*" >>"$SUDO_COMMAND_LOG"
+    fi
+    exec "$command" "$@"
+    ;;
+  apt-get) exec "$command" "$@" ;;
   *) echo "unexpected sudo command: $command" >&2; exit 64 ;;
 esac
 """
@@ -210,6 +230,7 @@ elif "--download-only" in args and "--reinstall" in args:
     disappeared_package = os.environ.get("DISAPPEARED_APT_PACKAGE")
     sleep_seconds = os.environ.get("APT_REBUILD_SLEEP_SECONDS")
     if sleep_seconds is not None:
+        record("download-start")
         time.sleep(float(sleep_seconds))
     if state["apt_updated"] and disappeared_package in packages:
         record("download-failed")
@@ -265,6 +286,29 @@ if len(parts) != 3 or not parts[2].endswith(".deb"):
     print("invalid Debian archive name: " + Path(args[1]).name, file=sys.stderr)
     sys.exit(1)
 print(parts[0])
+"""
+
+FAKE_TIMEOUT = """#!/usr/bin/env python3
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+args = sys.argv[1:]
+while args and args[0].startswith("--"):
+    args.pop(0)
+if not args:
+    sys.exit(64)
+args.pop(0)  # duration
+child = subprocess.Popen(args)
+Path(os.environ["TIMEOUT_CHILD_PID_FILE"]).write_text(str(child.pid))
+log_path = Path(os.environ["APT_COMMAND_LOG"])
+for _ in range(200):
+    if log_path.exists() and "download-start" in log_path.read_text(encoding="utf-8"):
+        break
+    time.sleep(0.01)
+sys.exit(124)
 """
 
 FAKE_PNPM = """#!/usr/bin/env python3
@@ -753,15 +797,24 @@ class PlaywrightAptCacheTests(unittest.TestCase):
                 **env,
                 "GITHUB_OUTPUT": str(output),
                 "APT_REBUILD_SLEEP_SECONDS": "5",
+                "SUDO_COMMAND_LOG": str(root / "sudo-commands.txt"),
+                "TIMEOUT_CHILD_PID_FILE": str(root / "timeout-child.pid"),
             }
+            fake_timeout = root / "bin" / "timeout"
+            fake_timeout.write_text(FAKE_TIMEOUT, encoding="utf-8")
+            fake_timeout.chmod(0o755)
+            fake_fuser = root / "bin" / "fuser"
+            fake_fuser.write_text(
+                "#!/usr/bin/env bash\n"
+                'if [[ "${1:-}" == -V ]]; then exit 0; fi\n'
+                "exit 1\n",
+                encoding="utf-8",
+            )
+            fake_fuser.chmod(0o755)
             timed_out_rebuild = subprocess.run(
                 [
-                    "timeout",
-                    "--signal=TERM",
-                    "--kill-after=1s",
-                    "0.2s",
                     "bash",
-                    str(REBUILD_CACHE),
+                    str(RUN_REBUILD_CACHE),
                     str(cache),
                     str(package_list),
                 ],
@@ -771,7 +824,39 @@ class PlaywrightAptCacheTests(unittest.TestCase):
                 text=True,
                 check=False,
             )
-            self.assertEqual(timed_out_rebuild.returncode, 124)
+            self.assertEqual(
+                timed_out_rebuild.returncode,
+                0,
+                timed_out_rebuild.stdout + timed_out_rebuild.stderr,
+            )
+            self.assertIn("::warning::APT cache rebuild stopped", timed_out_rebuild.stdout)
+            self.assertEqual(output.read_text(encoding="utf-8"), "cache_ready=false\n")
+            sudo_log = (root / "sudo-commands.txt").read_text(encoding="utf-8")
+            self.assertIn("kill -KILL -- -", sudo_log)
+            self.assertIn("fuser /var/lib/dpkg/lock-frontend", sudo_log)
+            self.assertIn("dpkg --configure -a", sudo_log)
+            self.assertLess(
+                sudo_log.index("kill -KILL -- -"),
+                sudo_log.index("fuser /var/lib/dpkg/lock-frontend"),
+            )
+            self.assertLess(
+                sudo_log.index("fuser /var/lib/dpkg/lock-frontend"),
+                sudo_log.index("dpkg --configure -a"),
+            )
+            self.assertIn("download-start", (root / "apt-commands.txt").read_text())
+            self.assertTrue((root / "timeout-child.pid").exists())
+            child_pid = (root / "timeout-child.pid").read_text(encoding="utf-8")
+            try:
+                child_state = (
+                    Path("/proc", child_pid, "stat")
+                    .read_text(encoding="utf-8")
+                    .rsplit(")", 1)[1]
+                    .strip()
+                    .split()[0]
+                )
+            except FileNotFoundError:
+                child_state = None
+            self.assertIn(child_state, (None, "Z"))
 
             verification = subprocess.run(
                 ["pnpm", "exec", "playwright", "install-deps", "--dry-run", "chromium"],
@@ -787,7 +872,7 @@ class PlaywrightAptCacheTests(unittest.TestCase):
                 verification.stdout + verification.stderr,
             )
             self.assertIn("All system dependencies are installed", verification.stdout)
-            self.assertEqual(output.read_text(encoding="utf-8"), "")
+            self.assertEqual(output.read_text(encoding="utf-8"), "cache_ready=false\n")
 
     def test_failed_cache_restore_saves_repaired_packages_under_a_fresh_key(
         self,
@@ -897,9 +982,9 @@ class PlaywrightAptCacheTests(unittest.TestCase):
                 )
                 rebuild = steps[rebuild_name]
                 self.assertIn("id: apt-cache-rebuild", rebuild)
-                self.assertIn("continue-on-error: true", rebuild)
-                self.assertIn("timeout-minutes: 5", rebuild)
-                self.assertIn("rebuild-playwright-apt-cache.sh", rebuild)
+                self.assertNotIn("continue-on-error: true", rebuild)
+                self.assertIn("timeout-minutes: 6", rebuild)
+                self.assertIn("run-playwright-apt-cache-rebuild.sh", rebuild)
                 self.assertLess(
                     workflow.index(f"- name: {network_name}"),
                     workflow.index(f"- name: {rebuild_name}"),
@@ -1029,6 +1114,11 @@ class PlaywrightAptCacheTests(unittest.TestCase):
         self.assertIn("--download-only --reinstall", rebuild_script)
         self.assertIn("dpkg-deb --field", rebuild_script)
         self.assertIn('echo "cache_ready=true"', rebuild_script)
+        rebuild_wrapper = RUN_REBUILD_CACHE.read_text(encoding="utf-8")
+        self.assertIn("setsid timeout --foreground", rebuild_wrapper)
+        self.assertIn("--kill-after=10s 4m", rebuild_wrapper)
+        self.assertIn('sudo kill -KILL -- "-$process_group"', rebuild_wrapper)
+        self.assertIn("/var/lib/dpkg/lock-frontend", rebuild_wrapper)
 
     def test_retry_cleanup_keeps_complete_packages_and_clears_partial_downloads(
         self,
