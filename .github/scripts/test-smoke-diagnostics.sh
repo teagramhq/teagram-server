@@ -48,12 +48,12 @@ require_literal "$script_dir/run-real-server-fixture-gate.sh" \
 require_literal "$script_dir/run-real-server-fixture-gate.sh" \
   'report_smoke_failure_diagnostics "$status" real-server-fixture "$json_file" || true'
 
-ci_main_workflow=$(sed -n '/^  test-go:/,/^  test-real-server-fixtures:/p' \
-  "$source_root/.github/workflows/ci.yml")
+ci_main_workflow=$(sed -n '/^  test-go:/,/^  test-go-e2e:/p' \
+  "$source_root/.github/workflows/ci.yml" | sed '$d')
 ci_main_timeout=$(sed -nE 's/^    timeout-minutes: ([0-9]+)$/\1/p' \
   <<<"$ci_main_workflow")
 if [[ ! "$ci_main_timeout" =~ ^[0-9]+$ ]] || (( ci_main_timeout < 50 )); then
-  printf 'test-go timeout must cover preparation, E2E, and diagnostics (got %s)\n' \
+  printf 'test-go timeout must cover preparation, package tests, and diagnostics (got %s)\n' \
     "${ci_main_timeout:-missing}" >&2
   exit 1
 fi

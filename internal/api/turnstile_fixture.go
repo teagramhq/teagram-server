@@ -23,6 +23,10 @@ func init() {
 		panic("start fixture Siteverify listener: " + err.Error())
 	}
 	var used atomic.Bool
+	fixtureHostname := os.Getenv("TG_FIXTURE_TURNSTILE_HOSTNAME")
+	if fixtureHostname == "" {
+		fixtureHostname = "demo.teagram.io"
+	}
 	server := &http.Server{
 		ReadHeaderTimeout: time.Second,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -39,7 +43,7 @@ func init() {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"success":  true,
 				"action":   "signup",
-				"hostname": "demo.teagram.io",
+				"hostname": fixtureHostname,
 			})
 		}),
 	}

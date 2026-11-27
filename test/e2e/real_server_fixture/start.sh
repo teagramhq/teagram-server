@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 exec 3>&1
 exec 1>&2
-if (($# != 11)); then
+if (($# != 12)); then
 	printf 'fixture runner requires revisions, a run ID, and fixture mode options\n' >&2
 	exit 2
 fi
@@ -18,6 +18,7 @@ PAIR_KEY_OUTPUT=$8
 AUTH_PROGRESS_PREBASELINE_CONTROLS=$9
 GUEST_SIGNUP=${10}
 GUEST_SIGNUP_GATE_OFF=${11}
+GUEST_SIGNUP_TAILNET=${12}
 AUTH_PROGRESS_RUNNER_REVISION=097794ab18ef853ca09c3491b9df4e9a702d0ca6
 AUTH_PROGRESS_ARTIFACT_SOURCE_REVISION=569529c1f36923c098760ef727808254dcb6a662
 AUTH_PROGRESS_RELATIVE_PATH=auth-progress.json
@@ -45,6 +46,11 @@ fi
 if [[ $GUEST_SIGNUP_GATE_OFF != 0 && $GUEST_SIGNUP_GATE_OFF != 1 ||
 	$GUEST_SIGNUP_GATE_OFF == 1 && $GUEST_SIGNUP != 1 ]]; then
 	printf 'fixture guest signup gate-off mode is invalid or missing guest signup mode\n' >&2
+	exit 2
+fi
+if [[ $GUEST_SIGNUP_TAILNET != 0 && $GUEST_SIGNUP_TAILNET != 1 ||
+	$GUEST_SIGNUP_TAILNET == 1 && ( $GUEST_SIGNUP != 1 || $GUEST_SIGNUP_GATE_OFF == 1 ) ]]; then
+	printf 'fixture tailnet mode requires sign-in-gated guest signup mode\n' >&2
 	exit 2
 fi
 GUEST_SIGNUP_QA_BYPASS=0
@@ -107,8 +113,19 @@ IMAGE="$PREFIX-$OWNER_TOKEN:local"
 readonly PLAYWRIGHT_IMAGE_ARM64="mcr.microsoft.com/playwright:v1.61.1-noble@sha256:824f1a789072e648c62541c2cfa4479c4061a290d5c27766d67dc1dcbc19b321"
 readonly PLAYWRIGHT_IMAGE_AMD64="mcr.microsoft.com/playwright:v1.61.1-noble@sha256:cf0daee9b994042e011bc29f20cdff1a9f682a039b43fcd738f7d8a9d3bcd9d6"
 DSN="postgres://postgres@database:5432/teagram?sslmode=disable"
+TAILNET_HOSTNAME=teagram-dev.tailaa4918.ts.net
+GUEST_SIGNUP_HOSTNAME=teagramd.test
+GUEST_SIGNUP_SITEVERIFY_HOSTNAME=demo.teagram.io
 ENDPOINT="wss://teagramd.test/apiws"
 ORIGIN="https://teagramd.test"
+WEBSOCKET_ALLOWED_ORIGINS=https://teagramd.test
+if [[ $GUEST_SIGNUP_TAILNET == 1 ]]; then
+	GUEST_SIGNUP_HOSTNAME=$TAILNET_HOSTNAME
+	GUEST_SIGNUP_SITEVERIFY_HOSTNAME=$TAILNET_HOSTNAME
+	ENDPOINT="wss://$TAILNET_HOSTNAME/apiws"
+	ORIGIN="https://$TAILNET_HOSTNAME"
+	WEBSOCKET_ALLOWED_ORIGINS+=",$ORIGIN"
+fi
 
 docker_context=${DOCKER_CONTEXT:-}
 docker_endpoint=${DOCKER_HOST:-}
@@ -569,7 +586,7 @@ SERVER_ADVERTISE_ENV=(--env TG_ADVERTISE_ADDR=teagramd:2443)
 SERVER_PUBLIC_LINK_ENV=(--env TG_PUBLIC_LINK_PREFIX=https://teagramd.test/)
 TURNSTILE_SIGNIN_ENABLED=false
 if [[ $GUEST_SIGNUP == 1 ]]; then
-	SERVER_ADVERTISE_ENV=(--env TG_ADVERTISE_ADDR=teagramd.test:2444)
+	SERVER_ADVERTISE_ENV=(--env "TG_ADVERTISE_ADDR=$GUEST_SIGNUP_HOSTNAME:2444")
 	if [[ $GUEST_SIGNUP_GATE_OFF == 0 ]]; then TURNSTILE_SIGNIN_ENABLED=true; fi
 	SERVER_AUTH_ENV=(
 		--env TG_REGISTRATION=open
@@ -577,7 +594,8 @@ if [[ $GUEST_SIGNUP == 1 ]]; then
 		--env TG_ADVERTISE_DEMO_GUEST_SIGN_UP=true
 		--env TG_TURNSTILE_SITE_KEY=fixture-turnstile-site-key
 		--env TG_TURNSTILE_SECRET_KEY=fixture-turnstile-secret
-		--env TG_TURNSTILE_HOSTNAMES=demo.teagram.io
+		--env "TG_TURNSTILE_HOSTNAMES=$GUEST_SIGNUP_SITEVERIFY_HOSTNAME"
+		--env "TG_FIXTURE_TURNSTILE_HOSTNAME=$GUEST_SIGNUP_SITEVERIFY_HOSTNAME"
 		--env "TG_TURNSTILE_SIGNIN_ENABLED=$TURNSTILE_SIGNIN_ENABLED"
 		--env TG_FIXTURE_TURNSTILE_SITEVERIFY=1
 	)
@@ -599,7 +617,7 @@ docker run --detach --name "$BACKEND" --label "$OWNER_LABEL=$OWNER_TOKEN" --labe
 	--env "TG_POSTGRES_DSN=$DSN" --env TG_AUTHKEY_ENC_KEY_FILE=/run/secrets/authkey.hex \
 	--env TG_RSA_KEY_PATH=/run/secrets/server-key.pem "${SERVER_ADVERTISE_ENV[@]}" "${SERVER_PUBLIC_LINK_ENV[@]}" \
 	--env TG_LISTEN_ADDR=:2443 \
-	--env TG_WEBSOCKET_LISTEN_ADDR=:2444 --env TG_WEBSOCKET_ALLOWED_ORIGINS=https://teagramd.test \
+	--env TG_WEBSOCKET_LISTEN_ADDR=:2444 --env "TG_WEBSOCKET_ALLOWED_ORIGINS=$WEBSOCKET_ALLOWED_ORIGINS" \
 	"${SERVER_AUTH_ENV[@]}" \
 	--env TG_BLOB_DIR=/var/lib/teagramd-blobs \
 	--entrypoint /bin/sh mirror.gcr.io/library/postgres:18-alpine -c 'exec sleep 86400' >/dev/null
@@ -714,21 +732,26 @@ docker exec -i "$CLIENT" /bin/sh -c 'umask 077; cat > /run/secrets/b-password' <
 docker exec "$CLIENT" chown 1001:1001 /run/app/fixture-auth-check /run/secrets/server.pub.pem /run/secrets/a-password /run/secrets/b-password
 docker exec "$CLIENT" chmod 0755 /run/app/fixture-auth-check
 docker exec "$CLIENT" chmod 0400 /run/secrets/server.pub.pem /run/secrets/a-password /run/secrets/b-password
+FRONT_BROWSER_NETWORK_ARGS=(--network-alias tls-front)
+if [[ $GUEST_SIGNUP_TAILNET == 1 ]]; then FRONT_BROWSER_NETWORK_ARGS+=(--network-alias "$TAILNET_HOSTNAME"); fi
 docker create --name "$FRONT" --label "$OWNER_LABEL=$OWNER_TOKEN" --label "$RUN_LABEL=$RUN_ID" \
-	--network "$BROWSER_NET" --network-alias tls-front --log-driver none \
+	--network "$BROWSER_NET" "${FRONT_BROWSER_NETWORK_ARGS[@]}" --log-driver none \
 	--read-only --user 1001:1001 --cap-drop ALL --security-opt no-new-privileges:true \
 	--sysctl net.ipv4.ip_unprivileged_port_start=0 \
 	--memory 128m --memory-swap 128m --cpus 0.5 --pids-limit 64 --ulimit core=0 \
 	--tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,uid=1001,gid=1001 \
 	--tmpfs /run:rw,noexec,nosuid,nodev,size=4m,uid=1001,gid=1001 \
 	--tmpfs /srv/artifact:rw,noexec,nosuid,nodev,size=256m,uid=1001,gid=1001,mode=0700 \
+	--env "FIXTURE_GUEST_SIGNUP_TAILNET=$GUEST_SIGNUP_TAILNET" \
 	--health-cmd='node -e "require(\"https\").get(\"https://127.0.0.1/healthz\",{rejectUnauthorized:false,headers:{host:\"teagramd.test\"}},r=>process.exit(r.statusCode===200?0:1)).on(\"error\",()=>process.exit(1))"' \
 	--health-interval 1s --health-timeout 2s --health-retries 30 \
 	--entrypoint node "$IMAGE" -e 'setInterval(() => {}, 1 << 30)' >/dev/null
 docker network connect --alias teagramd-proxy --alias teagramd.test "$SERVER_NET" "$FRONT"
 docker start "$FRONT" >/dev/null
+TLS_SAN=DNS:teagramd.test
+if [[ $GUEST_SIGNUP_TAILNET == 1 ]]; then TLS_SAN+=",DNS:$TAILNET_HOSTNAME"; fi
 openssl req -x509 -newkey rsa:2048 -nodes -keyout "$SECRET_DIR/tls.key" -out "$SECRET_DIR/tls.crt" -days 1 \
-	-subj /CN=teagramd.test -addext subjectAltName=DNS:teagramd.test \
+	-subj /CN=teagramd.test -addext "subjectAltName=$TLS_SAN" \
 	-addext basicConstraints=critical,CA:FALSE -addext keyUsage=critical,digitalSignature,keyEncipherment \
 	-addext extendedKeyUsage=serverAuth >/dev/null 2>&1
 chmod 0400 "$SECRET_DIR/tls.key" "$SECRET_DIR/tls.crt"
@@ -781,11 +804,12 @@ if [[ $GUEST_SIGNUP == 1 ]]; then
 	EXPECTED_SERVER_ENV=(
 		TG_REGISTRATION=open
 		TG_LOG_LOGIN_CODES=false
-		TG_WEBSOCKET_ALLOWED_ORIGINS=https://teagramd.test
+		"TG_WEBSOCKET_ALLOWED_ORIGINS=$WEBSOCKET_ALLOWED_ORIGINS"
 		TG_ADVERTISE_DEMO_GUEST_SIGN_UP=true
 		TG_TURNSTILE_SITE_KEY=fixture-turnstile-site-key
 		TG_TURNSTILE_SECRET_KEY=fixture-turnstile-secret
-		TG_TURNSTILE_HOSTNAMES=demo.teagram.io
+		"TG_TURNSTILE_HOSTNAMES=$GUEST_SIGNUP_SITEVERIFY_HOSTNAME"
+		"TG_FIXTURE_TURNSTILE_HOSTNAME=$GUEST_SIGNUP_SITEVERIFY_HOSTNAME"
 		"TG_TURNSTILE_SIGNIN_ENABLED=$TURNSTILE_SIGNIN_ENABLED"
 		TG_FIXTURE_TURNSTILE_SITEVERIFY=1
 		TG_PUBLIC_LINK_PREFIX=https://demo.teagram.io/

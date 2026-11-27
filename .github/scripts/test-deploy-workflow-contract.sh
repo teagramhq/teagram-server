@@ -88,7 +88,7 @@ check_ci_contract() {
     ci_fail 'only pull request updates may cancel in-progress CI runs'
   [[ "$(ci_query '.jobs."publish-demo-image".if')" == "\${{ always() && success() && needs.check-demo-web-pin.outputs.result == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}" ]] ||
     ci_fail 'the demo image may publish only from main pushes'
-  [[ "$(ci_query '.jobs."publish-demo-image".needs | sort | join(",")')" == 'build-browser-acceptance-image,build-server-image,check-demo-web-pin,check-deploy-workflow,check-sqlc-drift,check-sticker-license,ci,lint-css,lint-go,lint-sql,test-browser-acceptance,test-compose,test-e2e-admin,test-git-hooks,test-go,test-migrations,test-photo-worker,test-real-server-fixtures,test-smoke,test-websocket-d1,test-websocket-permanent-exchange' ]] ||
+  [[ "$(ci_query '.jobs."publish-demo-image".needs | sort | join(",")')" == 'build-browser-acceptance-image,build-server-image,check-demo-web-pin,check-deploy-workflow,check-sqlc-drift,check-sticker-license,ci,lint-css,lint-go,lint-sql,test-browser-acceptance,test-compose,test-e2e-admin,test-git-hooks,test-go,test-go-e2e,test-go-fleet-cap,test-migrations,test-photo-worker,test-real-server-fixtures,test-smoke,test-websocket-d1,test-websocket-permanent-exchange' ]] ||
     ci_fail 'the demo image publish must wait for every CI lane'
   for removed_job in restore-readiness rustfs-transition-qualification mirror-rustfs-qualification-images; do
     [[ "$(ci_query ".jobs | has(\"$removed_job\")")" == 'false' ]] ||
@@ -618,7 +618,7 @@ check_deploy_target_validator() (
     DEV_DEPLOY_USER=deploy DEMO_DEPLOY_SSH_KEY=fixture-key TS_OAUTH_CLIENT_ID=fixture-id \
     TS_OAUTH_SECRET=fixture-secret GITHUB_OUTPUT="$tmp/output" \
     bash -euo pipefail "$tmp/dev-target.sh" 2>&1)
-  [[ -z "$output" && "$(cat "$tmp/output")" == 'enabled=true' ]] ||
+  [[ -z "$output" && "$(cat "$tmp/output")" == $'tailnet_enabled=false\nenabled=true' ]] ||
     fail 'a complete dev target must pass validation and enable the deploy steps'
 
   : > "$tmp/output"
@@ -1331,15 +1331,107 @@ check_contract() {
   [[ "$(demo_query '.jobs.deploy-dev.steps[] | select(.id == "target") | .env.DEV_DEPLOY_HOST')" == '${{ vars.DEV_DEPLOY_HOST }}' &&
     "$(demo_query '.jobs.deploy-dev.steps[] | select(.id == "target") | .env.DEV_DEPLOY_PORT')" == '${{ vars.DEV_DEPLOY_PORT }}' &&
     "$(demo_query '.jobs.deploy-dev.steps[] | select(.id == "target") | .env.DEV_DEPLOY_KNOWN_HOSTS')" == '${{ vars.DEV_DEPLOY_KNOWN_HOSTS }}' &&
-    "$(demo_query '.jobs.deploy-dev.steps[] | select(.id == "target") | .env.DEV_DEPLOY_USER')" == '${{ vars.DEV_DEPLOY_USER }}' ]] ||
-    fail 'the dev job must read all four dev target variables from the demo environment'
+    "$(demo_query '.jobs.deploy-dev.steps[] | select(.id == "target") | .env.DEV_DEPLOY_USER')" == '${{ vars.DEV_DEPLOY_USER }}' &&
+    "$(demo_query '.jobs.deploy-dev.steps[] | select(.id == "target") | .env.TEAGRAM_DEV_TAILNET_ENABLED')" == '${{ vars.TEAGRAM_DEV_TAILNET_ENABLED }}' &&
+    "$(demo_query '.jobs.deploy-dev.steps[] | select(.id == "target") | .run')" == *'tailnet_enabled=$tailnet_enabled'* ]] ||
+    fail 'the dev job must validate the tailnet opt-in alongside its target variables'
   [[ "$(demo_query '.jobs.deploy-dev.steps[] | select(.name == "Deploy the tested server commit to dev") | .env.DEPLOY_SHA')" == '${{ needs.check-demo-deploy-target.outputs.sha }}' &&
     "$(demo_query '.jobs.deploy-dev.steps[] | select(.name == "Deploy the tested server commit to dev") | .env.DEPLOY_IMAGE_DIGEST')" == '${{ needs.check-demo-deploy-target.outputs.digest }}' &&
+    "$(demo_query '.jobs.deploy-dev.steps[] | select(.name == "Deploy the tested server commit to dev") | .env.TEAGRAM_DEV_TAILNET_ENABLED')" == '${{ steps.target.outputs.tailnet_enabled }}' &&
     "$(demo_query '.jobs.deploy-dev.steps[] | select(.name == "Deploy the tested server commit to dev") | .env.DEV_DEPLOY_USER')" == '${{ vars.DEV_DEPLOY_USER }}' ]] ||
     fail 'the dev job must deploy the same tested commit and image digest as demo'
   demo_dev_run="$(demo_query '.jobs.deploy-dev.steps[] | select(.name == "Deploy the tested server commit to dev") | .run')"
-  grep -Fq '"$DEV_DEPLOY_USER@$DEV_DEPLOY_HOST" "$DEPLOY_SHA $DEPLOY_IMAGE_DIGEST"' <<< "$demo_dev_run" ||
-    fail 'the dev job must send the shared SHA and digest using its configured user and host'
+  if ! grep -Fq '"$DEV_DEPLOY_USER@$DEV_DEPLOY_HOST" "$remote_command" </dev/null' <<< "$demo_dev_run" ||
+    ! grep -Fq 'if [[ "$TEAGRAM_DEV_TAILNET_ENABLED" == true ]]; then' <<< "$demo_dev_run" ||
+    ! grep -Fq 'dev_ssh "$DEPLOY_SHA $DEPLOY_IMAGE_DIGEST true"' <<< "$demo_dev_run" ||
+    ! grep -Fq 'grep -Fxq "$legacy_rejection" "$ssh_stderr"' <<< "$demo_dev_run"; then
+    fail 'the dev job must try the tailnet opt-in first and bootstrap only after the old wrapper rejects it'
+  fi
+  (
+    transition_tmp=$(mktemp -d)
+    trap 'rm -rf -- "$transition_tmp"' EXIT
+    mkdir -p "$transition_tmp/bin" "$transition_tmp/ssh-dev"
+    cat > "$transition_tmp/bin/ssh" <<'SSH'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+remote_command="${!#}"
+read -r -a remote_args <<< "$remote_command"
+call_number=0
+if [[ -f "$DEV_TEST_SSH_CALLS" ]]; then
+  mapfile -t previous_calls < "$DEV_TEST_SSH_CALLS"
+  call_number=${#previous_calls[@]}
+fi
+call_number=$((call_number + 1))
+printf '%s\n' "$remote_command" >> "$DEV_TEST_SSH_CALLS"
+[[ "${remote_args[0]:-}" == "$DEPLOY_SHA" && "${remote_args[1]:-}" == "$DEPLOY_IMAGE_DIGEST" ]] || {
+  printf 'dev deploy sent invalid release coordinates: %s\n' "$remote_command" >&2
+  exit 1
+}
+if [[ "$DEV_TEST_WRAPPER_MODE" == legacy && "$call_number" == 1 && "${#remote_args[@]}" == 3 ]]; then
+  printf '%s\n' 'demo deploy key accepts server/web releases or a reviewed qa-invite operation' >&2
+  exit 255
+fi
+case "$TEAGRAM_DEV_TAILNET_ENABLED:${DEV_TEST_WRAPPER_MODE}:${#remote_args[@]}:${remote_args[2]:-}" in
+  false:*:2:)
+    ;;
+  true:modern:3:true|true:legacy:2:|true:legacy:3:true)
+    ;;
+  true:unrelated:3:true)
+    printf 'Connection reset by peer\n' >&2
+    exit 255
+    ;;
+  *)
+    printf 'dev deploy sent an unexpected command for %s mode: %s\n' "$DEV_TEST_WRAPPER_MODE" "$remote_command" >&2
+    exit 1
+    ;;
+esac
+SSH
+    chmod 0755 "$transition_tmp/bin/ssh"
+    printf '%s\n' "$demo_dev_run" > "$transition_tmp/deploy.sh"
+    local tailnet_enabled wrapper_mode expected_calls
+    for wrapper_mode in modern legacy unrelated; do
+      for tailnet_enabled in false true; do
+        : > "$transition_tmp/ssh-calls"
+        # shellcheck disable=SC2031 # PATH is deliberately limited to the generated workflow process.
+        if RUNNER_TEMP="$transition_tmp" \
+          DEPLOY_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+          DEPLOY_IMAGE_DIGEST=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+          TEAGRAM_DEV_TAILNET_ENABLED="$tailnet_enabled" \
+          DEV_DEPLOY_HOST=dev.example.test DEV_DEPLOY_PORT=2222 DEV_DEPLOY_USER=deploy \
+          DEV_TEST_WRAPPER_MODE="$wrapper_mode" DEV_TEST_SSH_CALLS="$transition_tmp/ssh-calls" \
+          PATH="$transition_tmp/bin:$PATH" bash "$transition_tmp/deploy.sh"; then
+          deploy_status=0
+        else
+          deploy_status=$?
+        fi
+        mapfile -t transition_calls < "$transition_tmp/ssh-calls"
+        expected_calls=1
+        if [[ "$tailnet_enabled" == true && "$wrapper_mode" == legacy ]]; then
+          expected_calls=3
+        fi
+        if [[ "$tailnet_enabled" == true && "$wrapper_mode" == unrelated ]]; then
+          [[ "$deploy_status" != 0 && "${#transition_calls[@]}" == 1 &&
+            "${transition_calls[0]}" == 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb true' ]] ||
+            fail 'the dev workflow must stop on an unrelated opt-in SSH failure without bootstrapping'
+          continue
+        fi
+        [[ "$deploy_status" == 0 && "${#transition_calls[@]}" == "$expected_calls" ]] ||
+          fail 'the dev workflow must complete the expected wrapper transition'
+        if [[ "$tailnet_enabled" == true ]]; then
+          [[ "${transition_calls[0]}" == 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb true' ]] ||
+            fail 'the dev workflow must attempt tailnet opt-in before any bootstrap deploy'
+          if [[ "$wrapper_mode" == legacy ]]; then
+            [[ "${transition_calls[1]}" == 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' &&
+              "${transition_calls[2]}" == 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb true' ]] ||
+              fail 'the dev workflow must bootstrap and retry opt-in after an old-wrapper rejection'
+          fi
+        else
+          [[ "${transition_calls[0]}" == 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' ]] ||
+            fail 'the dev workflow must preserve the two-argument command when tailnet is disabled'
+        fi
+      done
+    done
+  )
   [[ "$(demo_query '.jobs.deploy-dev.steps[] | select(.name == "Join the tailnet") | .if')" == '${{ steps.target.outputs.enabled == '\''true'\'' }}' &&
     "$(demo_query '.jobs.deploy-dev.steps[] | select(.name == "Join the tailnet") | .with.ping')" == '${{ vars.DEV_DEPLOY_HOST }}' ]] ||
     fail 'the dev job must connect only after target validation and ping its configured host'
