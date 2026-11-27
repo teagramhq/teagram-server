@@ -109,10 +109,21 @@ func (p scalePlan) rowsReadFrom(table string) float64 {
 	return rows
 }
 
+func (p scalePlan) indexRowsReadFrom(table string) float64 {
+	var rows float64
+	if strings.Contains(p.Node, "Index Scan") && strings.HasPrefix(p.IndexName, table+"_") {
+		rows += (p.Rows + p.RemovedByFilter + p.RemovedByJoinFilter + p.RemovedByIndexRecheck) * p.Loops
+	}
+	for _, child := range p.Plans {
+		rows += child.indexRowsReadFrom(table)
+	}
+	return rows
+}
+
 func (p scalePlan) rowsRead(table string) float64 {
-	// Bitmap Index Scan candidates may overlap under BitmapAnd, so only relation
-	// scans count distinct table rows.
-	return p.rowsReadFrom(table)
+	// Bound scan work conservatively: bitmap index candidates count even when
+	// BitmapAnd later removes overlapping entries before the heap scan.
+	return p.rowsReadFrom(table) + p.indexRowsReadFrom(table)
 }
 
 func (p scalePlan) accessSummary() []string {
@@ -127,8 +138,8 @@ func (p scalePlan) accessSummary() []string {
 	return accesses
 }
 
-func TestScalePlanCountsRowsFilteredAfterBitmapScan(t *testing.T) {
-	const explain = `[{"Plan":{"Node Type":"Bitmap Heap Scan","Relation Name":"channel_messages","Actual Rows":500,"Actual Loops":1,"Rows Removed by Filter":19500,"Plans":[{"Node Type":"Bitmap Index Scan","Index Name":"channel_messages_pkey","Actual Rows":20000,"Actual Loops":1}]}}]`
+func TestScalePlanCountsBitmapIndexCandidates(t *testing.T) {
+	const explain = `[{"Plan":{"Node Type":"Bitmap Heap Scan","Relation Name":"channel_messages","Actual Rows":500,"Actual Loops":1,"Plans":[{"Node Type":"Bitmap Index Scan","Index Name":"channel_messages_pkey","Actual Rows":20000,"Actual Loops":1}]}}]`
 	var plans []struct {
 		Plan scalePlan `json:"Plan"`
 	}
@@ -144,7 +155,7 @@ func TestScalePlanCountsRowsFilteredAfterBitmapScan(t *testing.T) {
 	}
 }
 
-func TestScalePlanCountsBitmapAndHeapRowsOnce(t *testing.T) {
+func TestScalePlanCountsBitmapAndIndexCandidates(t *testing.T) {
 	plan := scalePlan{
 		Node:     "Bitmap Heap Scan",
 		Relation: "channel_messages",
@@ -158,8 +169,8 @@ func TestScalePlanCountsBitmapAndHeapRowsOnce(t *testing.T) {
 			},
 		}},
 	}
-	if rows := plan.rowsRead("channel_messages"); rows > 800 {
-		t.Fatalf("bitmap-and plan read %.0f channel_messages rows, want at most 800", rows)
+	if rows := plan.rowsRead("channel_messages"); rows != 40_198 {
+		t.Fatalf("bitmap-and plan read %.0f channel_messages rows, want 40198 index candidates and heap rows", rows)
 	}
 }
 
@@ -329,9 +340,8 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 	if !ok {
 		t.Fatalf("historical emoji query is missing its sqlc header: %s", queries[0].SQL)
 	}
-	// Plan the production array, including both hot IDs: 1000200 occurs in the
-	// hidden channel and 1000201 in another owner's messages. Table-wide
-	// expression statistics can skew both GIN estimates for this array.
+	// Plan the production array, including the hidden-channel and other-owner
+	// IDs. The statistics above reflect the final scaled fixture distribution.
 	planFileIDs, ok := queries[0].Args[0].([]string)
 	if !ok {
 		t.Fatalf("historical emoji query ID argument has type %T, want []string", queries[0].Args[0])
