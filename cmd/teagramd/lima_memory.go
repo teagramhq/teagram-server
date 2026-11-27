@@ -21,7 +21,7 @@ const (
 	limaMemoryDiagnosticsAddr             = "127.0.0.1:2447"
 	limaCgroupMemoryMaxPath               = "/sys/fs/cgroup/memory.max"
 	limaGoMemoryLimitCgroupThresholdBytes = 64 << 20
-	// Leave 4 MiB below the 46 MiB cgroup limit for non-Go and charged heap pages.
+	// Keep the Go memory target 32 MiB below the 46 MiB cgroup limit for non-Go and charged heap pages.
 	limaGoMemoryLimitBytes = 14 << 20
 )
 
