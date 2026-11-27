@@ -577,6 +577,7 @@ class RealServerFixtureGateTests(unittest.TestCase):
         environment.update(
             {
                 "GITHUB_EVENT_NAME": "pull_request",
+                "GITHUB_REF": "refs/pull/1180/merge",
                 "GITHUB_REPOSITORY": "teagramhq/teagram-server",
                 "PULL_REQUEST_HEAD_REPO": "teagramhq/teagram-server",
             }
@@ -589,6 +590,38 @@ class RealServerFixtureGateTests(unittest.TestCase):
             text=True,
         )
         self.assertEqual(success.returncode, 0, success.stdout + success.stderr)
+
+        main_environment = environment.copy()
+        main_environment.update(
+            {
+                "GITHUB_EVENT_NAME": "push",
+                "GITHUB_REF": "refs/heads/main",
+                result_envs["ops-go-build-cache"]: "success",
+            }
+        )
+        main_success = subprocess.run(
+            ["bash", "-e", "-c", shell_script],
+            capture_output=True,
+            check=False,
+            env=main_environment,
+            text=True,
+        )
+        self.assertEqual(main_success.returncode, 0, main_success.stdout + main_success.stderr)
+
+        main_without_cache = main_environment.copy()
+        main_without_cache[result_envs["ops-go-build-cache"]] = "skipped"
+        main_cache_failure = subprocess.run(
+            ["bash", "-e", "-c", shell_script],
+            capture_output=True,
+            check=False,
+            env=main_without_cache,
+            text=True,
+        )
+        self.assertNotEqual(
+            main_cache_failure.returncode,
+            0,
+            "main aggregate returned success when a complete Go cache snapshot was not saved",
+        )
 
         workflow_triggers = re.search(r"(?ms)^on:\n(?P<body>.*?)^permissions:", workflow)
         self.assertIsNotNone(workflow_triggers, "CI workflow has no event triggers")
