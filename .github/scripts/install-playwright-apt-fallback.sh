@@ -40,4 +40,8 @@ if [[ -s apt-install-packages.txt ]]; then
     -o "Dir::Cache::archives=$apt_archive_dir" \
     "${apt_packages[@]}"
 fi
+
+# Cache saving follows this helper, so verify the repaired package set here
+# before allowing the workflow to publish it.
+pnpm exec playwright install-deps --dry-run chromium
 sudo chown -R "$(id -u):$(id -g)" "$apt_cache_dir"

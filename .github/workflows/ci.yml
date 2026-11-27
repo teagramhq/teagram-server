@@ -1378,8 +1378,10 @@ jobs:
         run: |
           bash -n .github/scripts/install-playwright-apt-cache.sh
           bash -n .github/scripts/install-playwright-apt-fallback.sh
+          bash -n .github/scripts/discard-playwright-apt-cache.sh
           shellcheck .github/scripts/install-playwright-apt-cache.sh
           shellcheck .github/scripts/install-playwright-apt-fallback.sh
+          shellcheck .github/scripts/discard-playwright-apt-cache.sh
           bash -n .github/scripts/perf-run.sh .github/scripts/test-perf-workflow-contract.sh .github/scripts/test-ci-main-priority.sh
           shellcheck .github/scripts/test-perf-workflow-contract.sh .github/scripts/test-ci-main-priority.sh
           bash -n .github/scripts/publish-k8s-image-digests.sh .github/scripts/test-k8s-image-digests.sh
@@ -3310,6 +3312,10 @@ jobs:
         id: apt-cached-install
         if: steps.apt-cache.outputs.cache-matched-key != ''
         run: bash .github/scripts/install-playwright-apt-cache.sh .apt-cache
+
+      - name: Discard the rejected apt cache
+        if: steps.apt-cached-install.outputs.installed == 'false'
+        run: bash .github/scripts/discard-playwright-apt-cache.sh .apt-cache
 
       # The cold path, and the only step here that needs the network. Download
       # and install are separate so the debs land in a directory the cache can

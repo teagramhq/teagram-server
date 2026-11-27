@@ -236,6 +236,11 @@ jobs:
         working-directory: web-source
         run: bash ../.github/scripts/install-playwright-apt-cache.sh ../.apt-cache
 
+      - name: Discard the rejected apt cache
+        if: steps.apt-cached-install.outputs.installed == 'false'
+        working-directory: web-source
+        run: bash ../.github/scripts/discard-playwright-apt-cache.sh ../.apt-cache
+
       - name: Install Chromium system dependencies from the network
         id: apt-network-install
         if: ${{ steps.playwright-deps.outputs.mode == 'unknown' || (steps.playwright-deps.outputs.mode == 'packages' && steps.apt-cached-install.outputs.installed != 'true') }}

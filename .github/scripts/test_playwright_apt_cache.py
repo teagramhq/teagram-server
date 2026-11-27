@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -16,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 PREPARE_CACHE = ROOT / ".github/scripts/prepare-playwright-apt-cache.sh"
 INSTALL_CACHE = ROOT / ".github/scripts/install-playwright-apt-cache.sh"
 INSTALL_FALLBACK = ROOT / ".github/scripts/install-playwright-apt-fallback.sh"
+DISCARD_CACHE = ROOT / ".github/scripts/discard-playwright-apt-cache.sh"
 WORKFLOW = ROOT / ".github/workflows/ci.yml"
 REAL_CLIENT_WORKFLOW = ROOT / ".github/workflows/real-client-browser-flow.yml"
 PLAYWRIGHT_PACKAGE = "libnss3-tools"
@@ -101,7 +103,30 @@ state["auto_deconfigured"] = state["deconfigured"]
 state["configured"] = not state["deconfigured"]
 state["data_version"] = versions["libasound2-data"]
 state["t64_version"] = versions["libasound2t64"]
+state["playwright_packages"] = sorted(
+    set(state["playwright_packages"])
+    | {
+        Path(path).name.rsplit("_", 2)[0]
+        for path in args[2:]
+        if Path(path).name.startswith("libnss3-tools_")
+    }
+)
 save()
+
+for path in args[2:]:
+    package_path = Path(path)
+    match = re.match(r"^(.+)_([^_]+)_(?:all|amd64)[.]deb$", package_path.name)
+    if match is None:
+        print("unexpected package archive: " + package_path.name, file=sys.stderr)
+        sys.exit(64)
+    if package_path.read_bytes() != f"{match.group(1)}:{match.group(2)}".encode():
+        state["configured"] = False
+        state["deconfigured"] = True
+        state["auto_deconfigured"] = True
+        save()
+        print("corrupt cached package: " + package_path.name, file=sys.stderr)
+        sys.exit(1)
+
 if state["data_version"] != state["t64_version"]:
     print(
         "dependency conflict: libasound2t64 requires matching libasound2-data",
@@ -120,6 +145,20 @@ state_path = Path(os.environ["PACKAGE_STATE_FILE"])
 log_path = Path(os.environ["APT_COMMAND_LOG"])
 state = json.loads(state_path.read_text(encoding="utf-8"))
 args = sys.argv[1:]
+archive_dir_arg = next(
+    (arg.split("=", 1)[1] for arg in args if arg.startswith("Dir::Cache::archives=")),
+    None,
+)
+
+def save_package(package, version):
+    if archive_dir_arg is None:
+        print("package install did not set the archive directory", file=sys.stderr)
+        sys.exit(1)
+    archive_dir = Path(archive_dir_arg)
+    architecture = "all" if package == "libasound2-data" else "amd64"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    archive = archive_dir / f"{package}_{version}_{architecture}.deb"
+    archive.write_bytes(f"{package}:{version}".encode())
 
 def record(event):
     with log_path.open("a", encoding="utf-8") as log:
@@ -140,6 +179,8 @@ elif args[:4] == ["-f", "install", "-y", "--no-install-recommends"]:
     state["t64_version"] = version
     state["configured"] = True
     state["deconfigured"] = False
+    save_package("libasound2-data", version)
+    save_package("libasound2t64", version)
     record("repair")
 elif args[:1] == ["install"]:
     if not state["configured"] or state["data_version"] != state["t64_version"]:
@@ -151,6 +192,9 @@ elif args[:1] == ["install"]:
     state["playwright_packages"] = sorted(
         set(state["playwright_packages"]) | {"libnss3-tools"}
     )
+    for package in args:
+        if package == "libnss3-tools":
+            save_package(package, os.environ["NETWORK_PACKAGE_VERSION"])
     record("install")
 else:
     print("unexpected apt-get arguments: " + " ".join(args), file=sys.stderr)
@@ -221,8 +265,12 @@ class PlaywrightAptCacheTests(unittest.TestCase):
         cache: Path, data_version: str, t64_version: str
     ) -> None:
         cache.mkdir(parents=True, exist_ok=True)
-        (cache / f"libasound2-data_{data_version}_all.deb").touch()
-        (cache / f"libasound2t64_{t64_version}_amd64.deb").touch()
+        (cache / f"libasound2-data_{data_version}_all.deb").write_bytes(
+            f"libasound2-data:{data_version}".encode()
+        )
+        (cache / f"libasound2t64_{t64_version}_amd64.deb").write_bytes(
+            f"libasound2t64:{t64_version}".encode()
+        )
 
     def test_cached_install_handles_runner_package_version_drift_offline(self) -> None:
         cases = (
@@ -286,6 +334,8 @@ class PlaywrightAptCacheTests(unittest.TestCase):
             self._write_cached_alsa_packages(
                 cache, cached_data_version, runner_version
             )
+            corrupt_archive = cache / f"libasound2-data_{cached_data_version}_all.deb"
+            corrupt_archive.write_bytes(b"superseded corrupt archive")
             env, state_path, apt_log = self._fake_package_environment(
                 root,
                 runner_version,
@@ -310,6 +360,16 @@ class PlaywrightAptCacheTests(unittest.TestCase):
             self.assertFalse(broken_state["configured"])
             self.assertTrue(broken_state["auto_deconfigured"])
 
+            discard = subprocess.run(
+                ["bash", str(DISCARD_CACHE), str(cache)],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(discard.returncode, 0, discard.stderr)
+            self.assertEqual(list(cache.glob("*.deb")), [])
+
             fallback = subprocess.run(
                 ["bash", str(INSTALL_FALLBACK), str(cache)],
                 cwd=root,
@@ -319,6 +379,17 @@ class PlaywrightAptCacheTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(fallback.returncode, 0, fallback.stderr)
+            self.assertIn("All system dependencies are installed", fallback.stdout)
+
+            self.assertFalse(corrupt_archive.exists())
+            self.assertEqual(
+                {path.name for path in cache.glob("*.deb")},
+                {
+                    f"libasound2-data_{network_version}_all.deb",
+                    f"libasound2t64_{network_version}_amd64.deb",
+                    f"{PLAYWRIGHT_PACKAGE}_{network_version}_amd64.deb",
+                },
+            )
 
             verification = subprocess.run(
                 ["pnpm", "exec", "playwright", "install-deps", "--dry-run", "chromium"],
@@ -342,6 +413,38 @@ class PlaywrightAptCacheTests(unittest.TestCase):
             self.assertIn(PLAYWRIGHT_PACKAGE, repaired_state["playwright_packages"])
             self.assertEqual(
                 apt_log.read_text(encoding="utf-8"), "update\nrepair\ninstall\n"
+            )
+
+            fresh_root = root / "fresh-runner"
+            fresh_root.mkdir()
+            fresh_cache = fresh_root / ".apt-cache"
+            shutil.copytree(cache, fresh_cache)
+            fresh_env, fresh_state_path, fresh_apt_log = self._fake_package_environment(
+                fresh_root,
+                runner_version,
+                playwright_package_installed=False,
+                network_version=network_version,
+            )
+            fresh_output = fresh_root / "github-output"
+            fresh_output.write_text("", encoding="utf-8")
+            restored = subprocess.run(
+                ["bash", str(INSTALL_CACHE), str(fresh_cache)],
+                env={**fresh_env, "GITHUB_OUTPUT": str(fresh_output)},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(restored.returncode, 0, restored.stderr)
+            self.assertEqual(
+                fresh_output.read_text(encoding="utf-8"), "installed=true\n"
+            )
+            fresh_state = json.loads(fresh_state_path.read_text(encoding="utf-8"))
+            self.assertEqual(fresh_state["data_version"], network_version)
+            self.assertEqual(fresh_state["t64_version"], network_version)
+            self.assertIn(PLAYWRIGHT_PACKAGE, fresh_state["playwright_packages"])
+            self.assertTrue(fresh_state["configured"])
+            self.assertFalse(
+                fresh_apt_log.exists(), "restoring the repaired cache must stay offline"
             )
 
     def test_failed_cache_restore_saves_repaired_packages_under_a_fresh_key(
@@ -404,6 +507,30 @@ class PlaywrightAptCacheTests(unittest.TestCase):
                     "key: ${{ steps.apt-cache.outputs.cache-primary-key }}",
                     steps[save_name],
                 )
+                self.assertIn(
+                    "steps.apt-cached-install.outputs.installed == 'false'",
+                    steps[save_name],
+                )
+                discard_step = re.search(
+                    r"(?ms)^      - name: Discard the rejected apt cache\n"
+                    r"(?P<body>.*?)(?=^      - name:|\Z)",
+                    workflow,
+                )
+                self.assertIsNotNone(discard_step, "rejected cache cleanup is missing")
+                self.assertIn(
+                    "steps.apt-cached-install.outputs.installed == 'false'",
+                    discard_step.group("body"),
+                )
+                self.assertIn(
+                    "discard-playwright-apt-cache.sh", discard_step.group("body")
+                )
+                network_name = install_name.replace(
+                    "from cache", "from the network"
+                )
+                self.assertLess(
+                    workflow.index("- name: Discard the rejected apt cache"),
+                    workflow.index(f"- name: {network_name}"),
+                )
 
     def test_e2e_admin_apt_cache_is_image_scoped_and_warm_path_stays_offline(
         self,
@@ -461,6 +588,28 @@ class PlaywrightAptCacheTests(unittest.TestCase):
         self.assertNotIn("GH_TOKEN", body)
         self.assertNotIn("gh cache delete", body)
 
+    def test_discard_rejected_cache_removes_debs_but_keeps_cache_directory(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="playwright-apt-discard-") as temporary:
+            root = Path(temporary)
+            cache = root / ".apt-cache"
+            cache.mkdir()
+            (cache / "bad.deb").write_bytes(b"corrupt")
+            env, _, _ = self._fake_package_environment(root, "1.2.3")
+
+            result = subprocess.run(
+                ["bash", str(DISCARD_CACHE), str(cache)],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(cache.is_dir())
+            self.assertEqual(list(cache.glob("*.deb")), [])
+
     def test_network_fallback_repairs_dpkg_state_before_installing_dependencies(
         self,
     ) -> None:
@@ -488,6 +637,11 @@ class PlaywrightAptCacheTests(unittest.TestCase):
         )
         self.assertIn(
             "sudo apt-get install -y --no-install-recommends", fallback_script
+        )
+        verification_command = "pnpm exec playwright install-deps --dry-run chromium"
+        self.assertGreater(
+            fallback_script.rindex(verification_command),
+            fallback_script.index("sudo apt-get install -y --no-install-recommends"),
         )
 
     def test_retry_cleanup_keeps_complete_packages_and_clears_partial_downloads(
