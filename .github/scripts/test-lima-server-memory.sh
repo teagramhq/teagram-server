@@ -63,10 +63,14 @@ finish() {
 
   stop_memory_sampler
 
-  local runtime_sample=unavailable runtime_sample_current=unknown
+  local runtime_sample=unavailable runtime_sample_current=unknown runtime_gc_cpu_fraction=unknown
   if [[ -r $MEMORY_SAMPLE_RUNTIME_FILE && -r $MEMORY_SAMPLE_RUNTIME_PEAK_FILE ]]; then
     runtime_sample=$(<"$MEMORY_SAMPLE_RUNTIME_FILE")
     runtime_sample_current=$(<"$MEMORY_SAMPLE_RUNTIME_PEAK_FILE")
+    if ! runtime_gc_cpu_fraction=$(jq -er '.gc_cpu_fraction | select(type == "number" and . >= 0 and . <= 1)' <<<"$runtime_sample"); then
+      status=1
+      printf 'Go runtime memory sample is missing a valid cumulative GC CPU fraction\n' >&2
+    fi
   fi
   if [[ $status -eq 0 && $runtime_sample == unavailable ]]; then
     status=1
@@ -126,7 +130,8 @@ finish() {
       "$([[ $status -eq 0 ]] && printf passed || printf failed)" "${LIMA_MEMORY_PROBE_ATTEMPT:-1}" "$LIMA_MEMORY_PROBE_ATTEMPTS" "$PROBE_PHASE" "$UPLOAD_OUTCOME" \
       "$LIMA_SERVICE_IMAGE" "${IMAGE_ID:-unknown}" "$IMAGE_REVISION" "$LIMA_GOMEMLIMIT" "$peak_mib" "$peak_bytes" "$memory_peak_unattributed_bytes" "$MEMORY_SAMPLE_INTERVAL_MS" "$stat_sample_peak_bytes" "$sample_current_bytes" "$stat_anon_bytes" "$stat_file_bytes" "$stat_kernel_bytes" "$MEMORY_MAX_BYTES" "$MEMORY_METRICS_SOURCE" \
       "${max_events:-unknown}" "${oom:-unknown}" "${oom_kill:-unknown}" "$process_sample_peak_bytes" "$process_attribution" "$process_incomplete_pids" "$server_process_pid" "$server_process_rss_bytes" "$server_process_anon_bytes" "$photo_worker_process_count" "$photo_worker_processes"
-    printf 'LIMA_GO_RUNTIME_MEMORY sample_current_bytes=%s metrics=%s\n' "$runtime_sample_current" "$runtime_sample"
+    printf 'LIMA_GO_RUNTIME_MEMORY gc_cpu_fraction=%s sample_current_bytes=%s metrics=%s\n' \
+      "$runtime_gc_cpu_fraction" "$runtime_sample_current" "$runtime_sample"
     if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then
       {
         printf '\n### Lima service memory probe\n\n'
@@ -315,9 +320,9 @@ if [[ -z $memory_cap_log ]]; then
   exit 1
 fi
 case "$memory_cap_log" in
-  *"cgroup_memory_max_bytes=$EXPECTED_LIMIT"*"go_memory_limit_bytes=$((12 * 1024 * 1024))"*) ;;
+  *"cgroup_memory_max_bytes=$EXPECTED_LIMIT"*"go_memory_limit_bytes=$((28 * 1024 * 1024))"*) ;;
   *)
-    printf 'Lima Go memory cap log does not match the probe cgroup and 12 MiB cap: %s\n' "$memory_cap_log" >&2
+    printf 'Lima Go memory cap log does not match the probe cgroup and 28 MiB minimum target: %s\n' "$memory_cap_log" >&2
     exit 1
     ;;
 esac

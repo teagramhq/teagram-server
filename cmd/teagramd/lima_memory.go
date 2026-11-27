@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"runtime"
 	"runtime/debug"
 	"runtime/metrics"
 	"strconv"
@@ -21,24 +22,25 @@ const (
 	limaMemoryDiagnosticsAddr             = "127.0.0.1:2447"
 	limaCgroupMemoryMaxPath               = "/sys/fs/cgroup/memory.max"
 	limaGoMemoryLimitCgroupThresholdBytes = 64 << 20
-	// Keep the Go memory target 34 MiB below the 46 MiB cgroup limit for non-Go and charged heap pages.
-	limaGoMemoryLimitBytes = 12 << 20
+	// Keep the Go target above the measured runtime baseline while leaving cgroup headroom.
+	limaGoMemoryLimitBytes = 28 << 20
 )
 
 type limaRuntimeMemorySample struct {
-	SampleUnixNano           int64  `json:"sample_unix_nano"`
-	RuntimeTotalBytes        uint64 `json:"runtime_total_bytes"`
-	HeapLiveBytes            uint64 `json:"heap_live_bytes"`
-	HeapObjectsBytes         uint64 `json:"heap_objects_bytes"`
-	HeapFreeBytes            uint64 `json:"heap_free_bytes"`
-	HeapUnusedBytes          uint64 `json:"heap_unused_bytes"`
-	HeapReleasedBytes        uint64 `json:"heap_released_bytes"`
-	HeapStacksBytes          uint64 `json:"heap_stacks_bytes"`
-	MetadataMcacheInuseBytes uint64 `json:"metadata_mcache_inuse_bytes"`
-	MetadataMspanInuseBytes  uint64 `json:"metadata_mspan_inuse_bytes"`
-	MetadataOtherBytes       uint64 `json:"metadata_other_bytes"`
-	OtherBytes               uint64 `json:"other_bytes"`
-	Goroutines               uint64 `json:"goroutines"`
+	SampleUnixNano           int64   `json:"sample_unix_nano"`
+	RuntimeTotalBytes        uint64  `json:"runtime_total_bytes"`
+	HeapLiveBytes            uint64  `json:"heap_live_bytes"`
+	HeapObjectsBytes         uint64  `json:"heap_objects_bytes"`
+	HeapFreeBytes            uint64  `json:"heap_free_bytes"`
+	HeapUnusedBytes          uint64  `json:"heap_unused_bytes"`
+	HeapReleasedBytes        uint64  `json:"heap_released_bytes"`
+	HeapStacksBytes          uint64  `json:"heap_stacks_bytes"`
+	MetadataMcacheInuseBytes uint64  `json:"metadata_mcache_inuse_bytes"`
+	MetadataMspanInuseBytes  uint64  `json:"metadata_mspan_inuse_bytes"`
+	MetadataOtherBytes       uint64  `json:"metadata_other_bytes"`
+	OtherBytes               uint64  `json:"other_bytes"`
+	Goroutines               uint64  `json:"goroutines"`
+	GCCPUFraction            float64 `json:"gc_cpu_fraction"`
 }
 
 var limaRuntimeMemoryMetricNames = [...]string{
@@ -99,6 +101,8 @@ func readLimaRuntimeMemorySample() (limaRuntimeMemorySample, error) {
 			return limaRuntimeMemorySample{}, err
 		}
 	}
+	var runtimeStats runtime.MemStats
+	runtime.ReadMemStats(&runtimeStats)
 	return limaRuntimeMemorySample{
 		SampleUnixNano:           time.Now().UnixNano(),
 		RuntimeTotalBytes:        values[0],
@@ -113,6 +117,7 @@ func readLimaRuntimeMemorySample() (limaRuntimeMemorySample, error) {
 		MetadataOtherBytes:       values[9],
 		OtherBytes:               values[10],
 		Goroutines:               values[11],
+		GCCPUFraction:            runtimeStats.GCCPUFraction,
 	}, nil
 }
 
@@ -138,7 +143,7 @@ func applyLimaGoMemoryLimit(log *slog.Logger, memoryMaxPath string) func() {
 
 	previousMemoryLimit := debug.SetMemoryLimit(-1)
 	effectiveMemoryLimit := previousMemoryLimit
-	if effectiveMemoryLimit <= 0 || effectiveMemoryLimit > limaGoMemoryLimitBytes {
+	if effectiveMemoryLimit <= 0 || effectiveMemoryLimit < limaGoMemoryLimitBytes {
 		effectiveMemoryLimit = limaGoMemoryLimitBytes
 	}
 	debug.SetMemoryLimit(effectiveMemoryLimit)

@@ -25,8 +25,9 @@ func TestApplyLimaGoMemoryLimitReadsCgroupMemoryMax(t *testing.T) {
 		wantLogLevel    string
 		wantLogMessage  string
 	}{
-		{name: "Lima cgroup", memoryMax: "48234496", writeMemoryMax: true, previousLimit: 20 << 20, wantMemoryLimit: 12 << 20, wantLogLevel: "level=INFO", wantLogMessage: "Lima Go memory cap applied"},
-		{name: "threshold cgroup", memoryMax: "67108864", writeMemoryMax: true, previousLimit: 20 << 20, wantMemoryLimit: 12 << 20, wantLogLevel: "level=INFO", wantLogMessage: "Lima Go memory cap applied"},
+		{name: "Lima cgroup", memoryMax: "48234496", writeMemoryMax: true, previousLimit: 20 << 20, wantMemoryLimit: 28 << 20, wantLogLevel: "level=INFO", wantLogMessage: "Lima Go memory cap applied"},
+		{name: "threshold cgroup", memoryMax: "67108864", writeMemoryMax: true, previousLimit: 20 << 20, wantMemoryLimit: 28 << 20, wantLogLevel: "level=INFO", wantLogMessage: "Lima Go memory cap applied"},
+		{name: "higher existing limit", memoryMax: "48234496", writeMemoryMax: true, previousLimit: 32 << 20, wantMemoryLimit: 32 << 20, wantLogLevel: "level=INFO", wantLogMessage: "Lima Go memory cap applied"},
 		{name: "production cgroup", memoryMax: "1073741824", writeMemoryMax: true, previousLimit: math.MaxInt64, wantMemoryLimit: math.MaxInt64, wantLogLevel: "level=INFO", wantLogMessage: "Lima Go memory cap not applied"},
 		{name: "unlimited cgroup", memoryMax: "max", writeMemoryMax: true, previousLimit: math.MaxInt64, wantMemoryLimit: math.MaxInt64, wantLogLevel: "level=WARN", wantLogMessage: "parse cgroup memory.max"},
 		{name: "missing cgroup file", previousLimit: 20 << 20, wantMemoryLimit: 20 << 20, wantLogLevel: "level=WARN", wantLogMessage: "read cgroup memory.max"},
@@ -59,7 +60,7 @@ func TestApplyLimaGoMemoryLimitReadsCgroupMemoryMax(t *testing.T) {
 	}
 }
 
-func TestApplyLimaGoMemoryLimitPreservesStricterLimit(t *testing.T) {
+func TestApplyLimaGoMemoryLimitRaisesTargetAboveLowerGOMEMLIMIT(t *testing.T) {
 	previousLimit := debug.SetMemoryLimit(10 << 20)
 	t.Cleanup(func() { debug.SetMemoryLimit(previousLimit) })
 
@@ -67,8 +68,8 @@ func TestApplyLimaGoMemoryLimitPreservesStricterLimit(t *testing.T) {
 	var logOutput bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logOutput, nil))
 	restore := applyLimaGoMemoryLimit(logger, memoryMaxPath)
-	if got := currentLimaTestMemoryLimit(); got != 10<<20 {
-		t.Fatalf("Go memory limit = %d bytes, want preserved stricter limit %d", got, 10<<20)
+	if got := currentLimaTestMemoryLimit(); got != 28<<20 {
+		t.Fatalf("Go memory limit = %d bytes, want target above measured runtime memory %d", got, 28<<20)
 	}
 	restore()
 }
@@ -127,13 +128,14 @@ func TestLimaRuntimeMemoryEndpointReportsGoHeapAndRuntimeAttribution(t *testing.
 	}
 
 	var got struct {
-		SampleUnixNano     int64  `json:"sample_unix_nano"`
-		RuntimeTotalBytes  uint64 `json:"runtime_total_bytes"`
-		HeapLiveBytes      uint64 `json:"heap_live_bytes"`
-		HeapObjectsBytes   uint64 `json:"heap_objects_bytes"`
-		HeapStacksBytes    uint64 `json:"heap_stacks_bytes"`
-		MetadataOtherBytes uint64 `json:"metadata_other_bytes"`
-		Goroutines         uint64 `json:"goroutines"`
+		SampleUnixNano     int64    `json:"sample_unix_nano"`
+		RuntimeTotalBytes  uint64   `json:"runtime_total_bytes"`
+		HeapLiveBytes      uint64   `json:"heap_live_bytes"`
+		HeapObjectsBytes   uint64   `json:"heap_objects_bytes"`
+		HeapStacksBytes    uint64   `json:"heap_stacks_bytes"`
+		MetadataOtherBytes uint64   `json:"metadata_other_bytes"`
+		Goroutines         uint64   `json:"goroutines"`
+		GCCPUFraction      *float64 `json:"gc_cpu_fraction"`
 	}
 	if err := json.NewDecoder(response.Body).Decode(&got); err != nil {
 		t.Fatalf("decode runtime memory diagnostics: %v", err)
@@ -144,6 +146,9 @@ func TestLimaRuntimeMemoryEndpointReportsGoHeapAndRuntimeAttribution(t *testing.
 	}
 	if got.HeapLiveBytes > got.RuntimeTotalBytes || got.HeapObjectsBytes > got.RuntimeTotalBytes {
 		t.Fatalf("runtime memory diagnostics = %+v, heap values exceed total runtime memory", got)
+	}
+	if got.GCCPUFraction == nil || *got.GCCPUFraction < 0 || *got.GCCPUFraction > 1 {
+		t.Fatalf("runtime memory diagnostics GC CPU fraction = %v, want a value in [0, 1]", got.GCCPUFraction)
 	}
 }
 
