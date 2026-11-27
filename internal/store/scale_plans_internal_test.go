@@ -113,12 +113,6 @@ func (p scalePlan) rowsReadFrom(table string) float64 {
 	var rows float64
 	if p.Relation == table {
 		rows += (p.Rows + p.RemovedByFilter + p.RemovedByJoinFilter + p.RemovedByIndexRecheck) * p.Loops
-		if p.Node == "Bitmap Heap Scan" {
-			if candidates := p.bitmapCandidatesFrom(table); candidates > rows {
-				rows = candidates
-			}
-			return rows
-		}
 	}
 	for _, child := range p.Plans {
 		rows += child.rowsReadFrom(table)
@@ -167,9 +161,12 @@ func TestScalePlanCountsLargestBitmapAndCandidateSet(t *testing.T) {
 	if len(plans) != 1 {
 		t.Fatalf("canned plan count = %d, want 1", len(plans))
 	}
-	rows := plans[0].Plan.rowsRead("channel_messages")
+	rows := plans[0].Plan.bitmapCandidatesFrom("channel_messages")
 	if rows != 20_099 || rows <= 800 {
-		t.Fatalf("canned bitmap-and plan read %.0f channel_messages rows, want largest candidate set 20099 (> 800)", rows)
+		t.Fatalf("canned bitmap-and plan has %.0f channel_messages candidates, want largest candidate set 20099 (> 800)", rows)
+	}
+	if heapRows := plans[0].Plan.rowsRead("channel_messages"); heapRows != 99 {
+		t.Fatalf("canned bitmap-and plan read %.0f channel_messages heap rows, want 99", heapRows)
 	}
 }
 
@@ -184,9 +181,12 @@ func TestScalePlanCountsBitmapIndexCandidates(t *testing.T) {
 	if len(plans) != 1 {
 		t.Fatalf("canned plan count = %d, want 1", len(plans))
 	}
-	rows := plans[0].Plan.rowsRead("channel_messages")
+	rows := plans[0].Plan.bitmapCandidatesFrom("channel_messages")
 	if rows != 20_000 || rows <= 800 {
-		t.Fatalf("canned pkey bitmap plan read %.0f channel_messages rows, want 20000 (> 800)", rows)
+		t.Fatalf("canned pkey bitmap plan has %.0f channel_messages candidates, want 20000 (> 800)", rows)
+	}
+	if heapRows := plans[0].Plan.rowsRead("channel_messages"); heapRows != 500 {
+		t.Fatalf("canned pkey bitmap plan read %.0f channel_messages heap rows, want 500", heapRows)
 	}
 }
 
@@ -288,8 +288,7 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 		{query: `INSERT INTO channel_messages (channel_id, local_id, from_id, message, entities)
 		 SELECT $1, n, $2, 'visible scale emoji',
 		        jsonb_build_object('version', 1, 'entities', jsonb_build_array(jsonb_build_object(
-		            'type', 18, 'offset', 0, 'length', 1,
-		            'argument', CASE WHEN n <= 99 THEN 1000100 + n ELSE 50000000 + n END
+		            'type', 18, 'offset', 0, 'length', 1, 'argument', 1000101
 		        )))
 		 FROM generate_series(1, 20000) AS n`, args: []any{visibleChannelID, ownerID}},
 		{query: `INSERT INTO channel_messages (channel_id, local_id, from_id, message, entities)
@@ -299,12 +298,15 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 		        )))
 		 FROM generate_series(1, 20000) AS n`, args: []any{hiddenChannelID, peerID}},
 		{query: "ALTER TABLE channel_messages ENABLE TRIGGER USER"},
+		{query: `UPDATE channel_participants SET available_min_id = 19999
+			WHERE channel_id = $1 AND user_id = $2`, args: []any{visibleChannelID, ownerID}},
 		{query: fmt.Sprintf(
 			"ALTER INDEX messages_owner_custom_emoji_document_ids_gin_idx ALTER COLUMN 2 SET STATISTICS %d",
 			statsTarget,
 		)},
 		{query: fmt.Sprintf("ALTER INDEX %s ALTER COLUMN 1 SET STATISTICS %d", channelEmojiIndex, statsTarget)},
-		{query: fmt.Sprintf("ALTER INDEX %s ALTER COLUMN 2 SET STATISTICS %d", channelEmojiIndex, statsTarget)},
+		{query: fmt.Sprintf("ALTER INDEX %s ALTER COLUMN 3 SET STATISTICS %d", channelEmojiIndex, statsTarget)},
+		{query: fmt.Sprintf("ALTER TABLE channel_messages ALTER COLUMN local_id SET STATISTICS %d", statsTarget)},
 		{query: "ANALYZE messages"},
 		{query: "ANALYZE channel_messages"},
 		{query: "ANALYZE channel_participants"},
@@ -321,7 +323,7 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 	}{
 		{index: "messages_owner_custom_emoji_document_ids_gin_idx", column: 2},
 		{index: channelEmojiIndex, column: 1},
-		{index: channelEmojiIndex, column: 2},
+		{index: channelEmojiIndex, column: 3},
 	} {
 		var target int
 		if err := pool.QueryRow(ctx, `
@@ -334,6 +336,17 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 		if target != statsTarget {
 			t.Errorf("%s column %d statistics target = %d, want %d", indexColumn.index, indexColumn.column, target, statsTarget)
 		}
+	}
+	var localIDStatsTarget int
+	if err := pool.QueryRow(ctx, `
+		SELECT COALESCE(attstattarget, -1)
+		FROM pg_attribute
+		WHERE attrelid = 'channel_messages'::regclass AND attname = 'local_id'
+	`).Scan(&localIDStatsTarget); err != nil {
+		t.Fatalf("read channel_messages.local_id statistics target: %v", err)
+	}
+	if localIDStatsTarget != statsTarget {
+		t.Errorf("channel_messages.local_id statistics target = %d, want %d", localIDStatsTarget, statsTarget)
 	}
 
 	fileIDs := make([]int64, 201)
@@ -356,8 +369,8 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 	if err != nil {
 		t.Fatalf("resolve scale historical emoji references: %v", err)
 	}
-	if len(referenced) != len(fileIDs)-2 {
-		t.Fatalf("resolved %d historical emoji references, want %d visible IDs", len(referenced), len(fileIDs)-2)
+	if len(referenced) != 101 {
+		t.Fatalf("resolved %d historical emoji references, want 100 private and 1 above-floor channel ID", len(referenced))
 	}
 	if _, found := referenced[fileIDs[len(fileIDs)-1]]; found {
 		t.Fatalf("historical emoji %d resolved from another owner's private messages", fileIDs[len(fileIDs)-1])
@@ -432,7 +445,12 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 			t.Errorf("historical emoji plan read %.0f %s rows for %d IDs: %s", rows, table, len(planFileIDs), strings.Join(plans[0].Plan.accessSummary(), "; "))
 		}
 	}
-	t.Logf("visible_channels=1 planning_ms=%.3f execution_ms=%.3f shared_hits=%d shared_reads=%d",
+	if candidates := plans[0].Plan.bitmapCandidatesFrom("channel_messages"); candidates > 800 {
+		t.Errorf("one-channel sticker-history plan has %.0f channel message bitmap candidates for %d IDs: %s",
+			candidates, len(planFileIDs), strings.Join(plans[0].Plan.accessSummary(), "; "))
+	}
+	t.Logf("visible_channels=1 channel_heap_rows=%.0f channel_bitmap_candidates=%.0f planning_ms=%.3f execution_ms=%.3f shared_hits=%d shared_reads=%d",
+		plans[0].Plan.rowsRead("channel_messages"), plans[0].Plan.bitmapCandidatesFrom("channel_messages"),
 		plans[0].PlanningTime, plans[0].ExecutionTime, plans[0].Plan.Hits, plans[0].Plan.Reads)
 
 	const extraVisibleChannels = 499
@@ -451,8 +469,8 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 		t.Fatalf("seed extra visible channel states: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `
-		INSERT INTO channel_participants (channel_id, user_id)
-		SELECT $1::bigint + n, $2 FROM generate_series(1, $3::int) AS n`, extraVisibleChannelBase, ownerID, extraVisibleChannels,
+		INSERT INTO channel_participants (channel_id, user_id, available_min_id)
+		SELECT $1::bigint + n, $2, 19999 FROM generate_series(1, $3::int) AS n`, extraVisibleChannelBase, ownerID, extraVisibleChannels,
 	); err != nil {
 		t.Fatalf("seed extra visible channel memberships: %v", err)
 	}
@@ -483,7 +501,12 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 			t.Errorf("500-channel historical emoji plan read %.0f %s rows for %d IDs: %s", rows, table, len(planFileIDs), strings.Join(plans[0].Plan.accessSummary(), "; "))
 		}
 	}
-	t.Logf("visible_channels=500 planning_ms=%.3f execution_ms=%.3f shared_hits=%d shared_reads=%d",
+	if candidates := plans[0].Plan.bitmapCandidatesFrom("channel_messages"); candidates > 800 {
+		t.Errorf("500-channel sticker-history plan has %.0f channel message bitmap candidates for %d IDs: %s",
+			candidates, len(planFileIDs), strings.Join(plans[0].Plan.accessSummary(), "; "))
+	}
+	t.Logf("visible_channels=500 channel_heap_rows=%.0f channel_bitmap_candidates=%.0f planning_ms=%.3f execution_ms=%.3f shared_hits=%d shared_reads=%d",
+		plans[0].Plan.rowsRead("channel_messages"), plans[0].Plan.bitmapCandidatesFrom("channel_messages"),
 		plans[0].PlanningTime, plans[0].ExecutionTime, plans[0].Plan.Hits, plans[0].Plan.Reads)
 }
 

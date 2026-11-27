@@ -209,6 +209,9 @@ func TestChannelCustomEmojiReferencesRespectMemberHistoryFloor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed history-floor channel: %v", err)
 	}
+	if _, _, err = store.SeedChannelWithMember(ctx, s, sender.ID, member.ID); err != nil {
+		t.Fatalf("seed second visible channel with an unraised history floor: %v", err)
+	}
 	postWithEmoji := func(randomID int64, file store.File) store.ChannelMessage {
 		t.Helper()
 		entities := []store.PollDescriptionEntity{{

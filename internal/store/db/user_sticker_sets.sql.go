@@ -2016,7 +2016,8 @@ WITH requested AS (
     SELECT DISTINCT unnest($1::text[]) AS file_id
 ), -- Only current participant rows for this owner enter the visible set:
    -- absent rows exclude nonmembers, active bans and deleted channels are
-   -- filtered, and the per-channel history floor is applied in the join below.
+   -- filtered, and the per-channel history floor is applied before channel
+   -- candidates are materialized.
 visible_channels AS MATERIALIZED (
     SELECT cp.channel_id, cp.available_min_id
     FROM channel_participants cp
@@ -2027,24 +2028,28 @@ visible_channels AS MATERIALIZED (
 ), visible_channel_ids AS MATERIALIZED (
     SELECT COALESCE(array_agg(channel_id), ARRAY[]::bigint[]) AS channel_ids
     FROM visible_channels
+), visible_channel_floor AS MATERIALIZED (
+    SELECT COALESCE(min(available_min_id), 0::bigint) AS minimum_available_min_id
+    FROM visible_channels
 ), channel_candidates AS MATERIALIZED (
-    -- The array-expression GIN index probes visible channels and requested
-    -- documents together, independent of the number of visible channels.
-    SELECT cm.channel_id, cm.local_id, cm.entities
+    -- The array-expression GIN index probes visible channels, post-floor
+    -- messages and requested documents together in one set-based scan.
+    SELECT cm.entities
     FROM channel_messages cm
     CROSS JOIN visible_channel_ids vci
+    CROSS JOIN visible_channel_floor vcf
     WHERE ARRAY[cm.channel_id] && vci.channel_ids
+      AND cm.local_id > vcf.minimum_available_min_id
+      AND cm.local_id > (
+          SELECT vc.available_min_id
+          FROM visible_channels vc
+          WHERE vc.channel_id = cm.channel_id
+      )
       AND cm.deleted = false
       AND cm.entities IS NOT NULL
       AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
       AND cardinality(message_custom_emoji_document_ids(cm.entities)) > 0
       AND message_custom_emoji_document_ids(cm.entities) && $1::text[]
-), visible_channel_entities AS (
-    SELECT candidates.entities
-    FROM channel_candidates candidates
-    JOIN visible_channels vc
-      ON vc.channel_id = candidates.channel_id
-     AND candidates.local_id > vc.available_min_id
 ), visible_entities AS (
     SELECT m.entities
     FROM messages m
@@ -2055,8 +2060,8 @@ visible_channels AS MATERIALIZED (
       AND cardinality(message_custom_emoji_document_ids(m.entities)) > 0
       AND message_custom_emoji_document_ids(m.entities) && $1::text[]
     UNION ALL
-    SELECT channel_entities.entities
-    FROM visible_channel_entities channel_entities
+    SELECT cm.entities
+    FROM channel_candidates cm
 )
 SELECT DISTINCT requested.file_id::bigint
 FROM visible_entities
