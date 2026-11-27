@@ -89,6 +89,7 @@ for expected in \
     not_ok "listener config: $expected"
   fi
 done
+# shellcheck disable=SC2016 # Match installer source text literally.
 if grep -Fq 'verify_checkout_ownership || fail' "$SCRIPT_DIR/install-deploy-entry.sh" &&
   grep -Fq 'remove_legacy_deploy_access' "$SCRIPT_DIR/install-deploy-entry.sh" &&
   grep -Fq 'KEY_LINE="restrict,command=\"$ROOT_WRAPPER\"' "$SCRIPT_DIR/install-deploy-entry.sh" &&
@@ -107,6 +108,7 @@ if awk '
 else
   not_ok 'installer migrates legacy runtime paths before scanning checkout ownership'
 fi
+# shellcheck disable=SC2016 # Match installer source text literally.
 if [[ ! -e "$SCRIPT_DIR/deploy-entry.sh" && ! -e "$SCRIPT_DIR/teagram-deploy.sudoers" ]] &&
   grep -Fq 'rm -- "$LEGACY_SUDOERS_FILE"' "$SCRIPT_DIR/install-deploy-entry.sh" &&
   grep -Fq 'deluser "$LEGACY_DEPLOY_USER"' "$SCRIPT_DIR/install-deploy-entry.sh"; then
