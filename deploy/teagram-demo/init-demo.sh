@@ -724,6 +724,7 @@ if [[ -e "$MODE_FILE" || -L "$MODE_FILE" ]]; then
   ' "$TMP_DIR/client.json" >/dev/null || demo_fail 'client-config lacks the approved demo wipe generation binding'
   install -o root -g root -m 0644 "$TMP_DIR/client.json" "$DEMO_CLIENT_CONFIG.next"
   mv -f -- "$DEMO_CLIENT_CONFIG.next" "$DEMO_CLIENT_CONFIG"
+  demo_prepare_tailnet_client_config
   demo_write_active_release "$ACTIVE_SERVER" "$IMAGE_REF"
   demo_seed_compose up -d "$ACTIVE_SERVER"
   demo_prepare_seed_owner "$TMP_DIR"
@@ -744,7 +745,13 @@ if [[ -e "$MODE_FILE" || -L "$MODE_FILE" ]]; then
   demo_compose up -d --wait --wait-timeout 120 "$ACTIVE_SERVER" haproxy
   "$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443
   demo_compose up -d edge
-  python3 "$SCRIPT_DIR/smoke.py" --bootstrap "$DEMO_CLIENT_CONFIG"
+  TAILNET_SMOKE_ARGS=()
+  TAILNET_ENABLED=$(demo_tailnet_enabled)
+  if [[ "$TAILNET_ENABLED" == true ]]; then
+    TAILNET_SMOKE_ARGS+=(--tailnet-port 8081)
+  fi
+  python3 "$SCRIPT_DIR/smoke.py" --bootstrap "${TAILNET_SMOKE_ARGS[@]}" "$DEMO_CLIENT_CONFIG"
+  demo_persist_tailnet_enabled "$TAILNET_ENABLED"
   echo "demo install resumed and seeded at $SHA"
   exit 0
 fi
@@ -792,6 +799,7 @@ jq -e '
 ' "$TMP_DIR/client.json" >/dev/null || demo_fail 'client-config lacks the approved demo wipe generation binding; wait for MAIN-2196'
 install -o root -g root -m 0644 "$TMP_DIR/client.json" "$DEMO_CLIENT_CONFIG.next"
 mv -f -- "$DEMO_CLIENT_CONFIG.next" "$DEMO_CLIENT_CONFIG"
+demo_prepare_tailnet_client_config
 demo_bootstrap_compose up -d teagramd
 
 mapfile -t CONTAINER_IDS < <(demo_bootstrap_compose ps -q)
@@ -841,5 +849,11 @@ PUBLIC_SERVICES_MAY_BE_RUNNING=1
 demo_compose up -d --wait --wait-timeout 120 "$ACTIVE_SERVER" haproxy
 "$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443
 demo_compose up -d edge
-python3 "$SCRIPT_DIR/smoke.py" --bootstrap "$DEMO_CLIENT_CONFIG"
+TAILNET_SMOKE_ARGS=()
+TAILNET_ENABLED=$(demo_tailnet_enabled)
+if [[ "$TAILNET_ENABLED" == true ]]; then
+  TAILNET_SMOKE_ARGS+=(--tailnet-port 8081)
+fi
+python3 "$SCRIPT_DIR/smoke.py" --bootstrap "${TAILNET_SMOKE_ARGS[@]}" "$DEMO_CLIENT_CONFIG"
+demo_persist_tailnet_enabled "$TAILNET_ENABLED"
 echo "demo install ready sha=$SHA rsa_fingerprint=$FINGERPRINT seeded=true"

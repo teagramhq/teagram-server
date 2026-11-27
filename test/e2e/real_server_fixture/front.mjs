@@ -3,8 +3,13 @@ import http from 'node:http';
 import https from 'node:https';
 import net from 'node:net';
 
-const PROBE_CSP = "default-src 'self'; connect-src 'self' wss://teagramd.test/apiws; script-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'";
-const PRIVATE_CSP = "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; frame-src 'self' https://challenges.cloudflare.com; object-src 'none'; script-src 'self' 'wasm-unsafe-eval' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob:; worker-src 'self' blob:; manifest-src 'self'; connect-src 'self' wss://teagramd.test/apiws;";
+const tailnetGuestSignup = process.env.FIXTURE_GUEST_SIGNUP_TAILNET === '1';
+const guestSignupHostname = tailnetGuestSignup ? 'teagram-dev.tailaa4918.ts.net' : 'teagramd.test';
+const guestSignupOrigin = `https://${guestSignupHostname}`;
+const websocketEndpoint = `wss://${guestSignupHostname}/apiws`;
+const allowedHosts = new Set(['teagramd.test', ...(tailnetGuestSignup ? [guestSignupHostname] : [])]);
+const PROBE_CSP = `default-src 'self'; connect-src 'self' ${websocketEndpoint}; script-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'`;
+const PRIVATE_CSP = `default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; frame-src 'self' https://challenges.cloudflare.com; object-src 'none'; script-src 'self' 'wasm-unsafe-eval' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob:; worker-src 'self' blob:; manifest-src 'self'; connect-src 'self' ${websocketEndpoint};`;
 const PROBE_PREFIX = '/_fixture_probe/';
 const probeTarget = fs.readFileSync('/run/mtproto-target.json');
 const args = process.argv.slice(2);
@@ -68,7 +73,7 @@ const server = https.createServer({
   key: fs.readFileSync('/run/tls.key'),
   cert: fs.readFileSync('/run/tls.crt'),
 }, (request, response) => {
-  if (request.headers.host !== 'teagramd.test') {
+  if (!allowedHosts.has(request.headers.host)) {
     response.writeHead(421);
     response.end();
     return;
@@ -86,7 +91,7 @@ const server = https.createServer({
     response.setHeader('content-security-policy', PRIVATE_CSP);
     response.setHeader('x-content-type-options', 'nosniff');
     response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
-    response.end(JSON.stringify({ server: 'teagramd.test', autoGuest: false }));
+    response.end(JSON.stringify({ server: guestSignupHostname, autoGuest: false }));
     return;
   }
 
@@ -160,7 +165,7 @@ const server = https.createServer({
 });
 
 server.on('upgrade', (request, clientSocket, clientHead) => {
-  if (request.headers.host !== 'teagramd.test' || request.headers.origin !== 'https://teagramd.test' || request.url !== '/apiws') {
+  if (request.headers.host !== guestSignupHostname || request.headers.origin !== guestSignupOrigin || request.url !== '/apiws') {
     clientSocket.destroy();
     return;
   }

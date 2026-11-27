@@ -575,14 +575,14 @@ jobs:
 
   test-go:
     name: 'test: go'
+    outputs:
+      build_cache_artifact_id: ${{ steps.upload_go_build_cache.outputs.artifact-id }}
     if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     permissions:
       contents: read
-      actions: write
-    # Preparation took 17m in the latest CI run. Leave room for the full 20m
-    # E2E limit, eight minutes for diagnostics and cleanup, and five minutes
-    # of variance.
+    # Preparation took 17m in the latest CI run. Leave room for the 25m
+    # non-E2E package deadline, diagnostics and cleanup, and variance.
     timeout-minutes: 50
 
     env:
@@ -593,7 +593,7 @@ jobs:
       # the same docker-proxy that drops connections under load, which is why
       # pgtest talks to Postgres on the bridge IP instead (MAIN-154, MAIN-156).
       # Ryuk has no such escape hatch: drop its last connection and it SIGKILLs
-      # the shared tg-test-pg container out from under the test binaries still
+      # the selected Postgres container out from under the test binaries still
       # using it, which surfaces as "terminating connection due to unexpected
       # postmaster exit" (57P01) and then "no route to host" for the rest of the
       # e2e suite (MAIN-160).
@@ -603,6 +603,7 @@ jobs:
       # container does outlive the run.
       TESTCONTAINERS_RYUK_DISABLED: "true"
       COMPOSE_PROFILES: local
+      TG_PGTEST_CONTAINER_NAME: tg-test-pg-unit
 
     steps:
       - uses: actions/checkout@v7.0.1
@@ -810,16 +811,13 @@ jobs:
       # bounded retries so transient mirror misses are caught before package tests.
       #
       # Keep the cached non-E2E command in the Makefile unchanged. The remaining
-      # E2E invocation runs once with the same race/count/timeout/package
-      # settings, excluding fixtures and adding JSON output for diagnostics.
+      # non-E2E package pool runs in this job; the independent E2E suite uses a
+      # sibling job and a distinct reusable Postgres container.
       - name: Pre-pull the shared PostgreSQL test image with retry
         run: bash .github/scripts/pull-base-images.sh --image mirror.gcr.io/postgres:18-alpine
 
       - name: Test non-E2E packages
-        run: make test-unit
-
-      - name: Test end-to-end suite with diagnostics
-        run: bash .github/scripts/run-e2e-diagnostics.sh
+        run: make test-unit-packages
 
       # The suite talks to one shared Postgres container, so when that container
       # dies mid-run every remaining test fails with a connection error and the
@@ -829,22 +827,245 @@ jobs:
       - name: Postgres container state on failure
         if: failure()
         run: |
-          docker inspect -f '{{.State.Status}} exit={{.State.ExitCode}} oomkilled={{.State.OOMKilled}} error={{.State.Error}}' tg-test-pg || echo "container gone"
-          docker logs --tail 50 tg-test-pg 2>&1 || true
+          docker inspect -f '{{.State.Status}} exit={{.State.ExitCode}} oomkilled={{.State.OOMKilled}} error={{.State.Error}}' "$TG_PGTEST_CONTAINER_NAME" || echo "container gone"
+          docker logs --tail 50 "$TG_PGTEST_CONTAINER_NAME" 2>&1 || true
           free -m
 
-      # This job already restored and used the previous snapshot. Remove older
-      # Go snapshots before saving this run's unique key so they cannot crowd
-      # out the fixture caches when the repository is near its cache limit.
-      - name: Prune previous Go build snapshots
+      - name: Upload Go build cache snapshot
+        id: upload_go_build_cache
         if: ${{ success() && github.ref == 'refs/heads/main' }}
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: go-build-cache-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+          path: ~/.cache/go-build
+          if-no-files-found: error
+          retention-days: 1
+
+  test-go-e2e:
+    name: 'test: go-e2e'
+    outputs:
+      build_cache_artifact_id: ${{ steps.upload_go_build_cache.outputs.artifact-id }}
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 40
+    env:
+      TESTCONTAINERS_RYUK_DISABLED: "true"
+      TG_PGTEST_CONTAINER_NAME: tg-test-pg-e2e
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Pin migration timestamps for the test cache
+        run: touch -d @0 migrations/* migrations
+
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Restore Go modules
+        uses: actions/cache/restore@v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: go-mod-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: go-mod-${{ runner.os }}-
+
+      - name: Download Go modules
+        run: go mod download
+
+      - name: Restore Go build and test results
+        uses: actions/cache/restore@v6.1.0
+        with:
+          path: ~/.cache/go-build
+          key: go-build-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: go-build-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-
+
+      - name: Pre-pull the shared PostgreSQL test image with retry
+        run: bash .github/scripts/pull-base-images.sh --image mirror.gcr.io/postgres:18-alpine
+
+      - name: Test end-to-end suite with diagnostics
+        run: bash .github/scripts/run-e2e-diagnostics.sh
+
+      - name: Postgres container state on failure
+        if: failure()
+        run: |
+          docker inspect -f '{{.State.Status}} exit={{.State.ExitCode}} oomkilled={{.State.OOMKilled}} error={{.State.Error}}' "$TG_PGTEST_CONTAINER_NAME" || echo "container gone"
+          docker logs --tail 50 "$TG_PGTEST_CONTAINER_NAME" 2>&1 || true
+          free -m
+
+      - name: Upload Go build cache snapshot
+        id: upload_go_build_cache
+        if: ${{ success() && github.ref == 'refs/heads/main' }}
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: go-build-cache-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+          path: ~/.cache/go-build
+          if-no-files-found: error
+          retention-days: 1
+
+  test-go-fleet-cap:
+    name: 'test: go-fleet-cap'
+    outputs:
+      build_cache_artifact_id: ${{ steps.upload_go_build_cache.outputs.artifact-id }}
+    needs:
+      - test-go
+      - test-go-e2e
+    if: >-
+      ${{
+        !cancelled() &&
+        always() &&
+        needs.test-go.result == 'success' &&
+        (needs.test-go-e2e.result == 'success' || needs.test-go-e2e.result == 'failure')
+      }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    env:
+      TESTCONTAINERS_RYUK_DISABLED: "true"
+      TG_PGTEST_CONTAINER_NAME: tg-test-pg-fleet-cap
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Restore Go modules
+        uses: actions/cache/restore@v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: go-mod-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: go-mod-${{ runner.os }}-
+
+      - name: Download Go modules
+        run: go mod download
+
+      - name: Restore Go build and test results
+        uses: actions/cache/restore@v6.1.0
+        with:
+          path: ~/.cache/go-build
+          key: go-build-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: go-build-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-
+
+      - name: Pre-pull the shared PostgreSQL test image with retry
+        run: bash .github/scripts/pull-base-images.sh --image mirror.gcr.io/postgres:18-alpine
+
+      - name: Test exact-cap fleet writer
+        run: make test-fleet-cap
+
+      - name: Postgres container state on failure
+        if: failure()
+        run: |
+          docker inspect -f '{{.State.Status}} exit={{.State.ExitCode}} oomkilled={{.State.OOMKilled}} error={{.State.Error}}' "$TG_PGTEST_CONTAINER_NAME" || echo "container gone"
+          docker logs --tail 50 "$TG_PGTEST_CONTAINER_NAME" 2>&1 || true
+          free -m
+
+      - name: Upload Go build cache snapshot
+        id: upload_go_build_cache
+        if: ${{ success() && github.ref == 'refs/heads/main' }}
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: go-build-cache-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+          path: ~/.cache/go-build
+          if-no-files-found: error
+          retention-days: 1
+
+  ops-go-build-cache:
+    name: 'ops: go-build-cache'
+    if: ${{ always() }}
+    needs:
+      - test-go
+      - test-go-e2e
+      - test-go-fleet-cap
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      actions: write
+      contents: read
+
+    steps:
+      - name: Check whether the complete Go cache can be saved
+        id: eligibility
+        env:
+          TEST_GO_RESULT: ${{ needs.test-go.result }}
+          TEST_GO_E2E_RESULT: ${{ needs.test-go-e2e.result }}
+          TEST_GO_FLEET_CAP_RESULT: ${{ needs.test-go-fleet-cap.result }}
+          TEST_GO_CACHE_ARTIFACT_ID: ${{ needs.test-go.outputs.build_cache_artifact_id }}
+          TEST_GO_E2E_CACHE_ARTIFACT_ID: ${{ needs.test-go-e2e.outputs.build_cache_artifact_id }}
+          TEST_GO_FLEET_CAP_CACHE_ARTIFACT_ID: ${{ needs.test-go-fleet-cap.outputs.build_cache_artifact_id }}
+        run: |
+          if [[ "$GITHUB_REF" == "refs/heads/main" &&
+                "$TEST_GO_RESULT" == "success" &&
+                "$TEST_GO_E2E_RESULT" == "success" &&
+                "$TEST_GO_FLEET_CAP_RESULT" == "success" ]]; then
+            for artifact_id in "$TEST_GO_CACHE_ARTIFACT_ID" "$TEST_GO_E2E_CACHE_ARTIFACT_ID" "$TEST_GO_FLEET_CAP_CACHE_ARTIFACT_ID"; do
+              if [[ ! "$artifact_id" =~ ^[0-9]+$ ]]; then
+                echo "::error::missing valid Go build cache artifact ID"
+                exit 1
+              fi
+            done
+            if [[ "$TEST_GO_CACHE_ARTIFACT_ID" == "$TEST_GO_E2E_CACHE_ARTIFACT_ID" ||
+                  "$TEST_GO_CACHE_ARTIFACT_ID" == "$TEST_GO_FLEET_CAP_CACHE_ARTIFACT_ID" ||
+                  "$TEST_GO_E2E_CACHE_ARTIFACT_ID" == "$TEST_GO_FLEET_CAP_CACHE_ARTIFACT_ID" ]]; then
+              echo "::error::Go build cache artifact IDs must be distinct"
+              exit 1
+            fi
+            echo "eligible=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out sources
+        if: ${{ steps.eligibility.outputs.eligible == 'true' }}
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Restore the previous Go build snapshot
+        if: ${{ steps.eligibility.outputs.eligible == 'true' }}
+        uses: actions/cache/restore@v6.1.0
+        with:
+          path: ~/.cache/go-build
+          key: go-build-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: go-build-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-
+
+      # Download each snapshot by itself. A multi-ID request can warn and still
+      # succeed when one ID is absent, so each action must resolve one artifact.
+      - name: Download Go build cache from test-go
+        if: ${{ steps.eligibility.outputs.eligible == 'true' }}
+        uses: actions/download-artifact@v8.0.2
+        with:
+          artifact-ids: ${{ needs.test-go.outputs.build_cache_artifact_id }}
+          path: ~/.cache/go-build
+
+      - name: Download Go build cache from test-go-e2e
+        if: ${{ steps.eligibility.outputs.eligible == 'true' }}
+        uses: actions/download-artifact@v8.0.2
+        with:
+          artifact-ids: ${{ needs.test-go-e2e.outputs.build_cache_artifact_id }}
+          path: ~/.cache/go-build
+
+      - name: Download Go build cache from test-go-fleet-cap
+        if: ${{ steps.eligibility.outputs.eligible == 'true' }}
+        uses: actions/download-artifact@v8.0.2
+        with:
+          artifact-ids: ${{ needs.test-go-fleet-cap.outputs.build_cache_artifact_id }}
+          path: ~/.cache/go-build
+
+      # These single-ID downloads fail if any snapshot is absent. Keep pruning
+      # after all three so a partial rerun cannot save an incomplete cache.
+      - name: Prune previous Go build snapshots
+        if: ${{ steps.eligibility.outputs.eligible == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
           GO_BUILD_CACHE_KEY: go-build-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
         run: python3 .github/scripts/prune_go_build_cache.py
 
       - name: Save Go build and test results
-        if: ${{ success() && github.ref == 'refs/heads/main' }}
+        if: ${{ steps.eligibility.outputs.eligible == 'true' }}
         uses: actions/cache/save@v6.1.0
         with:
           path: ~/.cache/go-build
@@ -1266,7 +1487,9 @@ jobs:
           bash -n deploy/teagram-demo/lima/test-deploy-contract.sh
           sh -n deploy/teagram-demo/lima/deploy-entry.sh
           sh -n deploy/teagram-demo/lima/teagram-demo-deploy-sshd.initd
+          bash -n deploy/teagram-demo/test-tailnet-source-address.sh
           bash -n deploy/teagram-demo/test-identity-import.sh
+          bash -n deploy/teagram-demo/lima/install-egress-isolation.sh
           bash -n deploy/teagram-demo/ops/weekly-wipe.sh
           bash -n deploy/teagram-demo/test-turnstile-signin-rollout.sh
           bash -n deploy/teagram-demo/test-image-release.sh
@@ -1342,6 +1565,7 @@ jobs:
             deploy/teagram-demo/image-retention.sh \
             deploy/teagram-demo/test-demo-scheduling.sh \
             deploy/teagram-demo/test-demo-compose.sh \
+            deploy/teagram-demo/test-tailnet-source-address.sh \
             deploy/teagram-demo/test-identity-import.sh \
             deploy/teagram-demo/lima/check.sh \
             deploy/teagram-demo/lima/command-contract.sh \
@@ -1351,6 +1575,7 @@ jobs:
             deploy/teagram-demo/lima/install-deploy-entry.sh \
             deploy/teagram-demo/lima/teagram-demo-deploy-sshd.initd \
             deploy/teagram-demo/lima/test-deploy-contract.sh \
+            deploy/teagram-demo/lima/install-egress-isolation.sh \
             deploy/teagram-demo/lima/prepare-blobs.sh \
             deploy/teagram-demo/lima/test-lima-compose.sh \
             deploy/teagram-demo/ops/weekly-wipe.sh \
@@ -1432,6 +1657,9 @@ jobs:
 
       - name: Check public demo Compose policy
         run: deploy/teagram-demo/test-demo-compose.sh
+
+      - name: Check Lima demo egress isolation
+        run: python3 -B deploy/teagram-demo/lima/test-egress-isolation-rules.py
 
       - name: Check demo ops command menu
         run: deploy/teagram-demo/test-ops-menu.sh
@@ -2471,6 +2699,9 @@ jobs:
       - test-k8s-deploy
       - publish-k8s-images
       - build-darwin
+      - test-go-e2e
+      - test-go-fleet-cap
+      - ops-go-build-cache
     runs-on: ubuntu-26.04
     timeout-minutes: 5
 
@@ -2501,6 +2732,9 @@ jobs:
           K8S_DEPLOY_RESULT: ${{ needs.test-k8s-deploy.result }}
           PUBLISH_K8S_IMAGES_RESULT: ${{ needs.publish-k8s-images.result }}
           BUILD_DARWIN_RESULT: ${{ needs.build-darwin.result }}
+          TEST_GO_E2E_RESULT: ${{ needs.test-go-e2e.result }}
+          TEST_GO_FLEET_CAP_RESULT: ${{ needs.test-go-fleet-cap.result }}
+          GO_BUILD_CACHE_RESULT: ${{ needs.ops-go-build-cache.result }}
           PULL_REQUEST_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name || '' }}
         run: |
           expected_publish_result=success
@@ -2535,6 +2769,9 @@ jobs:
             "test-k8s-deploy=$K8S_DEPLOY_RESULT"
             "publish-k8s-images=$PUBLISH_K8S_IMAGES_RESULT"
             "build-darwin=$BUILD_DARWIN_RESULT"
+            "test-go-e2e=$TEST_GO_E2E_RESULT"
+            "test-go-fleet-cap=$TEST_GO_FLEET_CAP_RESULT"
+            "ops-go-build-cache=$GO_BUILD_CACHE_RESULT"
           )
           if [[ "$CHECK_SECURITY_RESULT" != "success" ||
                 "$TEST_GO_RESULT" != "success" ||
@@ -2559,7 +2796,10 @@ jobs:
                 "$K8S_MANIFESTS_RESULT" != "success" ||
                 "$K8S_DEPLOY_RESULT" != "success" ||
                 "$PUBLISH_K8S_IMAGES_RESULT" != "$expected_publish_result" ||
-                "$BUILD_DARWIN_RESULT" != "success" ]]; then
+                "$BUILD_DARWIN_RESULT" != "success" ||
+                "$TEST_GO_E2E_RESULT" != "success" ||
+                "$TEST_GO_FLEET_CAP_RESULT" != "success" ||
+                "$GO_BUILD_CACHE_RESULT" != "success" ]]; then
             echo "::error::Required CI lanes did not pass"
             printf '%s\n' "${lane_results[@]}"
             exit 1
@@ -2580,6 +2820,8 @@ jobs:
     needs:
       - check-security
       - test-go
+      - test-go-e2e
+      - test-go-fleet-cap
       - check-sticker-license
       - test-photo-worker
       - test-real-server-fixtures
@@ -2705,6 +2947,8 @@ jobs:
       - build-browser-acceptance-image
       - ci
       - test-go
+      - test-go-e2e
+      - test-go-fleet-cap
       - test-compose
       - lint-css
       - check-deploy-workflow

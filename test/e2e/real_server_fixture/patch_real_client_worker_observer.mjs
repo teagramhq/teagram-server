@@ -14,6 +14,16 @@ function replaceOnce(source, before, after, description) {
   return `${source.slice(0, first)}${after}${source.slice(first + before.length)}`;
 }
 
+function replaceBetweenOnce(source, before, after, replacement, description) {
+  const first = source.indexOf(before);
+  const end = first < 0 ? -1 : source.indexOf(after, first + before.length);
+  if(first < 0 || source.indexOf(before, first + before.length) >= 0 || end < 0 ||
+      source.indexOf(after, end + after.length) >= 0) {
+    throw new Error(`pinned web observer no longer has one ${description} insertion point`);
+  }
+  return `${source.slice(0, first)}${replacement}${source.slice(end)}`;
+}
+
 export function patchRealClientObserver(webRoot) {
   const observationPath = join(webRoot, 'scripts/real-client/observation.cjs');
   const browserPath = join(webRoot, 'scripts/real-client/browser.cjs');
@@ -152,7 +162,16 @@ export function patchRealClientObserver(webRoot) {
     selectedRow = visible[0];
   }`;
   const settledPeerSelection = `  const {selectedRow, peerId} = await waitForUniquePeerSearchResult(page, resultsSelector, username, stage);`;
-  browser = replaceOnce(browser, oldPeerSelection, settledPeerSelection, 'unique peer search selection');
+  if(browser.includes(oldPeerSelection)) {
+    browser = replaceOnce(browser, oldPeerSelection, settledPeerSelection, 'unique peer search selection');
+  } else {
+    browser = replaceBetweenOnce(browser,
+      `  const rows = page.locator(resultsSelector);
+  const deadline = Date.now() + 25_000;`,
+      `  const peerId = await selectedRow.getAttribute('data-peer-id');`,
+      `${settledPeerSelection}\n`,
+      'unique peer search selection');
+  }
   browser = replaceOnce(browser,
     `  const peerId = await selectedRow.getAttribute('data-peer-id');
   if(!peerId) failStage(\`${'${stage}'}_peer_identity\`);`,

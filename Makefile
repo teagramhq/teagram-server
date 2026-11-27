@@ -1,4 +1,4 @@
-.PHONY: tools-check check-catalog-deps sqlc generate templ css migrate-new migrate test test-unit test-fleet-cap test-db perf docker-bridge lint lint-format lint-sql sqlfluff-install build run
+.PHONY: tools-check check-catalog-deps sqlc generate templ css migrate-new migrate test test-unit test-unit-packages test-fleet-cap test-db perf docker-bridge lint lint-format lint-sql sqlfluff-install build run
 
 # sqlc lives in a separate tools module (tools/go.mod) so its broken transitive
 # dep graph (grpc test deps -> a non-existent gonum package) stays out of the
@@ -73,17 +73,19 @@ test: docker-bridge
 # All packages except e2e. Agent runtimes share the host CPU with sibling
 # workdirs; e2e takes ~300s and starves under contention, producing spurious
 # timeouts that are not code bugs. Use this for fast development-loop feedback.
-# `make test` (including e2e) remains the pre-PR gate. CI uses this non-e2e
-# target and runs the same uncached e2e command with JSON output for safe
-# failure attribution. The exact-cap fleet writer runs separately after the
-# non-e2e package tests so shared Postgres load does not consume its deadline.
-test-unit: docker-bridge
-	$(TESTENV) go test -race -timeout 25m -skip '$(FLEET_CAP_TEST)' $$(go list ./... | grep -v '^$(E2E_PKG)$$')
+# `make test` (including e2e) remains the pre-PR gate. CI runs the non-e2e
+# package target alongside the same uncached e2e command with JSON output for
+# safe failure attribution. The exact-cap fleet writer runs after both suites
+# so shared Postgres load does not consume its deadline.
+test-unit: test-unit-packages
 	$(MAKE) test-fleet-cap
 
+test-unit-packages: docker-bridge
+	$(TESTENV) go test -race -timeout 25m -skip '$(FLEET_CAP_TEST)' $$(go list ./... | grep -v '^$(E2E_PKG)$$')
+
 # The exactly-cap fleet writer shares pgtest's reusable Postgres across
-# packages. Run it after the parallel package suite so unrelated database load
-# does not consume its statement timeout.
+# packages. Run it after the package pool and CI's E2E suite so unrelated
+# database load does not consume its statement timeout.
 test-fleet-cap: docker-bridge
 	$(TESTENV) go test -race -count=1 -run '$(FLEET_CAP_TEST)' ./internal/store
 

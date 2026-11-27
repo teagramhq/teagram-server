@@ -265,6 +265,38 @@ expect 'criterion 1: no build key anywhere' \
   '[.services[] | select(has("build"))] | length == 0'
 expect 'criterion 1: every image is pinned by sha256 digest' \
   '[.services[] | .image | select(test("@sha256:[0-9a-f]{64}$") | not)] | length == 0'
+expect 'criterion 1: Docker does not auto-start demo containers before isolation' \
+  '[.services[] | select(.restart != "no")] | length == 0'
+expect 'criterion 1: outbound services use public DNS upstreams' \
+  '.services["turnstile-egress"].dns == ["1.1.1.1", "1.0.0.1"] and .services.edge.dns == ["1.1.1.1", "1.0.0.1"] and .services.cloudflared.dns == ["1.1.1.1", "1.0.0.1"]'
+
+if grep -Fq 'supervisor=supervise-daemon' "$SCRIPT_DIR/install-egress-isolation.sh" \
+  && grep -Fq 'command_args_foreground="stack-supervise"' "$SCRIPT_DIR/install-egress-isolation.sh" \
+  && grep -Fq 'respawn_max=0' "$SCRIPT_DIR/install-egress-isolation.sh" \
+  && grep -Fq 'need teagram-demo-egress' "$SCRIPT_DIR/install-egress-isolation.sh" \
+  && grep -Fq 'after tailscale' "$SCRIPT_DIR/install-egress-isolation.sh" \
+  && grep -Fq 'stack_reconcile_locked' "$SCRIPT_DIR/install-egress-isolation.sh" \
+  && grep -Fq 'shared lima deploy lock' "$SCRIPT_DIR/install-egress-isolation.sh"; then
+  ok 'OpenRC supervises service recovery after firewall-first startup'
+else
+  not_ok 'OpenRC supervises service recovery after firewall-first startup'
+fi
+
+if grep -Fq 'FIREWALL_LOCK_TIMEOUT_SECONDS=30' "$SCRIPT_DIR/install-egress-isolation.sh" \
+  && grep -Fq 'Lock order is deploy.lock (FD 9), then this leaf lock (FD 8).' \
+    "$SCRIPT_DIR/install-egress-isolation.sh" \
+  && grep -Fq 'leaf lock second' "$SCRIPT_DIR/egress-isolation-threat-model.md" \
+  && grep -Eq 'read-only .*check.* takes no lock' "$SCRIPT_DIR/egress-isolation-threat-model.md"; then
+  ok 'firewall mutations use the documented bounded leaf lock'
+else
+  not_ok 'firewall mutations use the documented bounded leaf lock'
+fi
+
+if grep -Fq 'egress-isolation-threat-model.md' "$SCRIPT_DIR/README.md"; then
+  ok 'Lima egress threat model is listed with the firewall files'
+else
+  not_ok 'Lima egress threat model is listed with the firewall files'
+fi
 
 # Criterion 2: every service has a memory limit, and the long-running ones fit
 # in 200 MiB. migrate is one-shot, so it is outside that sum.
@@ -277,16 +309,77 @@ expect 'criterion 2: long-running limits total exactly 157 MiB' \
   '[.services | to_entries[] | select(.key != "migrate") | .value.mem_limit | tonumber] | add == 157 * 1048576'
 expect 'criterion 2: only the single server pool is capped at three' \
   '.services.teagramd.environment.TG_PG_MAX_CONNS == "3" and (.services | has("teagramd-next") | not)'
-expect 'criterion 2: server has a 46 MiB limit and 20 MiB Go heap limit' \
-  '(.services.teagramd.mem_limit | tonumber) == 48234496 and .services.teagramd.environment.GOMEMLIMIT == "20MiB"'
+expect 'criterion 2: server has a 46 MiB limit and 18 MiB Go memory limit' \
+  '(.services.teagramd.mem_limit | tonumber) == 48234496 and .services.teagramd.environment.GOMEMLIMIT == "18MiB"'
+PROBE_GOMEMLIMIT=$(sed -n 's/^LIMA_GOMEMLIMIT=//p' "$REPO_ROOT/.github/scripts/test-lima-server-memory.sh")
+if [[ $PROBE_GOMEMLIMIT == "$(jq -r '.services.teagramd.environment.GOMEMLIMIT' "$LIMA_JSON")" ]]; then
+  ok 'criterion 2: memory probe uses the Lima Go memory limit'
+else
+  not_ok 'criterion 2: memory probe uses the Lima Go memory limit'
+fi
 expect 'criterion 2: postgres is capped at 49 MiB after rebalancing' \
   '(.services.postgres.mem_limit | tonumber) == 51380224'
 expect 'criterion 2: postgres runs with the lima config file' \
   '.services.postgres.volumes | any(.target == "/etc/postgresql/postgresql.conf" and (.source | endswith("deploy/teagram-demo/lima/postgresql.conf")))'
 expect 'criterion 2: only the edge publishes a host port' \
   '[.services | to_entries[] | select(.value.ports != null) | .key] == ["edge"]'
-expect 'criterion 2: edge health check is reachable only on loopback port 8080' \
-  '.services.edge.ports | any(.host_ip == "127.0.0.1" and (.published | tostring) == "8080" and (.target | tostring) == "8080")'
+expect 'criterion 2: Lima edge exposes only loopback port 8080' \
+  '(.services.edge.ports | length) == 1 and .services.edge.ports[0].host_ip == "127.0.0.1" and (.services.edge.ports[0].published | tostring) == "8080" and (.services.edge.ports[0].target | tostring) == "8080"'
+expect 'criterion 2: lima has no tailnet edge listener or origin' \
+  '.services["edge-tailnet"] == null and .networks["teagram-dev-tailnet"] == null and (.services.teagramd.environment.TG_WEBSOCKET_ALLOWED_ORIGINS | contains("teagram-dev.tailaa4918.ts.net") | not)'
+expect 'criterion 2: lima does not mount a tailnet Nginx configuration' \
+  '[.services[] | .volumes[]? | select(.source | endswith("nginx-tailnet.conf"))] | length == 0'
+
+python3 - "$SCRIPT_DIR/../nginx-config/nginx.conf" "$SCRIPT_DIR/../nginx-tailnet.conf" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+public_nginx_path = Path(sys.argv[1]).resolve()
+config_root = public_nginx_path.parent
+tailnet_nginx = Path(sys.argv[2]).read_text(encoding="utf-8")
+
+
+def expand_demo_includes(path: Path, active: tuple[Path, ...] = ()) -> str:
+    path = path.resolve()
+    if path in active:
+        raise SystemExit(f"cyclic Lima Nginx include: {path}")
+    content = path.read_text(encoding="utf-8")
+
+    def replace_include(match: re.Match[str]) -> str:
+        include = match.group(2).strip()
+        prefix = "/etc/nginx/demo/"
+        if not include.startswith(prefix):
+            return match.group(0)
+        local_include = include[len(prefix):]
+        matches = sorted(config_root.glob(local_include))
+        if not matches:
+            raise SystemExit(f"Lima Nginx include is missing: {include}")
+        return "\n".join(expand_demo_includes(item, (*active, path)) for item in matches)
+
+    return re.sub(r"(?m)^(\s*)include\s+([^;]+);", replace_include, content)
+
+
+public_nginx = expand_demo_includes(public_nginx_path)
+public_listeners = re.findall(
+    r"^\s*listen\s+([^;\s]+)",
+    public_nginx,
+    flags=re.MULTILINE,
+)
+if public_listeners != ["8080"]:
+    raise SystemExit("Lima Nginx must listen only on port 8080")
+cf_sources = re.findall(
+    r"^\s*proxy_set_header\s+CF-Connecting-IP\s+([^;]+);",
+    public_nginx,
+    flags=re.MULTILINE,
+)
+if cf_sources != ["$http_cf_connecting_ip"]:
+    raise SystemExit("Lima Nginx must forward only Cloudflare's CF-Connecting-IP header")
+if re.search(r"^\s*(?:real_ip_header|set_real_ip_from)\b", public_nginx, flags=re.MULTILINE):
+    raise SystemExit("Lima Nginx must not configure real-IP header trust")
+if "set_real_ip_from 198.18.134.1/32;" not in tailnet_nginx or "real_ip_header X-Forwarded-For;" not in tailnet_nginx:
+    raise SystemExit("tailnet Nginx must trust only the pinned listener gateway and X-Forwarded-For")
+PY
 
 # Criterion 3: teagramd's blobs are a bind of the capped mount, which must
 # already exist, and the bind refuses to create a missing host path.

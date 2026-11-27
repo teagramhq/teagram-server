@@ -22,6 +22,46 @@ import (
 	"github.com/teagramhq/teagram-server/internal/store"
 )
 
+func TestPostgresExecUsesConfiguredContainerName(t *testing.T) {
+	const configuredName = "tg-test-pg-e2e"
+	t.Setenv("TG_PGTEST_CONTAINER_NAME", configuredName)
+
+	for _, test := range []struct {
+		name    string
+		options []string
+		command []string
+		want    []string
+	}{
+		{
+			name:    "dump",
+			command: []string{"pg_dump", "--format=custom"},
+			want:    []string{"docker", "exec", configuredName, "pg_dump", "--format=custom"},
+		},
+		{
+			name:    "restore",
+			options: []string{"--interactive"},
+			command: []string{"pg_restore", "--clean"},
+			want:    []string{"docker", "exec", "--interactive", configuredName, "pg_restore", "--clean"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			command := postgresContainerExecCommand(t.Context(), test.options, test.command...)
+			if got := strings.Join(command.Args, "\x00"); got != strings.Join(test.want, "\x00") {
+				t.Fatalf("docker args = %q, want %q", command.Args, test.want)
+			}
+		})
+	}
+}
+
+func postgresContainerExecCommand(ctx context.Context, options []string, args ...string) *osexec.Cmd {
+	dockerArgs := make([]string, 0, 2+len(options)+len(args))
+	dockerArgs = append(dockerArgs, "exec")
+	dockerArgs = append(dockerArgs, options...)
+	dockerArgs = append(dockerArgs, pgtest.ContainerName())
+	dockerArgs = append(dockerArgs, args...)
+	return osexec.CommandContext(ctx, "docker", dockerArgs...) // #nosec G204 -- fixed Docker argv; only the configured test container and generated or parsed test database name vary, without a shell.
+}
+
 func testSmokeProvisionedAccountLogin(t *testing.T) {
 	t.Helper()
 
@@ -182,7 +222,7 @@ func dumpAndRestoreSmokeDatabase(t *testing.T, ctx context.Context, sourceDSN st
 	if err != nil {
 		t.Fatalf("create protected Postgres dump: %v", err)
 	}
-	dumpCommand := osexec.CommandContext(ctx, "docker", "exec", "tg-test-pg", "pg_dump", // #nosec G204 -- fixed test container and a database name parsed from pgtest's DSN.
+	dumpCommand := postgresContainerExecCommand(ctx, nil, "pg_dump",
 		"--format=custom", "--no-owner", "--no-acl", "--username=postgres", "--dbname="+sourceConfig.Database)
 	var dumpStderr bytes.Buffer
 	dumpCommand.Stdout = dump
@@ -200,7 +240,7 @@ func dumpAndRestoreSmokeDatabase(t *testing.T, ctx context.Context, sourceDSN st
 	if err != nil {
 		t.Fatalf("open protected Postgres dump: %v", err)
 	}
-	restoreCommand := osexec.CommandContext(ctx, "docker", "exec", "--interactive", "tg-test-pg", "pg_restore", // #nosec G204 -- fixed test container and a generated test database name.
+	restoreCommand := postgresContainerExecCommand(ctx, []string{"--interactive"}, "pg_restore",
 		"--clean", "--if-exists", "--no-owner", "--no-acl", "--exit-on-error", "--username=postgres", "--dbname="+targetName)
 	restoreCommand.Stdin = dump
 	var restoreStderr bytes.Buffer

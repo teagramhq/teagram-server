@@ -190,7 +190,7 @@ if [[ "$flag_after" != "$TARGET" ]]; then
   restore_previous_runtime "$expected_flag"
   fail 'post-deploy flag did not match the requested target'
 fi
-if ! python3 "$REPO/deploy/teagram-demo/probe_tailnet_isolation.py"; then
+if ! python3 "$REPO/deploy/teagram-demo/probe_tailnet_isolation.py" --charlie; then
   restore_previous_runtime "$expected_flag"
   fail 'tailnet isolation probe failed; the previous signin flag was restored'
 fi

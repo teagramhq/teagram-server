@@ -14,29 +14,64 @@ function replaceOnce(source, before, after, description) {
 export function patchRealClientGuestSignup(webRoot) {
   const runPath = join(webRoot, 'scripts/real-client/run.mjs');
   const browserPath = join(webRoot, 'scripts/real-client/browser.cjs');
+  const observationPath = join(webRoot, 'scripts/real-client/observation.cjs');
+  const contractPath = join(webRoot, 'scripts/real-client/contract.mjs');
   let run = readFileSync(runPath, 'utf8');
   let browser = readFileSync(browserPath, 'utf8');
-  if(run.includes('guestSignupQaBypassToken') || browser.includes('guestSignupQaBypassToken')) {
+  let observation = readFileSync(observationPath, 'utf8');
+  let contract = readFileSync(contractPath, 'utf8');
+  if(run.includes('guestSignupQaBypassToken') || browser.includes('guestSignupQaBypassToken') ||
+      observation.includes('REAL_CLIENT_GUEST_SIGNUP_TAILNET') || contract.includes('PRIVATE_CSP_WSS')) {
     throw new Error('pinned web guest-signup runner is already patched');
   }
 
+  observation = replaceOnce(observation,
+    "const PRIVATE_CSP_ORIGIN = 'https://teagramd.test';",
+    "const PRIVATE_CSP_ORIGIN = process.env.REAL_CLIENT_GUEST_SIGNUP_TAILNET === '1' ? 'https://teagram-dev.tailaa4918.ts.net' : 'https://teagramd.test';",
+    'guest-signup tailnet observation origin');
+
+  contract = replaceOnce(contract,
+    'const PRIVATE_CSP_ORIGIN = observation.PRIVATE_CSP_ORIGIN;',
+    "const PRIVATE_CSP_ORIGIN = observation.PRIVATE_CSP_ORIGIN;\nconst PRIVATE_CSP_WSS = `${PRIVATE_CSP_ORIGIN.replace('https:', 'wss:')}/apiws`;",
+    'guest-signup tailnet fixture origin');
+  contract = replaceOnce(contract,
+    "if(serverReady.endpoint !== 'https://teagramd.test' ||\n      serverReady.wssEndpoint !== 'wss://teagramd.test/apiws' ||",
+    'if(serverReady.endpoint !== PRIVATE_CSP_ORIGIN ||\n      serverReady.wssEndpoint !== PRIVATE_CSP_WSS ||',
+    'guest-signup tailnet fixture endpoint validation');
+
   run = replaceOnce(run,
     '  const guestSignupGateOff = args.guestSignupGateOff === true;',
-    '  const guestSignupGateOff = args.guestSignupGateOff === true;\n  const guestSignupQaBypassToken = process.env.REAL_CLIENT_GUEST_SIGNUP_QA_BYPASS_TOKEN;',
+    '  const guestSignupGateOff = args.guestSignupGateOff === true;\n  const guestSignupTailnet = process.env.REAL_CLIENT_GUEST_SIGNUP_TAILNET === \'1\';\n  const guestSignupQaBypassToken = process.env.REAL_CLIENT_GUEST_SIGNUP_QA_BYPASS_TOKEN;',
     'guest-signup QA token input');
   run = replaceOnce(run,
     '      ...(guestSignupOnly ? {guestSignupOnly: true} : {}),',
-    '      ...(guestSignupOnly ? {guestSignupOnly: true} : {}),\n      ...(guestSignupOnly && guestSignupQaBypassToken ? {guestSignupQaBypassToken} : {}),',
+    '      ...(guestSignupOnly ? {guestSignupOnly: true} : {}),\n      ...(guestSignupOnly && guestSignupTailnet ? {guestSignupTailnet: true} : {}),\n      ...(guestSignupOnly && guestSignupQaBypassToken ? {guestSignupQaBypassToken} : {}),',
     'guest-signup QA token forwarding');
+  run = replaceOnce(run,
+    "['exec', '-i', browserName, 'node', remoteScript],",
+    "['exec', '-i', ...(guestSignupTailnet ? ['--env', 'REAL_CLIENT_GUEST_SIGNUP_TAILNET=1'] : []), browserName, 'node', remoteScript],",
+    'guest-signup tailnet observer environment');
   run = replaceOnce(run,
     "JSON.stringify(browserResult.guestSignup?.turnstileActions) !== JSON.stringify(['signup']) ||",
     "JSON.stringify(browserResult.guestSignup?.turnstileActions) !== JSON.stringify(guestSignupQaBypassToken ? [] : ['signup']) ||",
     'guest-signup QA Turnstile action expectation');
   run = replaceOnce(run,
     'browserResult.guestSignup?.authorized !== true || browserResult.screenshotsCaptured !== 2 ||',
-    'browserResult.guestSignup?.authorized !== true ||\n          browserResult.guestSignup?.qaBypassUsed !== Boolean(guestSignupQaBypassToken) || browserResult.screenshotsCaptured !== 2 ||',
+    'browserResult.guestSignup?.authorized !== true ||\n          browserResult.guestSignup?.qaBypassUsed !== Boolean(guestSignupQaBypassToken) || browserResult.guestSignup?.tailnetPage !== guestSignupTailnet || browserResult.screenshotsCaptured !== 2 ||',
     'guest-signup QA bypass evidence');
 
+  browser = replaceOnce(browser,
+    "const PRIVATE_CSP_WSS = 'wss://teagramd.test/apiws';",
+    "const PRIVATE_CSP_WSS = `${PRIVATE_CSP_ORIGIN.replace('https:', 'wss:')}/apiws`;",
+    'guest-signup tailnet websocket endpoint');
+  browser = replaceOnce(browser,
+    '        `--host-resolver-rules=MAP teagramd.test ${runtime.frontIp},MAP * ~NOTFOUND`,',
+    '        `--host-resolver-rules=MAP teagramd.test ${runtime.frontIp}${runtime.guestSignupTailnet ? `,MAP teagram-dev.tailaa4918.ts.net ${runtime.frontIp}` : \'\'},MAP * ~NOTFOUND`,',
+    'guest-signup tailnet hostname routing');
+  browser = replaceOnce(browser,
+    '      (config.guestSignupOnly !== undefined && !guestSignupOnly) ||',
+    '      (config.guestSignupOnly !== undefined && !guestSignupOnly) ||\n      (config.guestSignupTailnet !== undefined && (!guestSignupOnly || config.guestSignupTailnet !== true)) ||',
+    'guest-signup tailnet input validation');
   browser = replaceOnce(browser,
     `      await guestPage.addInitScript(() => {
         window.__fixtureTurnstileActions = [];
@@ -58,6 +93,10 @@ export function patchRealClientGuestSignup(webRoot) {
 
       const response = await guestPage.goto(PRIVATE_CSP_ORIGIN, {waitUntil: 'domcontentloaded', timeout: 30_000});`,
     'guest-signup QA bypass init argument');
+  browser = replaceOnce(browser,
+    "      const response = await guestPage.goto(PRIVATE_CSP_ORIGIN, {waitUntil: 'domcontentloaded', timeout: 30_000});",
+    "      const response = await guestPage.goto(runtime.guestSignupTailnet ? 'https://teagram-dev.tailaa4918.ts.net/' : PRIVATE_CSP_ORIGIN, {waitUntil: 'domcontentloaded', timeout: 30_000});\n      if(runtime.guestSignupTailnet && new URL(guestPage.url()).hostname !== 'teagram-dev.tailaa4918.ts.net') failStage('guest_tailnet_page_hostname');",
+    'guest-signup tailnet page');
   browser = replaceOnce(browser,
     `      const discovery = await guestPage.evaluate(() => ({
         guestSignUpEnabled: window.__TEAGRAM_ACTIVE_GUEST_SIGN_UP__,
@@ -116,11 +155,13 @@ export function patchRealClientGuestSignup(webRoot) {
   browser = replaceOnce(browser,
     `guestSignup: {availabilityVisible: true, appConfigLoaded: true, turnstileActions, authorized: true},`,
     `guestSignup: {availabilityVisible: true, appConfigLoaded: true, turnstileActions, authorized: true,
-          qaBypassUsed: Boolean(runtime.guestSignupQaBypassToken)},`,
+          qaBypassUsed: Boolean(runtime.guestSignupQaBypassToken), tailnetPage: Boolean(runtime.guestSignupTailnet)},`,
     'guest-signup QA bypass result');
 
   writeFileSync(runPath, run);
   writeFileSync(browserPath, browser);
+  writeFileSync(observationPath, observation);
+  writeFileSync(contractPath, contract);
 }
 
 function parseArguments(argv) {
