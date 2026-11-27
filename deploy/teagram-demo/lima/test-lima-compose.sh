@@ -280,6 +280,16 @@ else
   not_ok 'OpenRC supervises service recovery after firewall-first startup'
 fi
 
+if grep -Fq 'FIREWALL_LOCK_TIMEOUT_SECONDS=30' "$SCRIPT_DIR/install-egress-isolation.sh" \
+  && grep -Fq 'Lock order is deploy.lock (FD 9), then this leaf lock (FD 8).' \
+    "$SCRIPT_DIR/install-egress-isolation.sh" \
+  && grep -Fq 'leaf lock second' "$SCRIPT_DIR/egress-isolation-threat-model.md" \
+  && grep -Fq 'read-only `check` takes no lock' "$SCRIPT_DIR/egress-isolation-threat-model.md"; then
+  ok 'firewall mutations use the documented bounded leaf lock'
+else
+  not_ok 'firewall mutations use the documented bounded leaf lock'
+fi
+
 if grep -Fq 'egress-isolation-threat-model.md' "$SCRIPT_DIR/README.md"; then
   ok 'Lima egress threat model is listed with the firewall files'
 else

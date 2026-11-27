@@ -213,12 +213,15 @@ for HAProxy's health check, and disables dependency startup so the one-shot
 project Compose startup to run the bootstrap migration; respawns with an active
 release use migration-free recovery. It reapplies the rules before recovery. It
 retries while dockerd is unavailable and shares the deploy lock, so it does not
-start an old release during a rollout. OpenRC respawns the supervisor if it
-exits. Its output is sent to syslog with the `teagram-demo-stack` tag. Start and
-stop the stack with `rc-service teagram-demo-stack start|stop`; invoking Compose
-directly bypasses the ordering guarantee. The read-only `check` mode reports
-missing, duplicate, misordered or drifted hooks and chain rules without
-changing them.
+start an old release during a rollout. Firewall apply, repair and removal take
+a separate 30-second lock at `/run/teagram-demo-egress.lock`; callers already
+holding the deploy lock acquire it second, and it is the leaf in that order.
+OpenRC respawns the supervisor if it exits. Its output is sent to syslog with the
+`teagram-demo-stack` tag. Start and stop the stack with
+`rc-service teagram-demo-stack start|stop`; invoking Compose directly bypasses
+the ordering guarantee. The read-only `check` mode reports missing, duplicate,
+misordered or drifted hooks and chain rules without changing them or taking a
+lock.
 
 On Lima, run the probe as root after the Compose stack is up:
 

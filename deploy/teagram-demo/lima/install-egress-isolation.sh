@@ -9,6 +9,8 @@ readonly OPENRC_STACK_SERVICE=teagram-demo-stack
 readonly DOCKER_READY_TIMEOUT_SECONDS=60
 readonly DOCKER_INFO_PROBE_TIMEOUT_SECONDS=5
 readonly DOCKER_READY_ATTEMPTS=60
+readonly FIREWALL_LOCK_PATH=/run/teagram-demo-egress.lock
+readonly FIREWALL_LOCK_TIMEOUT_SECONDS=30
 readonly REPO_ROOT=/opt/teagram-demo
 readonly COMPOSE_FILE=/opt/teagram-demo/deploy/teagram-demo/lima/compose.yaml
 readonly COMPOSE_ENV_FILE=${TEAGRAM_DEMO_LIMA_ENV_FILE:-/var/lib/teagram-demo/lima.env}
@@ -42,6 +44,7 @@ MISSING_DEMO_NETWORKS=()
 CHAIN_LISTING=''
 STACK_LOCK_ACQUIRED=0
 STACK_LOCK_SKIPPED=0
+FIREWALL_LOCK_ACQUIRED=0
 
 fail() {
   printf 'demo egress isolation: %s\n' "$1" >&2
@@ -273,39 +276,6 @@ raise SystemExit(
 PY
 }
 
-move_listed_rule() {
-  local binary=$1 chain=$2 rule=$3 position=$4
-
-  python3 - "$binary" "$chain" "$rule" "$position" <<'PY'
-import shlex
-import subprocess
-import sys
-
-binary, chain, rule, position = sys.argv[1:]
-try:
-    fields = shlex.split(rule)
-except ValueError as error:
-    print(f"cannot parse listed firewall rule: {error}", file=sys.stderr)
-    raise SystemExit(1)
-if len(fields) < 3 or fields[:2] != ["-A", chain]:
-    print(f"unexpected listed firewall rule for {chain}: {rule}", file=sys.stderr)
-    raise SystemExit(1)
-specification = fields[2:]
-inserted = subprocess.run(
-    [binary, "-w", "10", "-I", chain, position, *specification],
-    check=False,
-)
-if inserted.returncode != 0:
-    raise SystemExit(inserted.returncode)
-raise SystemExit(
-    subprocess.run(
-        [binary, "-w", "10", "-D", chain, *specification],
-        check=False,
-    ).returncode
-)
-PY
-}
-
 rule_has_comment() {
   local rule=$1 comment=$2 quoted unquoted
   quoted="--comment \"$comment\""
@@ -313,6 +283,52 @@ rule_has_comment() {
   [[ "$rule" == *"$quoted"* \
     || "$rule" == *"$unquoted "* \
     || "$rule" == *"$unquoted" ]]
+}
+
+firewall_lock_path() {
+  printf '%s\n' "$FIREWALL_LOCK_PATH"
+}
+
+firewall_lock_timeout() {
+  printf '%s\n' "$FIREWALL_LOCK_TIMEOUT_SECONDS"
+}
+
+firewall_lock_acquire() {
+  local lock_path lock_dir timeout old_umask status
+
+  command -v flock >/dev/null 2>&1 || fail 'flock is required for firewall mutations'
+  lock_path=$(firewall_lock_path) || fail 'cannot determine the firewall mutation lock path'
+  lock_dir=$(dirname "$lock_path")
+  timeout=$(firewall_lock_timeout) || fail 'cannot determine the firewall mutation lock timeout'
+  [[ "$lock_path" == /* && -d $lock_dir && ! -L $lock_dir && ! -L $lock_path ]] \
+    || fail 'firewall mutation lock path must be an absolute file in a real directory'
+  [[ "$timeout" =~ ^[1-9][0-9]*$ ]] || fail 'firewall mutation lock timeout must be positive seconds'
+
+  # Lock order is deploy.lock (FD 9), then this leaf lock (FD 8). No other
+  # application lock may be acquired while holding the firewall lock.
+  old_umask=$(umask)
+  umask 077
+  exec 8>>"$lock_path" || fail 'cannot open the firewall mutation lock'
+  umask "$old_umask"
+  if flock -x -w "$timeout" -E 75 8; then
+    FIREWALL_LOCK_ACQUIRED=1
+    return 0
+  else
+    status=$?
+    exec 8>&-
+  fi
+  if (( status == 75 )); then
+    fail "timed out after ${timeout} seconds waiting for the firewall mutation lock"
+  fi
+  fail "cannot acquire the firewall mutation lock (exit $status)"
+}
+
+firewall_lock_release() {
+  if (( FIREWALL_LOCK_ACQUIRED == 1 )); then
+    flock -u 8 || fail 'cannot release the firewall mutation lock'
+    exec 8>&-
+    FIREWALL_LOCK_ACQUIRED=0
+  fi
 }
 
 apply_family() {
@@ -373,8 +389,8 @@ apply_family() {
 
 ensure_source_hooks() {
   local binary=$1 parent_chain=$2 hook_chain=$3 stale_chain=$4 interface=$5
-  local subnet index hook_index line prefix_matches=1 listing status
-  local hook_count=0 stale_count=0 hook_start=-1 matches
+  local subnet index line prefix_matches=1 listing status
+  local hook_count=0 stale_count=0
   local staging_comment="teagram-demo-stage-${BASHPID}"
   shift 5
   local -a subnets=("$@")
@@ -397,20 +413,6 @@ ensure_source_hooks() {
   fi
   mapfile -t parent_rules < <(sed -n "/^-A $parent_chain /p" <<<"$listing")
 
-  for ((index = 0; index <= ${#parent_rules[@]} - ${#expected_hooks[@]}; index++)); do
-    matches=1
-    for ((hook_index = 0; hook_index < ${#expected_hooks[@]}; hook_index++)); do
-      if [[ "${parent_rules[$((index + hook_index))]}" != "${expected_hooks[$hook_index]}" ]]; then
-        matches=0
-        break
-      fi
-    done
-    if (( matches == 1 )); then
-      hook_start=$index
-      break
-    fi
-  done
-
   for ((index = 0; index < ${#expected_hooks[@]}; index++)); do
     if [[ "${parent_rules[$index]:-}" != "${expected_hooks[$index]}" ]]; then
       prefix_matches=0
@@ -428,16 +430,6 @@ ensure_source_hooks() {
   done
 
   if (( prefix_matches == 1 && hook_count == ${#expected_hooks[@]} && stale_count == 0 )); then
-    return 0
-  fi
-
-  if (( hook_start > 0 && hook_count == ${#expected_hooks[@]} && stale_count == 0 )); then
-    # Keep the existing ordered hooks, moving only the rules ahead of them.
-    # This repairs Tailscale's FORWARD insertion without duplicating hooks.
-    for ((index = hook_start - 1; index >= 0; index--)); do
-      move_listed_rule "$binary" "$parent_chain" "${parent_rules[$index]}" \
-        "$(( index + ${#expected_hooks[@]} + 2 ))"
-    done
     return 0
   fi
 
@@ -868,6 +860,7 @@ require_repo_path() {
 apply_rules() {
   require_root
   wait_for_docker
+  firewall_lock_acquire
   command -v iptables >/dev/null 2>&1 || fail 'iptables is required on lima'
   command -v iptables-restore >/dev/null 2>&1 || fail 'iptables-restore is required on lima'
 
@@ -892,6 +885,7 @@ apply_rules() {
   else
     printf '%s\n' 'demo egress isolation rules installed'
   fi
+  firewall_lock_release
 }
 
 check_rules() {
@@ -930,9 +924,11 @@ ensure_firewall_rules_current() {
 
 remove_rules() {
   require_root
+  firewall_lock_acquire
   remove_family iptables
   remove_family ip6tables
   printf '%s\n' 'demo egress isolation rules removed'
+  firewall_lock_release
 }
 
 uninstall_openrc_services() {

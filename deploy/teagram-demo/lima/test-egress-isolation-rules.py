@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 
@@ -126,6 +127,10 @@ if tool.endswith("-restore"):
     raise SystemExit(0)
 
 operation = args[0]
+if operation in ("-I", "-D"):
+    operation_log = state_path.with_name("firewall-writes.jsonl")
+    with operation_log.open("a", encoding="utf-8") as writes:
+        writes.write(json.dumps({"tool": tool, "args": args}) + "\n")
 if operation == "-S":
     chain = args[1]
     if os.environ.get("TEAGRAM_TEST_LISTING_FAILURE") == f"{family}:{chain}":
@@ -187,6 +192,23 @@ elif operation == "-I":
         raise SystemExit(4)
     firewall[chain].insert(index, f"-A {chain} {' '.join(args[3:])}")
     save()
+    pause_target = os.environ.get("TEAGRAM_TEST_PAUSE_INSERT_TARGET")
+    pause_marker = os.environ.get("TEAGRAM_TEST_PAUSE_MARKER")
+    pause_release = os.environ.get("TEAGRAM_TEST_PAUSE_RELEASE")
+    if (
+        target == pause_target
+        and "--comment" in args
+        and pause_marker
+        and pause_release
+        and not pathlib.Path(pause_marker).exists()
+    ):
+        pathlib.Path(pause_marker).write_text("paused", encoding="utf-8")
+        deadline = time.monotonic() + 30
+        while not pathlib.Path(pause_release).exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if not pathlib.Path(pause_release).exists():
+            print(f"{tool}: timed out waiting for test release", file=sys.stderr)
+            raise SystemExit(5)
 elif operation == "-D":
     chain = args[1]
     if chain not in firewall:
@@ -326,7 +348,7 @@ class EgressIsolationRuleTests(unittest.TestCase):
             ]
         return subprocess.run(command, capture_output=True, text=True, env=env)
 
-    def _run_apply_rules_function(
+    def _apply_rules_invocation(
         self,
         mock_bin: pathlib.Path,
         state_file: pathlib.Path,
@@ -335,8 +357,14 @@ class EgressIsolationRuleTests(unittest.TestCase):
         interleave_rule_change: bool = False,
         fail_insert_target: str = "",
         fail_insert_mode: str = "first",
-    ) -> subprocess.CompletedProcess[str]:
+        lock_path: pathlib.Path | None = None,
+        lock_timeout_seconds: int = 5,
+        pause_insert_target: str = "",
+        pause_marker: pathlib.Path | None = None,
+        pause_release: pathlib.Path | None = None,
+    ) -> tuple[list[str], dict[str, str]]:
         env = os.environ.copy()
+        lock_path = lock_path or state_file.with_name("firewall.lock")
         env.update(
             {
                 "PATH": os.pathsep.join((str(mock_bin), env.get("PATH", ""))),
@@ -347,6 +375,11 @@ class EgressIsolationRuleTests(unittest.TestCase):
                 "TEAGRAM_TEST_INTERLEAVE_RULE_CHANGE": "1" if interleave_rule_change else "0",
                 "TEAGRAM_TEST_FAIL_INSERT_TARGET": fail_insert_target,
                 "TEAGRAM_TEST_FAIL_INSERT_MODE": fail_insert_mode,
+                "TEAGRAM_TEST_FIREWALL_LOCK_PATH": str(lock_path),
+                "TEAGRAM_TEST_FIREWALL_LOCK_TIMEOUT": str(lock_timeout_seconds),
+                "TEAGRAM_TEST_PAUSE_INSERT_TARGET": pause_insert_target,
+                "TEAGRAM_TEST_PAUSE_MARKER": str(pause_marker or ""),
+                "TEAGRAM_TEST_PAUSE_RELEASE": str(pause_release or ""),
                 "TEAGRAM_TEST_DOCKER_READY_AFTER": str(docker_ready_after),
                 "TEAGRAM_TEST_DOCKER_INFO_MODE": docker_info_mode,
                 "TEAGRAM_TEST_DOCKER_INFO_COUNT": str(
@@ -357,18 +390,48 @@ class EgressIsolationRuleTests(unittest.TestCase):
                 ),
             }
         )
-        return subprocess.run(
-            [
-                "bash",
-                "-c",
-                'source "$1"; require_root() { :; }; apply_rules',
-                "test-apply-rules",
-                str(SCRIPT),
-            ],
-            capture_output=True,
-            text=True,
-            env=env,
+        command = [
+            "bash",
+            "-c",
+            'source "$1"; require_root() { :; }; '
+            'firewall_lock_path() { printf \'%s\\n\' "$TEAGRAM_TEST_FIREWALL_LOCK_PATH"; }; '
+            'firewall_lock_timeout() { printf \'%s\\n\' "$TEAGRAM_TEST_FIREWALL_LOCK_TIMEOUT"; }; '
+            "apply_rules",
+            "test-apply-rules",
+            str(SCRIPT),
+        ]
+        return command, env
+
+    def _run_apply_rules_function(
+        self,
+        mock_bin: pathlib.Path,
+        state_file: pathlib.Path,
+        docker_ready_after: int,
+        docker_info_mode: str = "ready",
+        interleave_rule_change: bool = False,
+        fail_insert_target: str = "",
+        fail_insert_mode: str = "first",
+        lock_path: pathlib.Path | None = None,
+        lock_timeout_seconds: int = 5,
+        pause_insert_target: str = "",
+        pause_marker: pathlib.Path | None = None,
+        pause_release: pathlib.Path | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        command, env = self._apply_rules_invocation(
+            mock_bin,
+            state_file,
+            docker_ready_after,
+            docker_info_mode=docker_info_mode,
+            interleave_rule_change=interleave_rule_change,
+            fail_insert_target=fail_insert_target,
+            fail_insert_mode=fail_insert_mode,
+            lock_path=lock_path,
+            lock_timeout_seconds=lock_timeout_seconds,
+            pause_insert_target=pause_insert_target,
+            pause_marker=pause_marker,
+            pause_release=pause_release,
         )
+        return subprocess.run(command, capture_output=True, text=True, env=env)
 
     def _run_wait_for_docker_function(
         self,
@@ -618,6 +681,8 @@ stack_supervise
 source "$1"
 require_root() { :; }
 require_repo_path() { :; }
+firewall_lock_path() { printf '%s\n' "$TEAGRAM_TEST_FIREWALL_LOCK_PATH"; }
+firewall_lock_timeout() { printf '%s\n' "$TEAGRAM_TEST_FIREWALL_LOCK_TIMEOUT"; }
 stack_lock_try() { STACK_LOCK_SKIPPED=0; STACK_LOCK_ACQUIRED=0; }
 stack_start_locked() { :; }
 stack_reconcile_locked() { :; }
@@ -639,6 +704,10 @@ stack_supervise
                     "TEAGRAM_TEST_FIREWALL_STATE": str(state_file),
                     "TEAGRAM_TEST_DOCKER_READY_AFTER": "1",
                     "TEAGRAM_TEST_DOCKER_INFO_MODE": "ready",
+                    "TEAGRAM_TEST_FIREWALL_LOCK_PATH": str(
+                        state_file.with_name("firewall.lock")
+                    ),
+                    "TEAGRAM_TEST_FIREWALL_LOCK_TIMEOUT": "5",
                     "TEAGRAM_TEST_DOCKER_INFO_COUNT": str(
                         state_file.with_name("docker-info-count")
                     ),
@@ -674,7 +743,7 @@ stack_supervise
                 capture_output=True,
                 text=True,
                 env=env,
-                timeout=8,
+                timeout=30,
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -924,6 +993,160 @@ stack_supervise
                     )
                 ],
             )
+
+    def test_shadowed_hook_repair_does_not_write_foreign_rules(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            mock_bin, state_file = self._mock_firewall(directory)
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+            foreign_rules = [
+                "-A FORWARD -m comment --comment tailscale-owner -j ts-forward",
+                "-A FORWARD -j ACCEPT",
+                "-A FORWARD -j DOCKER-USER",
+                "-A FORWARD -j RETURN",
+            ]
+            subnets = (
+                "198.18.130.0/24",
+                "198.18.132.0/24",
+                "198.18.133.0/24",
+            )
+            existing_hooks = [
+                f"-A FORWARD -s {subnet} -j {IPTABLES_CHAIN}"
+                for subnet in subnets
+            ]
+            state["iptables"]["FORWARD"] = foreign_rules[:2] + existing_hooks + foreign_rules[2:]
+            state_file.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+
+            result = self._run_apply_rules_function(
+                mock_bin,
+                state_file,
+                docker_ready_after=1,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            after = json.loads(state_file.read_text(encoding="utf-8"))
+            self.assertEqual(
+                after["iptables"]["FORWARD"],
+                existing_hooks + foreign_rules,
+            )
+            writes = [
+                json.loads(line)
+                for line in state_file.with_name("firewall-writes.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            for write in writes:
+                with self.subTest(args=write["args"]):
+                    target = write["args"][write["args"].index("-j") + 1]
+                    self.assertIn(target, (IPTABLES_CHAIN, INPUT_CHAIN))
+
+    def test_second_apply_cannot_disturb_an_in_progress_rebuild(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            mock_bin, state_file = self._mock_firewall(directory)
+            lock_path = pathlib.Path(directory) / "firewall.lock"
+            pause_marker = pathlib.Path(directory) / "first-apply-paused"
+            pause_release = pathlib.Path(directory) / "release-first-apply"
+            command, env = self._apply_rules_invocation(
+                mock_bin,
+                state_file,
+                docker_ready_after=1,
+                lock_path=lock_path,
+                lock_timeout_seconds=2,
+                pause_insert_target=IPTABLES_CHAIN,
+                pause_marker=pause_marker,
+                pause_release=pause_release,
+            )
+            first_apply = subprocess.Popen(
+                command,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                deadline = time.monotonic() + 10
+                while not pause_marker.exists() and time.monotonic() < deadline:
+                    if first_apply.poll() is not None:
+                        stdout, stderr = first_apply.communicate()
+                        self.fail(
+                            f"first apply exited before pausing: {stdout}\n{stderr}"
+                        )
+                    time.sleep(0.01)
+                self.assertTrue(pause_marker.exists(), "first apply did not pause in rebuild")
+
+                during_rebuild = state_file.read_bytes()
+                writes_path = state_file.with_name("firewall-writes.jsonl")
+                writes_during_rebuild = writes_path.read_bytes()
+                second_apply = self._run_apply_rules_function(
+                    mock_bin,
+                    state_file,
+                    docker_ready_after=1,
+                    lock_path=lock_path,
+                    lock_timeout_seconds=1,
+                )
+
+                self.assertNotEqual(second_apply.returncode, 0)
+                self.assertIn("timed out after 1 seconds", second_apply.stderr)
+                self.assertEqual(state_file.read_bytes(), during_rebuild)
+                self.assertEqual(writes_path.read_bytes(), writes_during_rebuild)
+            finally:
+                pause_release.touch()
+                stdout, stderr = first_apply.communicate(timeout=30)
+
+            self.assertEqual(first_apply.returncode, 0, f"{stdout}\n{stderr}")
+            final_state = json.loads(state_file.read_text(encoding="utf-8"))
+            for family in ("iptables", "ip6tables"):
+                for chain in final_state[family].values():
+                    self.assertFalse(
+                        any("teagram-demo-stage-" in rule for rule in chain)
+                    )
+            expected_forward = [
+                f"-A FORWARD -s {subnet} -j {IPTABLES_CHAIN}"
+                for subnet in (
+                    "198.18.130.0/24",
+                    "198.18.132.0/24",
+                    "198.18.133.0/24",
+                )
+            ]
+            self.assertEqual(final_state["iptables"]["FORWARD"][:3], expected_forward)
+
+    def test_check_does_not_acquire_firewall_mutation_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            mock_bin, state_file = self._mock_firewall(directory)
+            lock_path = pathlib.Path(directory) / "firewall.lock"
+            apply = self._run_apply_rules_function(
+                mock_bin,
+                state_file,
+                docker_ready_after=1,
+                lock_path=lock_path,
+            )
+            self.assertEqual(apply.returncode, 0, apply.stderr)
+
+            _, env = self._apply_rules_invocation(
+                mock_bin,
+                state_file,
+                docker_ready_after=1,
+                lock_path=lock_path,
+            )
+            lock_marker = pathlib.Path(directory) / "check-acquired-lock"
+            env["TEAGRAM_TEST_LOCK_MARKER"] = str(lock_marker)
+            check = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1"; require_root() { :; }; '
+                    'firewall_lock_acquire() { : > "$TEAGRAM_TEST_LOCK_MARKER"; }; '
+                    'firewall_lock_release() { : > "$TEAGRAM_TEST_LOCK_MARKER"; }; '
+                    "check_rules",
+                    "test-check-rules",
+                    str(SCRIPT),
+                ],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+            self.assertEqual(check.returncode, 0, check.stderr)
+            self.assertFalse(lock_marker.exists())
 
     def test_apply_keeps_existing_hooks_when_staging_insert_fails(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

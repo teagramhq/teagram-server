@@ -44,9 +44,16 @@ these rules and is outside this policy's protection.
 - Firewall apply and removal delete listed hooks by exact rule specification.
   If Docker or Tailscale changes another rule between inspection and deletion,
   the update cannot remove that unrelated rule by a stale line number.
+- Shadowed-hook repair stages and replaces only demo-owned hooks at the start
+  of parent chains; it preserves the content and order of Docker, Tailscale and
+  host rules.
 - During a hook rebuild, temporary source-scoped hooks reach the same isolation
   chains before stale hooks are removed. A failed replacement insert therefore
   leaves an active hook in place until the stable prefix is installed.
+- Apply, supervisor repair and removal serialize through a bounded lock at
+  `/run/teagram-demo-egress.lock`; read-only `check` takes no lock. Callers
+  holding the shared deploy lock acquire this leaf lock second, and no other
+  application lock is acquired while it is held.
 
 ## Verification and residual risk
 
