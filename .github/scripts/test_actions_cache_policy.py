@@ -26,6 +26,9 @@ class ActionsCachePolicyTests(unittest.TestCase):
         workflow = WORKFLOW.read_text(encoding="utf-8")
 
         test_jobs = ("test-go", "test-go-e2e", "test-go-fleet-cap")
+        artifact_output = (
+            "build_cache_artifact_id: ${{ steps.upload_go_build_cache.outputs.artifact-id }}"
+        )
         artifact_name = (
             "go-build-cache-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}"
         )
@@ -39,6 +42,8 @@ class ActionsCachePolicyTests(unittest.TestCase):
             with self.subTest(job=job_name):
                 self.assertIn("uses: actions/cache/restore@v6.1.0", body)
                 self.assertIn("name: Upload Go build cache snapshot", body)
+                self.assertIn("id: upload_go_build_cache", body)
+                self.assertIn(artifact_output, body)
                 self.assertIn(f"name: {artifact_name}", body)
                 self.assertIn("path: ~/.cache/go-build", body)
                 self.assertIn("retention-days: 1", body)
@@ -61,14 +66,44 @@ class ActionsCachePolicyTests(unittest.TestCase):
         ):
             self.assertIn(f"{env_name}: ${{{{ needs.{job_name}.result }}}}", eligibility)
             self.assertIn(f'"${env_name}" == "success"', eligibility)
+        for job_name, env_name in (
+            ("test-go", "TEST_GO_CACHE_ARTIFACT_ID"),
+            ("test-go-e2e", "TEST_GO_E2E_CACHE_ARTIFACT_ID"),
+            ("test-go-fleet-cap", "TEST_GO_FLEET_CAP_CACHE_ARTIFACT_ID"),
+        ):
+            self.assertIn(
+                f"{env_name}: ${{{{ needs.{job_name}.outputs.build_cache_artifact_id }}}}",
+                eligibility,
+            )
+        self.assertIn(
+            'for artifact_id in "$TEST_GO_CACHE_ARTIFACT_ID" '
+            '"$TEST_GO_E2E_CACHE_ARTIFACT_ID" "$TEST_GO_FLEET_CAP_CACHE_ARTIFACT_ID"; do',
+            eligibility,
+        )
+        self.assertIn('[[ ! "$artifact_id" =~ ^[0-9]+$ ]]', eligibility)
+        for first, second in (
+            ("TEST_GO_CACHE_ARTIFACT_ID", "TEST_GO_E2E_CACHE_ARTIFACT_ID"),
+            ("TEST_GO_CACHE_ARTIFACT_ID", "TEST_GO_FLEET_CAP_CACHE_ARTIFACT_ID"),
+            ("TEST_GO_E2E_CACHE_ARTIFACT_ID", "TEST_GO_FLEET_CAP_CACHE_ARTIFACT_ID"),
+        ):
+            self.assertIn(f'"${first}" == "${second}"', eligibility)
         self.assertIn('"$GITHUB_REF" == "refs/heads/main"', eligibility)
         self.assertIn("steps.eligibility.outputs.eligible == 'true'", cache_body)
         self.assertIn("uses: actions/cache/restore@v6.1.0", cache_body)
-        self.assertIn("uses: actions/download-artifact@v8.0.2", cache_body)
-        self.assertIn("pattern: go-build-cache-${{ github.run_id }}-${{ github.run_attempt }}-*", cache_body)
-        self.assertIn("merge-multiple: true", cache_body)
+        self.assertEqual(cache_body.count("uses: actions/download-artifact@v8.0.2"), 3)
+        self.assertNotIn("pattern: go-build-cache-", cache_body)
+        for job_name in test_jobs:
+            self.assertIn(f"- name: Download Go build cache from {job_name}", cache_body)
+            self.assertIn(
+                f"artifact-ids: ${{{{ needs.{job_name}.outputs.build_cache_artifact_id }}}}",
+                cache_body,
+            )
+            self.assertLess(
+                cache_body.index(f"- name: Download Go build cache from {job_name}"),
+                cache_body.index("- name: Prune previous Go build snapshots"),
+            )
         self.assertLess(
-            cache_body.index("uses: actions/download-artifact@v8.0.2"),
+            cache_body.index("- name: Download Go build cache from test-go-fleet-cap"),
             cache_body.index("- name: Prune previous Go build snapshots"),
         )
         self.assertLess(

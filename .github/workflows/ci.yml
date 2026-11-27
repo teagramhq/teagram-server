@@ -575,6 +575,8 @@ jobs:
 
   test-go:
     name: 'test: go'
+    outputs:
+      build_cache_artifact_id: ${{ steps.upload_go_build_cache.outputs.artifact-id }}
     if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     permissions:
@@ -830,6 +832,7 @@ jobs:
           free -m
 
       - name: Upload Go build cache snapshot
+        id: upload_go_build_cache
         if: ${{ success() && github.ref == 'refs/heads/main' }}
         uses: actions/upload-artifact@v7.0.1
         with:
@@ -840,6 +843,8 @@ jobs:
 
   test-go-e2e:
     name: 'test: go-e2e'
+    outputs:
+      build_cache_artifact_id: ${{ steps.upload_go_build_cache.outputs.artifact-id }}
     if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     timeout-minutes: 40
@@ -891,6 +896,7 @@ jobs:
           free -m
 
       - name: Upload Go build cache snapshot
+        id: upload_go_build_cache
         if: ${{ success() && github.ref == 'refs/heads/main' }}
         uses: actions/upload-artifact@v7.0.1
         with:
@@ -901,6 +907,8 @@ jobs:
 
   test-go-fleet-cap:
     name: 'test: go-fleet-cap'
+    outputs:
+      build_cache_artifact_id: ${{ steps.upload_go_build_cache.outputs.artifact-id }}
     needs:
       - test-go
       - test-go-e2e
@@ -958,6 +966,7 @@ jobs:
           free -m
 
       - name: Upload Go build cache snapshot
+        id: upload_go_build_cache
         if: ${{ success() && github.ref == 'refs/heads/main' }}
         uses: actions/upload-artifact@v7.0.1
         with:
@@ -986,11 +995,26 @@ jobs:
           TEST_GO_RESULT: ${{ needs.test-go.result }}
           TEST_GO_E2E_RESULT: ${{ needs.test-go-e2e.result }}
           TEST_GO_FLEET_CAP_RESULT: ${{ needs.test-go-fleet-cap.result }}
+          TEST_GO_CACHE_ARTIFACT_ID: ${{ needs.test-go.outputs.build_cache_artifact_id }}
+          TEST_GO_E2E_CACHE_ARTIFACT_ID: ${{ needs.test-go-e2e.outputs.build_cache_artifact_id }}
+          TEST_GO_FLEET_CAP_CACHE_ARTIFACT_ID: ${{ needs.test-go-fleet-cap.outputs.build_cache_artifact_id }}
         run: |
           if [[ "$GITHUB_REF" == "refs/heads/main" &&
                 "$TEST_GO_RESULT" == "success" &&
                 "$TEST_GO_E2E_RESULT" == "success" &&
                 "$TEST_GO_FLEET_CAP_RESULT" == "success" ]]; then
+            for artifact_id in "$TEST_GO_CACHE_ARTIFACT_ID" "$TEST_GO_E2E_CACHE_ARTIFACT_ID" "$TEST_GO_FLEET_CAP_CACHE_ARTIFACT_ID"; do
+              if [[ ! "$artifact_id" =~ ^[0-9]+$ ]]; then
+                echo "::error::missing valid Go build cache artifact ID"
+                exit 1
+              fi
+            done
+            if [[ "$TEST_GO_CACHE_ARTIFACT_ID" == "$TEST_GO_E2E_CACHE_ARTIFACT_ID" ||
+                  "$TEST_GO_CACHE_ARTIFACT_ID" == "$TEST_GO_FLEET_CAP_CACHE_ARTIFACT_ID" ||
+                  "$TEST_GO_E2E_CACHE_ARTIFACT_ID" == "$TEST_GO_FLEET_CAP_CACHE_ARTIFACT_ID" ]]; then
+              echo "::error::Go build cache artifact IDs must be distinct"
+              exit 1
+            fi
             echo "eligible=true" >> "$GITHUB_OUTPUT"
           fi
 
@@ -1008,16 +1032,31 @@ jobs:
           key: go-build-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: go-build-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-
 
-      - name: Merge Go build cache snapshots from all test jobs
+      # Download each snapshot by itself. A multi-ID request can warn and still
+      # succeed when one ID is absent, so each action must resolve one artifact.
+      - name: Download Go build cache from test-go
         if: ${{ steps.eligibility.outputs.eligible == 'true' }}
         uses: actions/download-artifact@v8.0.2
         with:
-          pattern: go-build-cache-${{ github.run_id }}-${{ github.run_attempt }}-*
+          artifact-ids: ${{ needs.test-go.outputs.build_cache_artifact_id }}
           path: ~/.cache/go-build
-          merge-multiple: true
 
-      # Wait for every Go suite before pruning so a failing suite cannot replace
-      # the last complete snapshot with a cache that omits its build outputs.
+      - name: Download Go build cache from test-go-e2e
+        if: ${{ steps.eligibility.outputs.eligible == 'true' }}
+        uses: actions/download-artifact@v8.0.2
+        with:
+          artifact-ids: ${{ needs.test-go-e2e.outputs.build_cache_artifact_id }}
+          path: ~/.cache/go-build
+
+      - name: Download Go build cache from test-go-fleet-cap
+        if: ${{ steps.eligibility.outputs.eligible == 'true' }}
+        uses: actions/download-artifact@v8.0.2
+        with:
+          artifact-ids: ${{ needs.test-go-fleet-cap.outputs.build_cache_artifact_id }}
+          path: ~/.cache/go-build
+
+      # These single-ID downloads fail if any snapshot is absent. Keep pruning
+      # after all three so a partial rerun cannot save an incomplete cache.
       - name: Prune previous Go build snapshots
         if: ${{ steps.eligibility.outputs.eligible == 'true' }}
         env:
