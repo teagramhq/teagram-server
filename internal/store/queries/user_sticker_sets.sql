@@ -290,19 +290,18 @@ visible_channels AS MATERIALIZED (
     SELECT cm.entities
     FROM visible_channels vc
     CROSS JOIN LATERAL (
-        SELECT cm.entities
+        SELECT cm.entities, cm.local_id
         FROM channel_messages cm
         WHERE cm.channel_id = vc.channel_id
-          AND cm.local_id > vc.available_min_id
           AND cm.deleted = false
           AND cm.entities IS NOT NULL
           AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
           AND cardinality(message_custom_emoji_document_ids(cm.entities)) > 0
           AND message_custom_emoji_document_ids(cm.entities) && sqlc.arg(file_ids)::text[]
-        -- Keep channel_id parameterized in any document-ID index lookup, and
-        -- apply the floor here so the primary-key range can bound old history.
+        -- Keep the channel/document GIN lookup per visible channel.
         OFFSET 0
     ) AS cm
+    WHERE cm.local_id > vc.available_min_id
 ), visible_entities AS (
     SELECT m.entities
     FROM messages m

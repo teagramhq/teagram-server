@@ -254,17 +254,11 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 		 FROM generate_series(1, 20000) AS n`, args: []any{peerID, ownerID}},
 		{query: "ALTER TABLE messages ENABLE TRIGGER USER"},
 		{query: "ALTER TABLE channel_messages DISABLE TRIGGER USER"},
-		// A popular requested ID appears throughout the hidden part of this
-		// member's channel history; the floor must keep that history out of the scan.
 		{query: `INSERT INTO channel_messages (channel_id, local_id, from_id, message, entities)
 		 SELECT $1, n, $2, 'visible scale emoji',
 		        jsonb_build_object('version', 1, 'entities', jsonb_build_array(jsonb_build_object(
 		            'type', 18, 'offset', 0, 'length', 1,
-		            'argument', CASE
-		                WHEN n <= 99 THEN 1000100 + n
-		                WHEN n <= $3 THEN 1000200
-		                ELSE 1000100 + n - $3
-		            END
+		            'argument', CASE WHEN n <= $3 THEN 30000000 + n ELSE 1000100 + n - $3 END
 		        )))
 		 FROM generate_series(1, 20000) AS n`, args: []any{visibleChannelID, ownerID, visibleChannelHistoryFloor}},
 		{query: `INSERT INTO channel_messages (channel_id, local_id, from_id, message, entities)
@@ -287,7 +281,7 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 			statsTarget,
 		)},
 		{query: fmt.Sprintf(
-			"ALTER INDEX channel_messages_floor_custom_emoji_document_ids_gin_idx ALTER COLUMN 3 SET STATISTICS %d",
+			"ALTER INDEX channel_messages_channel_custom_emoji_document_ids_gin_idx ALTER COLUMN 2 SET STATISTICS %d",
 			statsTarget,
 		)},
 		{query: "ANALYZE messages"},
@@ -307,7 +301,7 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 		{relation: "messages_owner_custom_emoji_document_ids_gin_idx", attnum: 2},
 		{relation: "channel_messages", attnum: 1},
 		{relation: "channel_messages", attnum: 2},
-		{relation: "channel_messages_floor_custom_emoji_document_ids_gin_idx", attnum: 3},
+		{relation: "channel_messages_channel_custom_emoji_document_ids_gin_idx", attnum: 2},
 	} {
 		var target int
 		if err := pool.QueryRow(ctx, `
@@ -380,17 +374,17 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 	if err := json.Unmarshal(raw, &plans); err != nil {
 		t.Fatalf("decode historical emoji plan: %v", err)
 	}
-	// Both branches use scoped document indexes. The channel index also applies
-	// the member's history floor while generating candidates.
+	// Both branches use scoped document indexes. The channel GIN lookup is
+	// parameterized by visible channel; the history floor filters its candidates.
 	if !plans[0].Plan.usesIndex("messages_owner_custom_emoji_document_ids_gin_idx") {
 		t.Errorf("historical emoji plan does not use the private-message GIN index: %s", strings.Join(plans[0].Plan.accessSummary(), "; "))
 	}
-	if !plans[0].Plan.usesIndex("channel_messages_floor_custom_emoji_document_ids_gin_idx") {
-		t.Errorf("historical emoji plan does not use the channel history GIN index: %s", strings.Join(plans[0].Plan.accessSummary(), "; "))
+	if !plans[0].Plan.usesIndex("channel_messages_channel_custom_emoji_document_ids_gin_idx") {
+		t.Errorf("historical emoji plan does not use the channel/document GIN index: %s", strings.Join(plans[0].Plan.accessSummary(), "; "))
 	}
 	for _, index := range []string{
 		"messages_owner_custom_emoji_document_ids_gin_idx",
-		"channel_messages_floor_custom_emoji_document_ids_gin_idx",
+		"channel_messages_channel_custom_emoji_document_ids_gin_idx",
 	} {
 		var predicate string
 		if err := pool.QueryRow(ctx, `
@@ -415,6 +409,7 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 			t.Errorf("historical emoji plan read %.0f %s rows for %d IDs: %s", rows, table, len(planFileIDs), strings.Join(plans[0].Plan.accessSummary(), "; "))
 		}
 	}
+
 }
 
 func TestPollCustomEmojiLookupsStartFromRequestedIDsAtScale(t *testing.T) {
