@@ -259,6 +259,38 @@ class ActionsCachePolicyTests(unittest.TestCase):
         self.assertLess(body.index("- name: Run Playwright tests"), body.index("- name: Save Go modules cache"))
         self.assertNotIn("hashFiles('**/go.sum')", save_body)
 
+    def test_e2e_admin_go_build_cache_restores_from_go_sum_prefix_without_save(
+        self,
+    ) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        job = re.search(
+            r"(?ms)^  test-e2e-admin:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+            workflow,
+        )
+        self.assertIsNotNone(job, "missing e2e-admin job")
+        body = job.group("body")
+
+        restore = re.search(
+            r"(?ms)^      - name: Restore Go build cache\n"
+            r"(?P<body>.*?)(?=^      - name:|\Z)",
+            body,
+        )
+        self.assertIsNotNone(restore, "Go build cache restore step is missing")
+        restore_body = restore.group("body")
+        self.assertIn("uses: actions/cache/restore@v6.1.0", restore_body)
+        self.assertIn("path: ~/.cache/go-build", restore_body)
+        self.assertIn(
+            "key: go-build-v2-${{ runner.os }}-"
+            "${{ hashFiles('**/go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}",
+            restore_body,
+        )
+        self.assertIn(
+            "restore-keys: go-build-v2-${{ runner.os }}-"
+            "${{ hashFiles('**/go.sum') }}-",
+            restore_body,
+        )
+        self.assertEqual(body.count("path: ~/.cache/go-build"), 1)
+
     def test_repeated_main_saves_keep_one_go_build_snapshot(self) -> None:
         caches = [
             {"id": 10, "key": "go-build-Linux-old-hash-1-1", "ref": "refs/heads/main"},
