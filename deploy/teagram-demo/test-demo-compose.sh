@@ -469,6 +469,8 @@ DOCKER
   jq -e '
     .services["edge-tailnet"] != null
     and .services.teagramd.environment.TG_WEBSOCKET_ALLOWED_ORIGINS == "https://web.teagram.io,https://demo.teagram.io,https://teagram-dev.tailaa4918.ts.net"
+    and .services.teagramd.environment.TG_TURNSTILE_HOSTNAMES == "web.teagram.io,demo.teagram.io,teagram-dev.tailaa4918.ts.net"
+    and .services["teagramd-next"].environment.TG_TURNSTILE_HOSTNAMES == "web.teagram.io,demo.teagram.io,teagram-dev.tailaa4918.ts.net"
   ' "$TMP_DIR/tailnet-maintenance-recreate.json" >/dev/null
 )
 

@@ -12,13 +12,15 @@ PAIR_KEY_OUTPUT=
 AUTH_PROGRESS_PREBASELINE_CONTROLS=0
 GUEST_SIGNUP=0
 GUEST_SIGNUP_GATE_OFF=0
+GUEST_SIGNUP_TAILNET=0
 
 usage() {
 	cat >&2 <<'EOF'
-usage: run.sh --server-revision <40-char-sha> --web-revision <40-char-sha> --run-id <32-char-hex> [--auth-progress --auth-progress-output <path> | --auth-controls | --guest-signup [--guest-signup-gate-off]] [--auth-progress-prebaseline-controls] [--pair-key-input <tmpfs-path> | --pair-key-output <tmpfs-path>]
+usage: run.sh --server-revision <40-char-sha> --web-revision <40-char-sha> --run-id <32-char-hex> [--auth-progress --auth-progress-output <path> | --auth-controls | --guest-signup [--guest-signup-gate-off] [--guest-signup-tailnet]] [--auth-progress-prebaseline-controls] [--pair-key-input <tmpfs-path> | --pair-key-output <tmpfs-path>]
 
-The fixture always uses https://teagramd.test and wss://teagramd.test/apiws.
-It does not accept endpoints, environment files, or production credentials.
+The fixture normally uses teagramd.test; tailnet guest-signup mode uses the
+fixed teagram-dev.tailaa4918.ts.net hostname. It does not accept arbitrary
+endpoints, environment files, or production credentials.
 EOF
 }
 
@@ -59,6 +61,10 @@ while (($#)); do
 			GUEST_SIGNUP_GATE_OFF=1
 			shift
 			;;
+		--guest-signup-tailnet)
+			GUEST_SIGNUP_TAILNET=1
+			shift
+			;;
 		--auth-progress-prebaseline-controls)
 			AUTH_PROGRESS_PREBASELINE_CONTROLS=1
 			shift
@@ -97,6 +103,10 @@ if ((GUEST_SIGNUP)) && ((AUTH_PROGRESS || AUTH_CONTROLS || AUTH_PROGRESS_PREBASE
 fi
 if ((GUEST_SIGNUP_GATE_OFF)) && ((GUEST_SIGNUP == 0)); then
 	printf 'guest signup gate-off mode requires --guest-signup\n' >&2
+	exit 2
+fi
+if ((GUEST_SIGNUP_TAILNET)) && ((GUEST_SIGNUP == 0 || GUEST_SIGNUP_GATE_OFF == 1)); then
+	printf 'guest signup tailnet mode requires sign-in-gated --guest-signup\n' >&2
 	exit 2
 fi
 if ((AUTH_PROGRESS)); then
@@ -158,4 +168,4 @@ done < <(env)
 
 printf 'fixture argument validation passed\n' >&2
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
-exec bash "$SCRIPT_DIR/start.sh" "$SERVER_REVISION" "$WEB_REVISION" "$RUN_ID" "$AUTH_PROGRESS" "$AUTH_CONTROLS" "$AUTH_PROGRESS_OUTPUT" "$PAIR_KEY_INPUT" "$PAIR_KEY_OUTPUT" "$AUTH_PROGRESS_PREBASELINE_CONTROLS" "$GUEST_SIGNUP" "$GUEST_SIGNUP_GATE_OFF"
+exec bash "$SCRIPT_DIR/start.sh" "$SERVER_REVISION" "$WEB_REVISION" "$RUN_ID" "$AUTH_PROGRESS" "$AUTH_CONTROLS" "$AUTH_PROGRESS_OUTPUT" "$PAIR_KEY_INPUT" "$PAIR_KEY_OUTPUT" "$AUTH_PROGRESS_PREBASELINE_CONTROLS" "$GUEST_SIGNUP" "$GUEST_SIGNUP_GATE_OFF" "$GUEST_SIGNUP_TAILNET"

@@ -2,10 +2,12 @@ services:
   teagramd:
     environment:
       TG_WEBSOCKET_ALLOWED_ORIGINS: https://web.teagram.io,https://demo.teagram.io,https://teagram-dev.tailaa4918.ts.net
+      TG_TURNSTILE_HOSTNAMES: web.teagram.io,demo.teagram.io,teagram-dev.tailaa4918.ts.net
 
   teagramd-next:
     environment:
       TG_WEBSOCKET_ALLOWED_ORIGINS: https://web.teagram.io,https://demo.teagram.io,https://teagram-dev.tailaa4918.ts.net
+      TG_TURNSTILE_HOSTNAMES: web.teagram.io,demo.teagram.io,teagram-dev.tailaa4918.ts.net
 
   edge-tailnet:
     profiles: [demo]

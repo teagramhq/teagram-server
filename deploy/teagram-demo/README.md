@@ -115,6 +115,9 @@ mounted into teagramd and the isolated `demo-probe` service for the deploy-time
 signup-action check; the probe never prints the token. The demo sets
 `TG_TURNSTILE_HOSTNAMES=web.teagram.io,demo.teagram.io` and
 `TG_ADVERTISE_DEMO_GUEST_SIGN_UP=true` so web.teagram.io advertises demo signup.
+The opt-in dev tailnet overlay adds `teagram-dev.tailaa4918.ts.net` to the
+Turnstile hostname allowlist for both server slots so first-use guest signup
+works from the tailnet page.
 `TG_DEMO_GENERAL_CHAT_ENABLED=true` makes the API seed a single `General`
 supergroup owned by `demo_seed_owner` and attempts to add new sign-ups as a
 best-effort post-signup step. The seeder adds the precreated demo guest accounts

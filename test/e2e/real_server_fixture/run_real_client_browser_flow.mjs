@@ -277,9 +277,10 @@ function writeOutputs(values) {
   appendFileSync(outputPath, `${Object.entries(values).map(([key, value]) => `${key}=${String(value).replace(/[\r\n]/g, '')}`).join('\n')}\n`);
 }
 
-function writeSummary({status, serverRevision, webRevision, headRevision, testedRevision, runId, elapsedMs, cleanupVerified, traceReady, traceDirectory, summaryPath, guestSignupOnly, guestSignupGateOff, guestSignupQaBypass, selectedScenarios, messageAckTraceEvidence}) {
+function writeSummary({status, serverRevision, webRevision, headRevision, testedRevision, runId, elapsedMs, cleanupVerified, traceReady, traceDirectory, summaryPath, guestSignupOnly, guestSignupGateOff, guestSignupTailnet, guestSignupQaBypass, selectedScenarios, messageAckTraceEvidence}) {
   const scenarios = guestSignupOnly ? (guestSignupGateOff ?
-    (guestSignupQaBypass ? ['guest-signup-gate-off-qa-bypass'] : ['guest-signup-gate-off']) : [GUEST_SIGNUP_SCENARIOS]) : selectedScenarios;
+    (guestSignupQaBypass ? ['guest-signup-gate-off-qa-bypass'] : ['guest-signup-gate-off']) :
+    (guestSignupTailnet ? ['guest-signup-tailnet'] : [GUEST_SIGNUP_SCENARIOS])) : selectedScenarios;
   const result = {
     status,
     runId,
@@ -357,6 +358,11 @@ async function main() {
   }
   const guestSignupOnly = guestSignupOnlyValue === '1';
   const guestSignupGateOff = guestSignupGateOffValue === '1';
+  const guestSignupTailnetValue = process.env.REAL_CLIENT_GUEST_SIGNUP_TAILNET || '0';
+  if(guestSignupTailnetValue !== '0' && guestSignupTailnetValue !== '1') {
+    throw new FlowError('input-validation', 'REAL_CLIENT_GUEST_SIGNUP_TAILNET must be 0 or 1');
+  }
+  const guestSignupTailnet = guestSignupTailnetValue === '1';
   const guestSignupQaBypassValue = process.env.REAL_CLIENT_GUEST_SIGNUP_QA_BYPASS || '0';
   if(guestSignupQaBypassValue !== '0' && guestSignupQaBypassValue !== '1') {
     throw new FlowError('input-validation', 'REAL_CLIENT_GUEST_SIGNUP_QA_BYPASS must be 0 or 1');
@@ -364,6 +370,9 @@ async function main() {
   const guestSignupQaBypass = guestSignupQaBypassValue === '1';
   if(guestSignupGateOff && !guestSignupOnly) {
     throw new FlowError('input-validation', 'REAL_CLIENT_GUEST_SIGNUP_GATE_OFF requires REAL_CLIENT_GUEST_SIGNUP_ONLY=1');
+  }
+  if(guestSignupTailnet && (!guestSignupOnly || guestSignupGateOff)) {
+    throw new FlowError('input-validation', 'REAL_CLIENT_GUEST_SIGNUP_TAILNET requires sign-in-gated guest signup mode');
   }
   if(guestSignupQaBypass && (!guestSignupOnly || !guestSignupGateOff)) {
     throw new FlowError('input-validation', 'REAL_CLIENT_GUEST_SIGNUP_QA_BYPASS requires gate-off guest signup mode');
@@ -409,7 +418,7 @@ async function main() {
       '--server-revision', serverRevision,
       '--web-revision', webRevision,
       '--run-id', runId,
-      ...(guestSignupOnly ? ['--guest-signup', ...(guestSignupGateOff ? ['--guest-signup-gate-off'] : [])] : [])
+      ...(guestSignupOnly ? ['--guest-signup', ...(guestSignupGateOff ? ['--guest-signup-gate-off'] : []), ...(guestSignupTailnet ? ['--guest-signup-tailnet'] : [])] : [])
     ], {cwd: serverRoot, env: cleanEnvironment(guestSignupQaBypassToken ? {
       REAL_CLIENT_GUEST_SIGNUP_QA_BYPASS_TOKEN: guestSignupQaBypassToken
     } : {}), stdio: ['pipe', 'pipe', 'pipe']});
@@ -449,7 +458,7 @@ async function main() {
     runStage = 'private-artifact-build';
     const buildEnvironment = configureAckTraceBuildEnvironment(cleanEnvironment({
       MTPROTO_TARGET_MODE: 'private',
-      MTPROTO_PRIVATE_ENDPOINT: 'wss://teagramd.test/apiws',
+      MTPROTO_PRIVATE_ENDPOINT: guestSignupTailnet ? 'wss://teagram-dev.tailaa4918.ts.net/apiws' : 'wss://teagramd.test/apiws',
       MTPROTO_PRIVATE_RSA_PUBLIC_KEY_FILE: keyPath
     }), guestSignupOnly);
     await runCommand('corepack', ['pnpm', 'exec', 'vite', 'build', '--outDir', artifactDirectory], {
@@ -478,6 +487,7 @@ async function main() {
     runStage = 'browser-scenarios';
     const runnerEnvironment = cleanEnvironment({
       REAL_CLIENT_TRACE_DIR: traceDirectory,
+      ...(guestSignupTailnet ? {REAL_CLIENT_GUEST_SIGNUP_TAILNET: '1'} : {}),
       ...(guestSignupQaBypassToken ? {REAL_CLIENT_GUEST_SIGNUP_QA_BYPASS_TOKEN: guestSignupQaBypassToken} : {})
     });
     let runnerError;
@@ -543,7 +553,7 @@ async function main() {
     const elapsedMs = Date.now() - startedAt;
     try {
       writeSummary({status, serverRevision, webRevision, headRevision, testedRevision, runId, elapsedMs,
-        cleanupVerified, traceReady, traceDirectory, summaryPath, guestSignupOnly, guestSignupGateOff, guestSignupQaBypass,
+        cleanupVerified, traceReady, traceDirectory, summaryPath, guestSignupOnly, guestSignupGateOff, guestSignupTailnet, guestSignupQaBypass,
         selectedScenarios, messageAckTraceEvidence});
     } catch {
       process.stderr.write('report: could not write the real-client run summary\n');
