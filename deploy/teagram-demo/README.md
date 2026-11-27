@@ -76,7 +76,7 @@ layout and policy:
   probes with PROXY-v2; its `2443` listener is available only on the internal
   backend network. Neither HAProxy nor teagramd publishes a host port.
 - Restrict the Cloudflare Tunnel and DNS configuration to `demo.teagram.io`.
-  The demo does not serve the dev hostname or admin dashboard.
+  The public demo path does not serve the dev hostname or admin dashboard.
 
 The public origin and discovery document advertise
 `demo.teagram.io:443`; browser clients use the separate WSS endpoint. Discovery
@@ -115,6 +115,9 @@ mounted into teagramd and the isolated `demo-probe` service for the deploy-time
 signup-action check; the probe never prints the token. The demo sets
 `TG_TURNSTILE_HOSTNAMES=web.teagram.io,demo.teagram.io` and
 `TG_ADVERTISE_DEMO_GUEST_SIGN_UP=true` so web.teagram.io advertises demo signup.
+The opt-in dev tailnet overlay adds `teagram-dev.tailaa4918.ts.net` to the
+Turnstile hostname allowlist for both server slots so first-use guest signup
+works from the tailnet page.
 `TG_DEMO_GENERAL_CHAT_ENABLED=true` makes the API seed a single `General`
 supergroup owned by `demo_seed_owner` and attempts to add new sign-ups as a
 best-effort post-signup step. The seeder adds the precreated demo guest accounts
@@ -281,6 +284,20 @@ handoff artifact containing the exact tested SHA and CI run ID. On success,
 the separate `Deploy demo.` workflow deploys that exact SHA to the public demo
 and reports its own result. The demo deploy is disabled unless the `demo` GitHub
 environment variable `TEAGRAM_DEMO_DEPLOY_ENABLED` is set to `true`.
+
+The reusable dev deploy reads `TEAGRAM_DEV_TAILNET_ENABLED` from the same
+GitHub environment. Unset or `false` keeps the existing configuration; `true`
+adds a separate Nginx listener on `127.0.0.1:8081` and allows
+`https://teagram-dev.tailaa4918.ts.net` only on the dev server slots. The public
+demo workflow does not read this variable. The listener uses a dedicated
+bridge without outbound masquerading and reaches HAProxy through the private
+backend network. Its trusted forwarded-IP hop is the dedicated bridge gateway
+`198.18.134.1`, verified by the Compose policy test. After the dev deploy is
+verified, the host's `tailscale serve` can be pointed at that loopback port.
+The tailnet edge serves its own Web bootstrap config and discovery document so
+the Web client finds `/apiws` on the tailnet host. The deploy persists the chosen
+tailnet setting under `.state/teagram-demo`; weekly maintenance uses it when it
+recreates a server container without a deploy environment variable.
 
 When the dev deploy is unavailable, `Deploy demo.` also accepts a manual
 dispatch with an issue key. It deploys only the current `main` SHA after that

@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"testing"
@@ -26,9 +27,12 @@ const (
 )
 
 var testWorkerBinary string
+var testWorkerMemoryLimitProbeBinary string
+
+const workerMemoryLimitProbeEnv = "PHOTOTHUMB_WORKER_MEMORY_LIMIT_PROBE"
 
 func TestMain(m *testing.M) {
-	if os.Getenv("PHOTOTHUMB_RESOURCE_LIMIT_PROBE") != "" {
+	if os.Getenv("PHOTOTHUMB_RESOURCE_LIMIT_PROBE") != "" || os.Getenv(workerMemoryLimitProbeEnv) != "" {
 		os.Exit(m.Run())
 	}
 	testDirectory, err := os.MkdirTemp("", "photothumb-test-")
@@ -54,6 +58,23 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(1)
 	}
+	testWorkerMemoryLimitProbeBinary = filepath.Join(testDirectory, "photothumb-memory-limit-probe")
+	probeBuildContext, cancelProbeBuild := context.WithTimeout(context.Background(), time.Minute)
+	// Keep race-runtime metadata outside the subprocess's 20 MiB worker budget.
+	probeBuild := exec.CommandContext(probeBuildContext, "go", "test", "-c", "-race=false", "-o", testWorkerMemoryLimitProbeBinary, ".") // #nosec G204 -- fixed local Go test package and generated temporary output path.
+	probeOutput, probeBuildErr := probeBuild.CombinedOutput()
+	cancelProbeBuild()
+	if probeBuildErr != nil {
+		if _, writeErr := fmt.Fprintf(os.Stderr, "build worker memory-limit test binary: %v\n%s", probeBuildErr, probeOutput); writeErr != nil {
+			os.Exit(2)
+		}
+		if removeErr := os.RemoveAll(testDirectory); removeErr != nil {
+			if _, writeErr := fmt.Fprintln(os.Stderr, "remove worker test directory:", removeErr); writeErr != nil {
+				os.Exit(2)
+			}
+		}
+		os.Exit(1)
+	}
 	code := m.Run()
 	if err := os.RemoveAll(testDirectory); err != nil {
 		if _, writeErr := fmt.Fprintln(os.Stderr, "remove worker test directory:", err); writeErr != nil {
@@ -64,6 +85,75 @@ func TestMain(m *testing.M) {
 		}
 	}
 	os.Exit(code)
+}
+
+func TestWorkerMainHonorsParentMemoryLimit(t *testing.T) {
+	const parentLimit = int64(20 << 20)
+	previousLimit := debug.SetMemoryLimit(parentLimit)
+	defer debug.SetMemoryLimit(previousLimit)
+
+	if got := applyWorkerMemoryLimit(); got != parentLimit {
+		t.Fatalf("worker effective memory limit = %d bytes, want parent limit %d", got, parentLimit)
+	}
+}
+
+func TestWorkerMainUsesParentMemoryLimitInSubprocess(t *testing.T) {
+	if os.Getenv(workerMemoryLimitProbeEnv) != "" {
+		input := testJPEG(t, 64, 64, false, false)
+		inputReader, inputWriter, err := os.Pipe()
+		if err != nil {
+			t.Fatalf("create worker input pipe: %v", err)
+		}
+		if _, err := inputWriter.Write(input); err != nil {
+			t.Fatalf("write worker input: %v", err)
+		}
+		if err := inputWriter.Close(); err != nil {
+			t.Fatalf("close worker input pipe: %v", err)
+		}
+
+		outputFile, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatalf("open worker output sink: %v", err)
+		}
+
+		os.Stdin, os.Stdout = inputReader, outputFile
+		os.Args = []string{"photothumb", "worker", strconv.Itoa(len(input)), "64", "64", strconv.Itoa(testPixelCap)}
+
+		main()
+		const parentLimit = int64(20 << 20)
+		if got := debug.SetMemoryLimit(-1); got != parentLimit {
+			if _, err := fmt.Fprintf(os.Stderr, "worker effective memory limit = %d bytes, want inherited limit %d\n", got, parentLimit); err != nil {
+				os.Exit(2)
+			}
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
+	commandContext, cancelCommand := context.WithTimeout(t.Context(), time.Minute)
+	defer cancelCommand()
+	command := exec.CommandContext(commandContext, testWorkerMemoryLimitProbeBinary, "-test.run=^TestWorkerMainUsesParentMemoryLimitInSubprocess$") // #nosec G204 -- fixed test binary and selector.
+	environment := make([]string, 0, len(os.Environ())+2)
+	for _, entry := range os.Environ() {
+		if strings.HasPrefix(entry, "GOMEMLIMIT=") || strings.HasPrefix(entry, workerMemoryLimitProbeEnv+"=") {
+			continue
+		}
+		environment = append(environment, entry)
+	}
+	environment = append(environment, "GOMEMLIMIT=20MiB", workerMemoryLimitProbeEnv+"=1")
+	command.Env = environment
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("worker subprocess did not honor parent memory limit: %v\n%s", err, output)
+	}
+}
+
+func TestWorkerMainCapsLargerParentMemoryLimit(t *testing.T) {
+	previousLimit := debug.SetMemoryLimit(workerGoMemoryLimit + 1)
+	defer debug.SetMemoryLimit(previousLimit)
+
+	if got := applyWorkerMemoryLimit(); got != workerGoMemoryLimit {
+		t.Fatalf("worker effective memory limit = %d bytes, want cap %d", got, workerGoMemoryLimit)
+	}
 }
 
 func TestWorkerProducesClientCompatibleDerivatives(t *testing.T) {

@@ -28,7 +28,7 @@ jobs:
     env:
       TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX: mirror.gcr.io
       REAL_CLIENT_SERVER_REVISION: ${{ github.sha }}
-      REAL_CLIENT_WEB_REVISION: a4a18f827973d9188b44705ac039bb227772cd11
+      REAL_CLIENT_WEB_REVISION: dc93960fc42e064bada22ce3f8e8dd99ebe1d56f
       REAL_CLIENT_GUEST_WEB_REVISION: 8e23fd09eac68f5ac1beb2468f76d0ffed28f814
       REAL_CLIENT_SERVER_ROOT: ${{ github.workspace }}
       REAL_CLIENT_WEB_ROOT: ${{ github.workspace }}/web-source
@@ -224,12 +224,15 @@ jobs:
           path: .apt-cache/*.deb
           key: playwright-apt-${{ steps.playwright-deps.outputs.image }}-${{ hashFiles('web-source/apt-packages.txt') }}
 
+      # The warm path: install the cached set in one call so dpkg can resolve
+      # ordering and deconfigure older runner packages during version changes.
+      # The dry-run afterwards checks the completed package set without a mirror.
       - name: Install Chromium system dependencies from cache
         id: apt-cached-install
         if: steps.apt-cache.outputs.cache-hit == 'true'
         working-directory: web-source
         run: |
-          if sudo dpkg -i ../.apt-cache/*.deb && pnpm exec playwright install-deps --dry-run chromium; then
+          if sudo dpkg --auto-deconfigure -i ../.apt-cache/*.deb && pnpm exec playwright install-deps --dry-run chromium; then
             echo "installed=true" >>"$GITHUB_OUTPUT"
             exit 0
           fi
@@ -379,10 +382,11 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      - name: Run fresh-browser guest signup with the sign-in gate enabled
+      - name: Run fresh-browser tailnet guest signup with the sign-in gate enabled
         id: guest-signup-flow
         env:
           REAL_CLIENT_GUEST_SIGNUP_ONLY: '1'
+          REAL_CLIENT_GUEST_SIGNUP_TAILNET: '1'
           REAL_CLIENT_WEB_REVISION: ${{ env.REAL_CLIENT_GUEST_WEB_REVISION }}
           REAL_CLIENT_WEB_ROOT: ${{ env.REAL_CLIENT_GUEST_WEB_ROOT }}
         run: node test/e2e/real_server_fixture/run_real_client_browser_flow.mjs

@@ -27,6 +27,8 @@ import (
 // seqScanRows is the table size above which a sequential scan fails the run.
 const seqScanRows = 10_000
 
+const dateJumpScenario = "messages.getHistory jump to date"
+
 // env is what a scenario addresses: the fixture's ids and two signed-in
 // clients, the owner and one channel subscriber.
 type env struct {
@@ -68,6 +70,22 @@ const warmup = 2
 // in-process server per fixture and writes the report to TG_PERF_REPORT.
 // perfreport judges it; this test fails only when it could not measure.
 func TestRPCPerformance(t *testing.T) {
+	runRPCPerformance(t, os.Getenv("TG_PERF_ONLY"), true, false)
+}
+
+// TestRPCPerformanceDateIndexProbe measures only the date jump on disposable
+// fixtures where the history date index has been removed. The shell runner
+// sends its report through the same perfreport gate as normal runs and expects
+// that gate to reject the resulting row or plan regression.
+func TestRPCPerformanceDateIndexProbe(t *testing.T) {
+	if os.Getenv("TG_PERF_DATE_INDEX_PROBE") != "1" {
+		t.Skip("TG_PERF_DATE_INDEX_PROBE is not set")
+	}
+	runRPCPerformance(t, dateJumpScenario, false, true)
+}
+
+func runRPCPerformance(t *testing.T, only string, filtered, dateIndexProbe bool) {
+	t.Helper()
 	dir := perfDir(t)
 	out := os.Getenv("TG_PERF_REPORT")
 	if out == "" {
@@ -77,9 +95,11 @@ func TestRPCPerformance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	only := os.Getenv("TG_PERF_ONLY")
 	rep := perfreport.Report{
-		Version: perfreport.Version, FixtureVersion: os.Getenv("TG_PERF_FIXTURE_VERSION"), Filter: only,
+		Version: perfreport.Version, FixtureVersion: os.Getenv("TG_PERF_FIXTURE_VERSION"),
+	}
+	if filtered {
+		rep.Filter = only
 	}
 	for _, sc := range scenarios() {
 		if only == "" || strings.Contains(sc.name, only) {
@@ -91,11 +111,24 @@ func TestRPCPerformance(t *testing.T) {
 		if !ok {
 			t.Fatalf("TG_PERF_DSN_%s is not set", envName(s))
 		}
+		if dateIndexProbe {
+			assertDateIndexProbeDatabase(t, t.Context(), dsn)
+		}
 		f, err := loadFixture(fixturePath(dir, s))
 		if err != nil {
 			t.Fatalf("fixture %s: %v (run TestSeedFixtures first)", s.Name, err)
 		}
 		rep.Results = append(rep.Results, measureFixture(t, t.Context(), dsn, blobDir(dir, s), key, f, only)...)
+	}
+	if dateIndexProbe {
+		if len(rep.Results) != len(fixtures) {
+			t.Fatalf("date-index probe results = %d, want one result for each of %d fixtures", len(rep.Results), len(fixtures))
+		}
+		for _, result := range rep.Results {
+			if result.Name != dateJumpScenario || result.RowsRead == 0 || len(result.Unexplained) != 0 {
+				t.Fatalf("date-index probe did not explain the date-jump query on %s: %+v", result.Fixture, result)
+			}
+		}
 	}
 	raw, err := json.MarshalIndent(rep, "", "  ")
 	if err != nil {
@@ -103,6 +136,31 @@ func TestRPCPerformance(t *testing.T) {
 	}
 	if err := os.WriteFile(out, raw, 0o600); err != nil { // #nosec G703 -- the path is the operator's TG_PERF_REPORT
 		t.Fatal(err)
+	}
+}
+
+func assertDateIndexProbeDatabase(t *testing.T, ctx context.Context, dsn string) {
+	t.Helper()
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := conn.Close(ctx); err != nil {
+			t.Errorf("close date-index probe connection: %v", err)
+		}
+	}()
+	var database string
+	var hasDateIndex bool
+	if err := conn.QueryRow(ctx, `SELECT current_database(), to_regclass('public.messages_owner_peer_date_idx') IS NOT NULL`).
+		Scan(&database, &hasDateIndex); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(database, "_date_index_probe") {
+		t.Fatalf("date-index probe database = %q, want a disposable *_date_index_probe clone", database)
+	}
+	if hasDateIndex {
+		t.Fatalf("date-index probe database %q still has messages_owner_peer_date_idx", database)
 	}
 }
 
@@ -191,7 +249,7 @@ func measure(t *testing.T, ctx context.Context, e *env, explain *explainer, sc s
 			return fail(err)
 		}
 		measured := i >= warmup
-		capture := i == warmup && (sc.name == "contacts.getContacts" || sc.name == "messages.getSearchCounters dispatch wait")
+		capture := i == warmup && (sc.name == "contacts.getContacts" || sc.name == "messages.getSearchCounters dispatch wait" || sc.name == dateJumpScenario)
 		tracer.reset(capture, sc.name == "contacts.getContacts")
 		allocBefore := heapAllocs()
 		e.elapsed = 0
@@ -223,6 +281,9 @@ func measure(t *testing.T, ctx context.Context, e *env, explain *explainer, sc s
 			statementDurations[timing.name] += timing.elapsed
 		}
 		if i == warmup {
+			if sc.name == dateJumpScenario && len(captured) == 0 {
+				return fail(errors.New("no SQL statements captured for query-plan checks"))
+			}
 			rows, scans, unexplained := explain.statements(ctx, captured)
 			r.RowsRead, r.SeqScans, r.Unexplained = rows, scans, unexplained
 			if e.logSQL != nil {

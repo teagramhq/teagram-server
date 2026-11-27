@@ -138,7 +138,7 @@ source = Path(sys.argv[1]).read_text(encoding="utf-8")
 for expected in (
     '--project-name teagram-demo',
     'install -d -o 584792 -g 584792 -m 1777 "$turnstile_tmp_dir"',
-    'install -d -o root -g root -m 1777 "$haproxy_tmp_dir" "$edge_tmp_dir"',
+    'install -d -o root -g root -m 1777 "$haproxy_tmp_dir" "$edge_tmp_dir" "$edge_tailnet_tmp_dir"',
     '[[ "$(stat -c \'%u:%g:%a\' "$turnstile_tmp_dir")" == \'584792:584792:1777\'',
 ):
     if expected not in source:
@@ -248,6 +248,9 @@ jq -e \
   and .networks.backend.internal == true
   and .networks.backend.ipam.config[0].subnet == "198.18.130.0/24"
   and .networks.backend.ipam.config[0].ip_range == "198.18.130.128/26"
+  and .services["edge-tailnet"] == null
+  and .services.teagramd.environment.TG_WEBSOCKET_ALLOWED_ORIGINS == "https://web.teagram.io,https://demo.teagram.io"
+  and .services["teagramd-next"].environment.TG_WEBSOCKET_ALLOWED_ORIGINS == "https://web.teagram.io,https://demo.teagram.io"
   and (.services.edge.networks | keys | sort) == ["backend", "edge"]
   and .services.teagramd.environment.TG_REGISTRATION == "open"
   and .services.teagramd.environment.TG_WELCOME_CHANNEL == "teagramdemowelcome"
@@ -316,6 +319,200 @@ jq -e \
   and .volumes.tgblobs.driver_opts.device == "/srv/teagram-demo-blobs/data"
 ' "$TMP_DIR/target.json" >/dev/null
 
+enabled_compose=(
+  docker compose
+  --env-file "$TMP_DIR/demo.env"
+  --project-directory "$REPO_ROOT"
+  --project-name teagram-demo
+  --file "$REPO_ROOT/docker-compose.yml"
+  --file "$SCRIPT_DIR/teagram-dev-tailnet.compose.yaml"
+  --profile demo
+)
+env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
+  -u TG_TURNSTILE_SIGNIN_ENABLED \
+  -u TEAGRAM_DEMO_TURNSTILE_SITE_KEY -u TEAGRAM_DEMO_TURNSTILE_SECRET_KEY_FILE \
+  -u TEAGRAM_DEV_TAILNET_ENABLED \
+  "${enabled_compose[@]}" config --format json > "$TMP_DIR/tailnet-enabled.json"
+jq -e \
+  --arg tmpRoot "$REPO_ROOT/.state/teagram-demo/tmp" '
+  .services["edge-tailnet"] != null
+  and (.services["edge-tailnet"].ports | length) == 1
+  and .services["edge-tailnet"].ports[0].host_ip == "127.0.0.1"
+  and (.services["edge-tailnet"].ports[0].published | tostring) == "8081"
+  and (.services["edge-tailnet"].ports[0].target | tostring) == "8081"
+  and (.services["edge-tailnet"].networks | keys | sort) == ["backend", "teagram-dev-tailnet"]
+  and (.networks["teagram-dev-tailnet"].internal // false) == false
+  and .networks["teagram-dev-tailnet"].ipam.config[0].gateway == "198.18.134.1"
+  and .networks["teagram-dev-tailnet"].ipam.config[0].subnet == "198.18.134.0/24"
+  and .networks["teagram-dev-tailnet"].driver_opts["com.docker.network.bridge.enable_ip_masquerade"] == "false"
+  and .services["edge-tailnet"].networks.backend.ipv4_address == null
+  and .services.teagramd.environment.TG_WEBSOCKET_ALLOWED_ORIGINS == "https://web.teagram.io,https://demo.teagram.io,https://teagram-dev.tailaa4918.ts.net"
+  and .services["teagramd-next"].environment.TG_WEBSOCKET_ALLOWED_ORIGINS == "https://web.teagram.io,https://demo.teagram.io,https://teagram-dev.tailaa4918.ts.net"
+  and any(.services["edge-tailnet"].volumes[]; .source == ($tmpRoot + "/edge-tailnet") and .target == "/tmp" and (.read_only // false) == false)
+  and any(.services["edge-tailnet"].volumes[]; (.source | endswith("/deploy/teagram-demo/nginx-tailnet.conf")) and .target == "/etc/nginx/tailnet/nginx.conf" and .read_only)
+  and any(.services["edge-tailnet"].volumes[]; (.source | endswith("/deploy/teagram-demo/nginx-config")) and .target == "/etc/nginx/demo" and .read_only)
+  and any(.services["edge-tailnet"].volumes[]; (.source | endswith("/.state/teagram-demo/public-client")) and .target == "/usr/share/nginx/html/.well-known/teagramd" and .read_only)
+  and (([.services | to_entries[] | .value.ports[]?.published | tostring] | sort) == ["8080", "8081"])
+' "$TMP_DIR/tailnet-enabled.json" >/dev/null
+
+(
+  DEMO_CLIENT_CONFIG_DIR="$TMP_DIR/tailnet-client"
+  DEMO_CLIENT_CONFIG="$DEMO_CLIENT_CONFIG_DIR/client"
+  DEMO_TAILNET_CLIENT_CONFIG="$DEMO_CLIENT_CONFIG_DIR/client-tailnet"
+  mkdir -p "$DEMO_CLIENT_CONFIG_DIR"
+  printf '%s\n' '{"server":"demo.teagram.io","autoGuest":true}' > "$DEMO_CLIENT_CONFIG_DIR/teagram-config.json"
+  cat > "$DEMO_CLIENT_CONFIG" <<'JSON'
+{"version":1,"mtproto":{"endpoint":"demo.teagram.io:443"},"websocket":{"endpoint":"wss://demo.teagram.io/apiws"},"demo":{"guest_sign_up":true}}
+JSON
+  demo_prepare_tailnet_client_config
+  jq -e '
+    .version == 1
+    and .mtproto.endpoint == "demo.teagram.io:443"
+    and .websocket.endpoint == "wss://teagram-dev.tailaa4918.ts.net/apiws"
+    and .demo.guest_sign_up == true
+  ' "$DEMO_TAILNET_CLIENT_CONFIG" >/dev/null
+  jq -e '.server == "teagram-dev.tailaa4918.ts.net" and .autoGuest == true' \
+    "$DEMO_CLIENT_CONFIG_DIR/teagram-config-tailnet.json" >/dev/null
+  jq -e '.websocket.endpoint == "wss://demo.teagram.io/apiws"' "$DEMO_CLIENT_CONFIG" >/dev/null
+
+  original_tailnet_config=$(cat "$DEMO_TAILNET_CLIENT_CONFIG")
+  original_tailnet_bootstrap=$(cat "$DEMO_CLIENT_CONFIG_DIR/teagram-config-tailnet.json")
+  if (
+    mktemp() { return 1; }
+    demo_prepare_tailnet_client_config >/dev/null 2>&1
+  ); then
+    printf 'tailnet client config accepted a failed temporary-file creation\n' >&2
+    exit 1
+  fi
+  [[ "$(cat "$DEMO_TAILNET_CLIENT_CONFIG")" == "$original_tailnet_config" ]]
+  [[ "$(cat "$DEMO_CLIENT_CONFIG_DIR/teagram-config-tailnet.json")" == "$original_tailnet_bootstrap" ]]
+  if (
+    chmod() { return 1; }
+    demo_prepare_tailnet_client_config >/dev/null 2>&1
+  ); then
+    printf 'tailnet client config accepted a failed chmod\n' >&2
+    exit 1
+  fi
+  [[ "$(cat "$DEMO_TAILNET_CLIENT_CONFIG")" == "$original_tailnet_config" ]]
+  [[ "$(cat "$DEMO_CLIENT_CONFIG_DIR/teagram-config-tailnet.json")" == "$original_tailnet_bootstrap" ]]
+  [[ -z "$(find "$DEMO_CLIENT_CONFIG_DIR" -maxdepth 1 -name '.client-tailnet.*' -print -quit)" ]]
+  [[ -z "$(find "$DEMO_CLIENT_CONFIG_DIR" -maxdepth 1 -name '.teagram-config-tailnet.*' -print -quit)" ]]
+)
+
+# shellcheck disable=SC2030,SC2031 # Tailnet enablement is isolated to the test subshells below.
+(
+  export TEAGRAM_DEV_TAILNET_ENABLED=true
+  DEMO_CLIENT_CONFIG_DIR="$TMP_DIR/tailnet-reload-client"
+  DEMO_CLIENT_CONFIG="$DEMO_CLIENT_CONFIG_DIR/client"
+  DEMO_TAILNET_CLIENT_CONFIG="$DEMO_CLIENT_CONFIG_DIR/client-tailnet"
+  DEMO_STATE_DIR="$TMP_DIR/tailnet-reload-state"
+  DEMO_TAILNET_ENABLED_FILE="$DEMO_STATE_DIR/tailnet-enabled"
+  TAILNET_DOCKER_LOG="$TMP_DIR/tailnet-reload-docker.log"
+  TAILNET_DOCKER_STUB_DIR="$TMP_DIR/tailnet-reload-bin"
+  mkdir -p "$DEMO_CLIENT_CONFIG_DIR" "$DEMO_STATE_DIR" "$TAILNET_DOCKER_STUB_DIR"
+  printf '%s\n' '{"server":"demo.teagram.io","autoGuest":true}' > "$DEMO_CLIENT_CONFIG_DIR/teagram-config.json"
+  cat > "$DEMO_CLIENT_CONFIG" <<'JSON'
+{"version":1,"websocket":{"endpoint":"wss://demo.teagram.io/apiws"}}
+JSON
+  cat > "$TAILNET_DOCKER_STUB_DIR/docker" <<'DOCKER'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+printf '%s\n' "$*" >> "$TAILNET_DOCKER_LOG"
+if [[ "$1" == compose ]]; then
+  case "$*" in
+    *' run --rm -T --no-deps --entrypoint nginx edge-tailnet -c /etc/nginx/tailnet/nginx.conf -t'|\
+    *' up -d --no-deps edge-tailnet') exit 0 ;;
+    *' ps --status running -q edge-tailnet') printf 'tailnet-edge\n' ;;
+    *) printf 'unexpected tailnet docker compose invocation: %s\n' "$*" >&2; exit 1 ;;
+  esac
+elif [[ "$1" == exec && "$2" == tailnet-edge && "$3" == nginx &&
+  "$4" == -c && "$5" == /etc/nginx/tailnet/nginx.conf ]]; then
+  [[ "$6" == -t || ( "$6" == -s && "$7" == reload ) ]] || {
+    printf 'unexpected tailnet nginx invocation: %s\n' "$*" >&2
+    exit 1
+  }
+else
+  printf 'unexpected tailnet docker invocation: %s\n' "$*" >&2
+  exit 1
+fi
+DOCKER
+  chmod 0755 "$TAILNET_DOCKER_STUB_DIR/docker"
+  export TAILNET_DOCKER_LOG
+  demo_prepare_runtime_tmp_dirs_for_up() { :; }
+  demo_compose_image_ref() { printf 'teagram-demo:test\n'; }
+  PATH="$TAILNET_DOCKER_STUB_DIR:$PATH" demo_reload_tailnet_edge
+  mapfile -t tailnet_calls < "$TAILNET_DOCKER_LOG"
+  [[ "${#tailnet_calls[@]}" == 5 ]]
+  [[ "${tailnet_calls[0]}" == compose*"--file $DEMO_TAILNET_COMPOSE_FILE"*' run --rm -T --no-deps --entrypoint nginx edge-tailnet -c /etc/nginx/tailnet/nginx.conf -t' ]]
+  [[ "${tailnet_calls[1]}" == compose*' up -d --no-deps edge-tailnet' ]]
+  [[ "${tailnet_calls[2]}" == compose*' ps --status running -q edge-tailnet' ]]
+  [[ "${tailnet_calls[3]}" == 'exec tailnet-edge nginx -c /etc/nginx/tailnet/nginx.conf -t' ]]
+  [[ "${tailnet_calls[4]}" == 'exec tailnet-edge nginx -c /etc/nginx/tailnet/nginx.conf -s reload' ]]
+  [[ "$(<"$DEMO_TAILNET_ENABLED_FILE")" == true ]]
+  [[ "$(stat -c '%a' "$DEMO_TAILNET_ENABLED_FILE")" == 600 ]]
+  unset TEAGRAM_DEV_TAILNET_ENABLED
+  [[ "$(demo_tailnet_enabled)" == true ]]
+)
+
+# shellcheck disable=SC2030,SC2031 # Maintenance compose state is isolated to this test subshell.
+(
+  DEMO_STATE_DIR="$TMP_DIR/tailnet-maintenance-state"
+  DEMO_TAILNET_ENABLED_FILE="$DEMO_STATE_DIR/tailnet-enabled"
+  DEMO_ENV_FILE="$TMP_DIR/demo.env"
+  DEMO_COMPOSE_ARGS=(--env-file "$DEMO_ENV_FILE" --project-directory "$REPO_ROOT" --project-name teagram-demo --file "$REPO_ROOT/docker-compose.yml" --profile demo)
+  TEAGRAM_DEMO_IMAGE_REF=teagramd:local
+  mkdir -p "$DEMO_STATE_DIR"
+  demo_persist_tailnet_enabled true
+  unset TEAGRAM_DEV_TAILNET_ENABLED
+  demo_prepare_runtime_tmp_dirs_for_up() { :; }
+  demo_compose config --format json > "$TMP_DIR/tailnet-maintenance-recreate.json"
+  jq -e '
+    .services["edge-tailnet"] != null
+    and .services.teagramd.environment.TG_WEBSOCKET_ALLOWED_ORIGINS == "https://web.teagram.io,https://demo.teagram.io,https://teagram-dev.tailaa4918.ts.net"
+    and .services.teagramd.environment.TG_TURNSTILE_HOSTNAMES == "web.teagram.io,demo.teagram.io,teagram-dev.tailaa4918.ts.net"
+    and .services["teagramd-next"].environment.TG_TURNSTILE_HOSTNAMES == "web.teagram.io,demo.teagram.io,teagram-dev.tailaa4918.ts.net"
+  ' "$TMP_DIR/tailnet-maintenance-recreate.json" >/dev/null
+)
+
+# shellcheck disable=SC2031 # Environment overrides are scoped to these test function calls.
+(
+  demo_tailnet_compose() {
+    [[ "$*" == 'ps --status running -q edge-tailnet' ]] || return 1
+    if [[ "$MOCK_TAILNET_RUNNING" == true ]]; then
+      printf 'tailnet-edge\n'
+    fi
+  }
+  demo_reload_tailnet_edge() {
+    MOCK_TAILNET_RUNNING=${TEAGRAM_DEV_TAILNET_ENABLED:-false}
+  }
+
+  for previous_state in false true; do
+    case "$previous_state" in
+      false) requested_state=true ;;
+      true) requested_state=false ;;
+    esac
+    MOCK_TAILNET_RUNNING=$previous_state
+    captured_state=$(demo_capture_tailnet_listener_state)
+    [[ "$captured_state" == "$previous_state" ]]
+    TEAGRAM_DEV_TAILNET_ENABLED="$requested_state" demo_reload_tailnet_edge
+    [[ "$MOCK_TAILNET_RUNNING" == "$requested_state" ]]
+    demo_restore_tailnet_listener_state "$captured_state"
+    [[ "$MOCK_TAILNET_RUNNING" == "$previous_state" ]] || {
+      printf 'failed tailnet transition rollback: previous=%s requested=%s actual=%s\n' \
+        "$previous_state" "$requested_state" "$MOCK_TAILNET_RUNNING" >&2
+      exit 1
+    }
+  done
+)
+
+(
+  TEAGRAM_DEV_TAILNET_ENABLED=true
+  demo_prepare_client_config_dir() { :; }
+  demo_prepare_haproxy_runtime() { :; }
+  demo_compose() { cat "$TMP_DIR/tailnet-enabled.json"; }
+  demo_render_config "$TMP_DIR/tailnet-production-validated.json"
+)
+
 "${compose[@]}" --profile maintenance config --format json > "$TMP_DIR/maintenance.json"
 jq -e '
   .services["teagramd-maintenance"].profiles == ["maintenance"]
@@ -332,12 +529,15 @@ EDGE_CONFIG_FIXTURE="$TMP_DIR/restrictive-checkout/deploy/teagram-demo"
   umask 077
   mkdir -p "$EDGE_CONFIG_FIXTURE/nginx-config"
   printf '%s\n' 'server {}' > "$EDGE_CONFIG_FIXTURE/nginx-config/nginx.conf"
+  printf '%s\n' 'location = /healthz { return 200; }' > "$EDGE_CONFIG_FIXTURE/nginx-config/common-locations.conf"
 )
 [[ "$(stat -c '%a' "$EDGE_CONFIG_FIXTURE/nginx-config")" == 700 ]]
 [[ "$(stat -c '%a' "$EDGE_CONFIG_FIXTURE/nginx-config/nginx.conf")" == 600 ]]
+[[ "$(stat -c '%a' "$EDGE_CONFIG_FIXTURE/nginx-config/common-locations.conf")" == 600 ]]
 DEMO_SCRIPT_DIR="$EDGE_CONFIG_FIXTURE" demo_prepare_edge_config_permissions
 [[ "$(stat -c '%a' "$EDGE_CONFIG_FIXTURE/nginx-config")" == 755 ]]
 [[ "$(stat -c '%a' "$EDGE_CONFIG_FIXTURE/nginx-config/nginx.conf")" == 644 ]]
+[[ "$(stat -c '%a' "$EDGE_CONFIG_FIXTURE/nginx-config/common-locations.conf")" == 644 ]]
 
 cp -- "$TMP_DIR/demo.env" "$TMP_DIR/demo-signin.env"
 printf '%s\n' 'TG_TURNSTILE_SIGNIN_ENABLED=true' >> "$TMP_DIR/demo-signin.env"
@@ -550,6 +750,7 @@ PY
         fi
       done
       [[ -f "$config_file" && "${args[-3]} ${args[-2]} ${args[-1]}" == 'config --hash edge' ]] || return 1
+      # shellcheck disable=SC2031 # This stub is exercised with an isolated state-directory override.
       jq -e \
         --slurpfile current "$MOCK_CURRENT_RENDER" \
         --arg legacyFile "$DEMO_SCRIPT_DIR/nginx.conf" \
@@ -747,6 +948,7 @@ PY
         elif [[ "$state" == old ]]; then
           printf '[]\n'
         else
+          # shellcheck disable=SC2031 # This stub reads the current test's isolated state directory.
           local source="$DEMO_STATE_DIR/tmp/$service"
           [[ "$service" != "$MIGRATION_BAD_BIND_SERVICE" ]] || source="$MIGRATION_TEST_DIR/unexpected"
           jq -n --arg source "$source" '[{Type:"bind",Source:$source,Destination:"/tmp",RW:true}]'
@@ -878,6 +1080,11 @@ PY
   MOCK_EDGE_PRECHECKED=0
   MOCK_EDGE_CONFIG_TESTED=0
   MOCK_EDGE_RELOADED=0
+  MOCK_TAILNET_RELOAD=0
+
+  demo_reload_tailnet_edge() {
+    ((MOCK_TAILNET_RELOAD += 1))
+  }
 
   demo_compose() {
     if [[ "$*" == 'ps -q edge' ]]; then
@@ -921,12 +1128,12 @@ PY
   demo_reload_edge
   [[ "$EDGE_CONTAINER_ID" == refreshed-edge && "$MOCK_MOUNT_LAYOUT" == directory &&
     "$MOCK_EDGE_PRECHECKED" == 1 && "$MOCK_EDGE_RECREATE_COUNT" == 1 && "$MOCK_EDGE_CONFIG_TESTED" == 1 &&
-    "$MOCK_EDGE_RELOADED" == 1 ]] || {
+    "$MOCK_EDGE_RELOADED" == 1 && "$MOCK_TAILNET_RELOAD" == 1 ]] || {
     printf 'edge reload did not migrate the legacy single-file mount before validating it\n' >&2
     exit 1
   }
   demo_reload_edge
-  [[ "$MOCK_EDGE_RECREATE_COUNT" == 1 ]] || {
+  [[ "$MOCK_EDGE_RECREATE_COUNT" == 1 && "$MOCK_TAILNET_RELOAD" == 2 ]] || {
     printf 'edge reload recreated a directory-mounted edge instead of reloading it\n' >&2
     exit 1
   }
@@ -935,7 +1142,7 @@ PY
     printf 'edge reload recreated an unsupported mount layout\n' >&2
     exit 1
   fi
-  [[ "$MOCK_EDGE_RECREATE_COUNT" == 1 ]] || {
+  [[ "$MOCK_EDGE_RECREATE_COUNT" == 1 && "$MOCK_TAILNET_RELOAD" == 2 ]] || {
     printf 'edge reload recreated a container for a non-migration config change\n' >&2
     exit 1
   }
@@ -1247,15 +1454,94 @@ jq -e --slurpfile bootstrap "$TMP_DIR/bootstrap-inventory.json" '
 
 grep -Fq 'location = /apiws {' "$SCRIPT_DIR/nginx-config/nginx.conf"
 grep -Fq 'root /usr/share/nginx/html/.well-known/teagramd/web/current;' "$SCRIPT_DIR/nginx-config/nginx.conf"
-grep -Fq 'location = /teagram-config.json {' "$SCRIPT_DIR/nginx-config/nginx.conf"
-grep -Fq 'connect-src '\''self'\'' wss://demo.teagram.io https://challenges.cloudflare.com;' "$SCRIPT_DIR/nginx-config/nginx.conf"
+grep -Fq 'location = /teagram-config.json {' "$SCRIPT_DIR/nginx-config/common-locations.conf"
+grep -Fq 'connect-src '\''self'\'' wss://demo.teagram.io https://challenges.cloudflare.com;' "$SCRIPT_DIR/nginx-config/common-locations.conf"
 # These patterns match literal Nginx variables.
 # shellcheck disable=SC2016
 grep -Fq 'set $teagramd http://haproxy:2446;' "$SCRIPT_DIR/nginx-config/nginx.conf"
 # shellcheck disable=SC2016
 grep -Fq 'proxy_set_header CF-Connecting-IP $http_cf_connecting_ip;' "$SCRIPT_DIR/nginx-config/nginx.conf"
-grep -Fq 'headers["CF-Connecting-IP"] = "192.0.2.1"' "$SCRIPT_DIR/smoke.py"
-grep -Fq 'return 200 "Teagram demo server";' "$SCRIPT_DIR/nginx-config/nginx.conf"
+grep -Fq 'include /etc/nginx/demo/common-locations.conf;' "$SCRIPT_DIR/nginx-config/nginx.conf"
+# shellcheck disable=SC2016
+grep -Fq 'if ($http_origin = "https://teagram-dev.tailaa4918.ts.net") { return 403; }' "$SCRIPT_DIR/nginx-config/nginx.conf"
+grep -Fq 'include /etc/nginx/demo/common-locations.conf;' "$SCRIPT_DIR/nginx-tailnet.conf"
+# shellcheck disable=SC2016 # Nginx variables are literal config text.
+grep -Fq 'set $teagramd_bootstrap_config /usr/share/nginx/html/.well-known/teagramd/teagram-config.json;' "$SCRIPT_DIR/nginx-config/nginx.conf"
+# shellcheck disable=SC2016 # Nginx variables are literal config text.
+grep -Fq 'set $teagramd_bootstrap_config /usr/share/nginx/html/.well-known/teagramd/teagram-config-tailnet.json;' "$SCRIPT_DIR/nginx-tailnet.conf"
+# shellcheck disable=SC2016 # Nginx variables are literal config text.
+grep -Fq 'alias $teagramd_bootstrap_config;' "$SCRIPT_DIR/nginx-config/common-locations.conf"
+# shellcheck disable=SC2016 # Nginx variables are literal config text.
+grep -Fq 'set $teagramd_client_discovery /usr/share/nginx/html/.well-known/teagramd/client;' "$SCRIPT_DIR/nginx-config/nginx.conf"
+# shellcheck disable=SC2016 # Nginx variables are literal config text.
+grep -Fq 'set $teagramd_client_discovery /usr/share/nginx/html/.well-known/teagramd/client-tailnet;' "$SCRIPT_DIR/nginx-tailnet.conf"
+# shellcheck disable=SC2016 # Nginx variables are literal config text.
+grep -Fq 'alias $teagramd_client_discovery;' "$SCRIPT_DIR/nginx-config/common-locations.conf"
+grep -Fq 'wss://teagram-dev.tailaa4918.ts.net https://challenges.cloudflare.com' "$SCRIPT_DIR/nginx-tailnet.conf"
+grep -Fq 'set_real_ip_from 198.18.134.1/32;' "$SCRIPT_DIR/nginx-tailnet.conf"
+grep -Fq 'real_ip_header X-Forwarded-For;' "$SCRIPT_DIR/nginx-tailnet.conf"
+grep -Fq 'real_ip_recursive off;' "$SCRIPT_DIR/nginx-tailnet.conf"
+# shellcheck disable=SC2016
+grep -Fq 'if ($http_origin != "https://teagram-dev.tailaa4918.ts.net") { return 403; }' "$SCRIPT_DIR/nginx-tailnet.conf"
+# shellcheck disable=SC2016
+grep -Fq 'if ($realip_remote_addr != 198.18.134.1) { return 400; }' "$SCRIPT_DIR/nginx-tailnet.conf"
+# shellcheck disable=SC2016
+grep -Fq 'if ($remote_addr = 198.18.134.1) { return 400; }' "$SCRIPT_DIR/nginx-tailnet.conf"
+# These patterns match literal Nginx variables.
+# shellcheck disable=SC2016
+grep -Fq 'proxy_set_header CF-Connecting-IP $remote_addr;' "$SCRIPT_DIR/nginx-tailnet.conf"
+grep -Fq 'proxy_set_header X-Forwarded-For "";' "$SCRIPT_DIR/nginx-tailnet.conf"
+grep -Fq 'proxy_set_header X-Real-IP "";' "$SCRIPT_DIR/nginx-tailnet.conf"
+grep -Fq 'TEAGRAM_DEV_TAILNET_ENABLED' "$REPO_ROOT/.github/workflows/deploy-dev-target.yml"
+# shellcheck disable=SC2016
+grep -Fq 'TEAGRAM_DEV_TAILNET_ENABLED="$TAILNET_ENABLED"' "$SCRIPT_DIR/forced-command.sh"
+python3 - "$SCRIPT_DIR/nginx-config/nginx.conf" "$SCRIPT_DIR/nginx-tailnet.conf" \
+  "$SCRIPT_DIR/nginx-config/common-locations.conf" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+public_config, tailnet_config, shared_locations = (
+    Path(path).read_text(encoding="utf-8") for path in sys.argv[1:]
+)
+if re.search(r"^\s*(?:real_ip_header|set_real_ip_from)\b", public_config, flags=re.MULTILINE):
+    raise SystemExit("the public edge must not trust forwarded client IP headers")
+if public_config.count("proxy_set_header CF-Connecting-IP $http_cf_connecting_ip;") != 1:
+    raise SystemExit("the public edge must forward Cloudflare's client IP exactly once")
+if "proxy_set_header X-Forwarded-For" in public_config or "proxy_set_header X-Real-IP" in public_config:
+    raise SystemExit("the public edge must not read or forward client X-Forwarded-For")
+if "proxy_set_header CF-Connecting-IP $remote_addr;" not in tailnet_config:
+    raise SystemExit("the tailnet edge must pass its validated client IP to HAProxy")
+if 'proxy_set_header X-Forwarded-For "";' not in tailnet_config or 'proxy_set_header X-Real-IP "";' not in tailnet_config:
+    raise SystemExit("the tailnet edge must clear client-supplied forwarding headers")
+if 'if ($http_origin != "https://teagram-dev.tailaa4918.ts.net") { return 403; }' not in tailnet_config:
+    raise SystemExit("the tailnet edge must reject public and unknown browser origins")
+if 'if ($realip_remote_addr != 198.18.134.1) { return 400; }' not in tailnet_config:
+    raise SystemExit("the tailnet edge must reject peers other than the trusted Docker gateway")
+if public_config.count("include /etc/nginx/demo/common-locations.conf;") != 1 or tailnet_config.count(
+    "include /etc/nginx/demo/common-locations.conf;"
+) != 1:
+    raise SystemExit("both edge servers must include the same route definitions")
+
+def location_selectors(source: str) -> list[str]:
+    return re.findall(r"^\s*location\s+([^\s{]+)", source, flags=re.MULTILINE)
+
+
+public_locations = location_selectors(public_config) + location_selectors(shared_locations)
+tailnet_locations = location_selectors(tailnet_config) + location_selectors(shared_locations)
+if sorted(public_locations) != sorted(tailnet_locations):
+    raise SystemExit("tailnet and public edge servers must expose the same locations")
+PY
+grep -Fq 'cf_connecting_ip: str | None = "192.0.2.1"' "$SCRIPT_DIR/smoke.py"
+grep -Fq 'return 200 "Teagram demo server";' "$SCRIPT_DIR/nginx-config/common-locations.conf"
+grep -Fq 'args.tailnet_port' "$SCRIPT_DIR/smoke.py"
+grep -Fq 'tailnet_url + "/teagram-config.json"' "$SCRIPT_DIR/smoke.py"
+grep -Fq 'tailnet_bootstrap["server"]' "$SCRIPT_DIR/smoke.py"
+grep -Fq 'tailnet Web bootstrap does not lead to the advertised /apiws endpoint' "$SCRIPT_DIR/smoke.py"
+grep -Fq 'tailnet_url + "/.well-known/teagramd/client"' "$SCRIPT_DIR/smoke.py"
+grep -Fq 'TAILNET_WEBSOCKET_ENDPOINT = "wss://teagram-dev.tailaa4918.ts.net/apiws"' "$SCRIPT_DIR/smoke.py"
+grep -Fq 'TAILNET_CSP = DEMO_CSP.replace(' "$SCRIPT_DIR/smoke.py"
+grep -Fq 'check_security_headers(tailnet_headers, expected_csp=TAILNET_CSP)' "$SCRIPT_DIR/smoke.py"
 grep -Fq 'args.bootstrap' "$SCRIPT_DIR/smoke.py"
 grep -Fq 'websocket_handshake(port, None, 403, "browser-only")' "$SCRIPT_DIR/smoke.py"
 grep -Fq 'websocket_handshake(port, "https://web.teagram.io", 101)' "$SCRIPT_DIR/smoke.py"
@@ -1266,8 +1552,8 @@ grep -Fq 'https://foreign.example", 403' "$SCRIPT_DIR/smoke.py"
 grep -Fq 'response.getheader("Teagram-Client-Policy")' "$SCRIPT_DIR/smoke.py"
 grep -Fq 'args.web_source_commit' "$SCRIPT_DIR/smoke.py"
 grep -Fq 'base_url + "/"' "$SCRIPT_DIR/smoke.py"
-grep -Fq 'location = /admin { return 404; }' "$SCRIPT_DIR/nginx-config/nginx.conf"
-grep -Fq 'location ^~ /admin/ { return 404; }' "$SCRIPT_DIR/nginx-config/nginx.conf"
+grep -Fq 'location = /admin { return 404; }' "$SCRIPT_DIR/nginx-config/common-locations.conf"
+grep -Fq 'location ^~ /admin/ { return 404; }' "$SCRIPT_DIR/nginx-config/common-locations.conf"
 grep -Fq 'fastcgi_temp_path /tmp/fastcgi_temp;' "$SCRIPT_DIR/nginx-config/nginx.conf"
 grep -Fq 'uwsgi_temp_path /tmp/uwsgi_temp;' "$SCRIPT_DIR/nginx-config/nginx.conf"
 grep -Fq 'scgi_temp_path /tmp/scgi_temp;' "$SCRIPT_DIR/nginx-config/nginx.conf"
@@ -1296,7 +1582,7 @@ grep -Fq 'cache deny all' "$SCRIPT_DIR/turnstile-egress.conf"
 grep -Fq 'level: ready' "$SCRIPT_DIR/pebble-health.yaml"
 grep -Fq 'host: 127.0.0.1' "$SCRIPT_DIR/pebble-health.yaml"
 grep -Fq 'port: 3128' "$SCRIPT_DIR/pebble-health.yaml"
-grep -Fq 'location = /healthz {' "$SCRIPT_DIR/nginx-config/nginx.conf"
+grep -Fq 'location = /healthz {' "$SCRIPT_DIR/nginx-config/common-locations.conf"
 grep -Fq 'https://demo.teagram.io/healthz' "$SCRIPT_DIR/gatus.yaml"
 grep -Fq 'Origin: https://web.teagram.io' "$SCRIPT_DIR/gatus.yaml"
 grep -Fq '"[STATUS] == 400"' "$SCRIPT_DIR/gatus.yaml"
@@ -1404,6 +1690,8 @@ if "demo_restore_legacy_edge_after_rollback || edge_rollback_rc=1" not in cleanu
     raise SystemExit("deploy-main.sh: legacy edge restore must run before the wrapper returns")
 if "demo_reload_edge" not in cleanup:
     raise SystemExit("deploy-main.sh: directory-mounted edge rollback must reload gracefully")
+if 'demo_restore_tailnet_listener_state "$PREV_TAILNET_ENABLED" || tailnet_rollback_rc=1' not in cleanup:
+    raise SystemExit("deploy-main.sh: failed rollout must restore the captured tailnet listener state")
 forced_command = Path(sys.argv[5]).read_text(encoding="utf-8")
 weekly_wipe_op = Path(sys.argv[7]).read_text(encoding="utf-8")
 if "demo_restore_legacy_edge_after_rollback" in forced_command:
@@ -1435,6 +1723,8 @@ assert_text_order(deploy_preflight, "deploy-main.sh proxy preflight", [
     'demo_migrate_proxy_tmpfs "$PREV_SHA" "$ACTIVE_SERVER"',
     'demo_require_proxy_configuration_current haproxy "$TEAGRAM_DEMO_HAPROXY_CONFIG_SHA256"',
     'demo_require_proxy_configuration_current edge "" 1',
+    'PREV_TAILNET_ENABLED=$(demo_capture_tailnet_listener_state)',
+    'TAILNET_STATE_CAPTURED=1',
     'demo_reload_edge',
     'demo_render_config "$TARGET_RENDER"',
 ])
@@ -1495,6 +1785,8 @@ deploy_steps = [
     'demo_haproxy_control wait-healthy "$CANDIDATE_SERVER" --timeout 60',
     'demo_haproxy_control drain "$ACTIVE_SERVER"',
     'install -o root -g root -m 0644 "$TMP_DIR/client.json" "$DEMO_CLIENT_CONFIG.next"',
+    'CLIENT_CONFIG_UPDATED=1',
+    'demo_prepare_tailnet_client_config',
     '--web-artifact-digest "sha256:${PREV_WEB_RELEASE#* }"',
     '"$SCRIPT_DIR/seed-demo.sh" --verify-turnstile --endpoint haproxy:2443',
     'demo_write_active_release "$CANDIDATE_SERVER" "$CANDIDATE_IMAGE_REF"',
@@ -1506,9 +1798,14 @@ if any(position < 0 for position in deploy_positions) or deploy_positions != sor
     raise SystemExit("deploy-main.sh: candidate health and traffic cutover must precede stopping the old server")
 if "PUBLIC_ACTIVATION_STARTED=1" not in deploy or "migrated database preserved" not in deploy:
     raise SystemExit("deploy-main.sh: failed cutover must retain the migrated database and dump")
+rollback_client_config = deploy.split('if (( CLIENT_CONFIG_UPDATED == 1 )); then', 1)[1].split("\n          fi", 1)[0]
+assert_text_order(rollback_client_config, "deploy-main.sh client config rollback", [
+    'mv -f -- "$DEMO_CLIENT_CONFIG.next" "$DEMO_CLIENT_CONFIG"',
+    'demo_prepare_tailnet_client_config',
+])
 if 'demo_compose stop edge' in deploy or 'demo_compose stop haproxy' in deploy:
     raise SystemExit("deploy-main.sh: normal deploy must keep the public edge and HAProxy running")
-if 'python3 "$SCRIPT_DIR/smoke.py" --bootstrap "$DEMO_CLIENT_CONFIG"' not in deploy:
+if 'python3 "$SCRIPT_DIR/smoke.py" --bootstrap "${TAILNET_SMOKE_ARGS[@]}" "$DEMO_CLIENT_CONFIG"' not in deploy:
     raise SystemExit("deploy-main.sh: server-only handoff must smoke the bootstrap status only when no web artifact exists")
 backup_function = deploy.split("demo_backup_database() {", 1)[1].split("\n}", 1)[0]
 assert_text_order(backup_function, "deploy-main.sh backup function", [
@@ -1585,18 +1882,21 @@ assert_text_order(wipe, "wipe-weekly.sh wipe generation publication", [
     '[[ "$AFTER_GENERATION" != "$BEFORE_GENERATION" ]]',
     'install -o root -g root -m 0644 "$TMP_DIR/client-after-wipe.json" "$DEMO_CLIENT_CONFIG.next"',
     'mv -f -- "$DEMO_CLIENT_CONFIG.next" "$DEMO_CLIENT_CONFIG"',
+    'demo_prepare_tailnet_client_config',
     'demo_compose up -d edge',
 ])
 assert_text_order(init, "init-demo.sh resume client config after migrations", [
     "demo_wait_migration demo_bootstrap_compose 'resume migrations'",
     'client-config > "$TMP_DIR/client.json"',
     'mv -f -- "$DEMO_CLIENT_CONFIG.next" "$DEMO_CLIENT_CONFIG"',
+    'demo_prepare_tailnet_client_config',
 ])
 bootstrap_wait = init.index("demo_wait_migration demo_bootstrap_compose 'bootstrap migrations'")
 assert_text_order(init, "init-demo.sh fresh client config after migrations", [
     "demo_wait_migration demo_bootstrap_compose 'bootstrap migrations'",
     'client-config > "$TMP_DIR/client.json"',
     'mv -f -- "$DEMO_CLIENT_CONFIG.next" "$DEMO_CLIENT_CONFIG"',
+    'demo_prepare_tailnet_client_config',
 ], start=bootstrap_wait)
 assert_text_order(deploy, "deploy-main.sh client config after migrations", [
     "demo_wait_migration demo_compose 'deployment migrations'",
@@ -1641,9 +1941,15 @@ assert_text_order(forced_command, "forced-command.sh deploy lock", [
     "flock -x 9",
     'git -C "$REPO" fetch',
     'git -C "$REPO" reset --hard "$SHA"',
-    'DEMO_DEPLOY_LOCK_HELD=1 DEPLOY_SHA="$SHA" DEPLOY_IMAGE_DIGEST="$IMAGE_DIGEST" PREVIOUS_SHA="$previous"',
-    'restore_checkout_after_deploy "$deploy_rc" "$previous"',
 ])
+charlie_deploy_start = forced_command.index(
+    'else\n    DEMO_DEPLOY_LOCK_HELD=1 TEAGRAM_DEV_TAILNET_ENABLED="$TAILNET_ENABLED"'
+)
+assert_text_order(forced_command, "forced-command.sh charlie deploy", [
+    'DEMO_DEPLOY_LOCK_HELD=1 TEAGRAM_DEV_TAILNET_ENABLED="$TAILNET_ENABLED"',
+    'DEPLOY_SHA="$SHA" DEPLOY_IMAGE_DIGEST="$IMAGE_DIGEST" PREVIOUS_SHA="$previous"',
+    'restore_checkout_after_deploy "$deploy_rc" "$previous"',
+], start=charlie_deploy_start)
 checkout_restore = forced_command.split("restore_checkout_after_deploy() {", 1)[1].split("\n}", 1)[0]
 if 'git -C "$REPO" reset --hard "$previous"' not in checkout_restore:
     raise SystemExit("forced-command.sh: ordinary deploy failures must restore the previous checkout")
@@ -1676,7 +1982,8 @@ assert_order(Path(sys.argv[2]), [
     'demo_compose up -d --wait --wait-timeout 120 "$ACTIVE_SERVER" haproxy',
     '"$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443',
     "demo_compose up -d edge",
-    'python3 "$SCRIPT_DIR/smoke.py" --bootstrap "$DEMO_CLIENT_CONFIG"',
+    "TAILNET_ENABLED=$(demo_tailnet_enabled)",
+    'python3 "$SCRIPT_DIR/smoke.py" --bootstrap "${TAILNET_SMOKE_ARGS[@]}" "$DEMO_CLIENT_CONFIG"',
     "exit 0",
 ], start=init.index('if [[ -e "$MODE_FILE" || -L "$MODE_FILE" ]]; then'))
 assert_order(Path(sys.argv[2]), [
@@ -1684,7 +1991,8 @@ assert_order(Path(sys.argv[2]), [
     'demo_compose up -d --wait --wait-timeout 120 "$ACTIVE_SERVER" haproxy',
     '"$SEED_SCRIPT" --verify-turnstile --endpoint haproxy:2443',
     "demo_compose up -d edge",
-    'python3 "$SCRIPT_DIR/smoke.py" --bootstrap "$DEMO_CLIENT_CONFIG"',
+    "TAILNET_ENABLED=$(demo_tailnet_enabled)",
+    'python3 "$SCRIPT_DIR/smoke.py" --bootstrap "${TAILNET_SMOKE_ARGS[@]}" "$DEMO_CLIENT_CONFIG"',
 ], start=init.index("exit 0") + len("exit 0"))
 assert_order(Path(sys.argv[2]), [
     'demo_compose stop edge haproxy turnstile-egress',
@@ -2506,11 +2814,14 @@ EDGE_CONFIG_PERMISSION_DIR="$TMP_DIR/edge-config-permissions"
 mkdir -p "$EDGE_CONFIG_PERMISSION_DIR"
 EDGE_CONFIG_PERMISSION_FILE="$EDGE_CONFIG_PERMISSION_DIR/nginx.conf"
 printf '%s\n' 'worker_processes 1;' > "$EDGE_CONFIG_PERMISSION_FILE"
+printf '%s\n' 'location = /healthz { return 200; }' > "$EDGE_CONFIG_PERMISSION_DIR/common-locations.conf"
 chmod 0700 "$EDGE_CONFIG_PERMISSION_DIR"
 chmod 0600 "$EDGE_CONFIG_PERMISSION_FILE"
+chmod 0600 "$EDGE_CONFIG_PERMISSION_DIR/common-locations.conf"
 demo_prepare_edge_config_permissions "$EDGE_CONFIG_PERMISSION_DIR" "$EDGE_CONFIG_PERMISSION_FILE"
 [[ "$(stat -c '%a' "$EDGE_CONFIG_PERMISSION_DIR")" == 755 ]]
 [[ "$(stat -c '%a' "$EDGE_CONFIG_PERMISSION_FILE")" == 644 ]]
+[[ "$(stat -c '%a' "$EDGE_CONFIG_PERMISSION_DIR/common-locations.conf")" == 644 ]]
 
 ENV_ROLLBACK_FUNCTIONS="$TMP_DIR/demo-env-rollback-functions.sh"
 sed -n '/^demo_capture_env_for_rollback() {$/,/^}/p' "$SCRIPT_DIR/deploy-main.sh" > "$ENV_ROLLBACK_FUNCTIONS"
@@ -2559,6 +2870,8 @@ fi
 python3 "$SCRIPT_DIR/test_update_turnstile_signin.py"
 bash "$SCRIPT_DIR/test-turnstile-signin-rollout.sh"
 python3 "$SCRIPT_DIR/test-probe-tailnet-isolation.py"
+python3 "$SCRIPT_DIR/test-smoke-handshake.py"
+"$SCRIPT_DIR/test-tailnet-source-address.sh"
 "$SCRIPT_DIR/test-demo-scheduling.sh"
 "$SCRIPT_DIR/lima/test-lima-compose.sh"
 "$SCRIPT_DIR/lima/test-deploy-contract.sh"

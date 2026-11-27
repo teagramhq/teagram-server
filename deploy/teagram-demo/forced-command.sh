@@ -29,9 +29,14 @@ if [[ "$EUID" -ne 0 ]]; then
 fi
 
 ACTION=server
+TAILNET_ENABLED=false
 if [[ "$COMMAND" =~ ^([0-9a-f]{40})\ (sha256:[0-9a-f]{64})$ ]]; then
   readonly SHA=${BASH_REMATCH[1]}
   readonly IMAGE_DIGEST=${BASH_REMATCH[2]}
+elif [[ "$COMMAND" =~ ^([0-9a-f]{40})\ (sha256:[0-9a-f]{64})\ (true|false)$ ]]; then
+  readonly SHA=${BASH_REMATCH[1]}
+  readonly IMAGE_DIGEST=${BASH_REMATCH[2]}
+  TAILNET_ENABLED=${BASH_REMATCH[3]}
 elif [[ "$COMMAND" =~ ^qa-invite\ ([0-9a-f]{40})\ (up)\ (sha256:[0-9a-f]{64})$ ]]; then
   ACTION=qa-invite
   readonly SHA=${BASH_REMATCH[1]}
@@ -89,7 +94,8 @@ if [[ "$ACTION" == server ]]; then
     DEMO_DEPLOY_LOCK_HELD=1 DEPLOY_SHA="$SHA" DEPLOY_IMAGE_DIGEST="$IMAGE_DIGEST" PREVIOUS_SHA="$previous" \
       bash "$REPO/deploy/teagram-demo/lima/deploy-main.sh" || deploy_rc=$?
   else
-    DEMO_DEPLOY_LOCK_HELD=1 DEPLOY_SHA="$SHA" DEPLOY_IMAGE_DIGEST="$IMAGE_DIGEST" PREVIOUS_SHA="$previous" \
+    DEMO_DEPLOY_LOCK_HELD=1 TEAGRAM_DEV_TAILNET_ENABLED="$TAILNET_ENABLED" \
+      DEPLOY_SHA="$SHA" DEPLOY_IMAGE_DIGEST="$IMAGE_DIGEST" PREVIOUS_SHA="$previous" \
       bash "$REPO/deploy/teagram-demo/deploy-main.sh" || deploy_rc=$?
   fi
   restore_checkout_after_deploy "$deploy_rc" "$previous" || exit 1
