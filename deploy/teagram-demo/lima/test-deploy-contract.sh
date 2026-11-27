@@ -118,10 +118,12 @@ else
 fi
 # shellcheck disable=SC2016 # Match literal source text without expanding it.
 if grep -Fq 'COMMAND=${SSH_ORIGINAL_COMMAND:-}' "$SCRIPT_DIR/deploy-root-wrapper.sh" &&
-  grep -Fq 'if [[ $# != 0 ]]' "$SCRIPT_DIR/deploy-root-wrapper.sh"; then
-  ok 'root wrapper reads the client command from SSH_ORIGINAL_COMMAND without shell arguments'
+  grep -Fq 'COMMAND=$1' "$SCRIPT_DIR/deploy-root-wrapper.sh" &&
+  grep -Fq 'if [[ $# -gt 1 ]]' "$SCRIPT_DIR/deploy-root-wrapper.sh" &&
+  grep -Fq '"$COMMAND" != "$SSH_ORIGINAL_COMMAND"' "$SCRIPT_DIR/deploy-root-wrapper.sh"; then
+  ok 'root wrapper validates SSH_ORIGINAL_COMMAND and accepts the legacy entrypoint argument during cutover'
 else
-  not_ok 'root wrapper reads the client command from SSH_ORIGINAL_COMMAND without shell arguments'
+  not_ok 'root wrapper validates SSH_ORIGINAL_COMMAND and accepts the legacy entrypoint argument during cutover'
 fi
 # shellcheck disable=SC2016 # Match literal source text without expanding it.
 if grep -Fq 'demo_deploy_command_valid "$COMMAND"' "$SCRIPT_DIR/deploy-root-wrapper.sh"; then
@@ -165,6 +167,10 @@ ALPINE_FUNCTIONS="$TMP_DIR/alpine-functions.sh"
 {
   printf '%s\n' 'REPO=/opt/teagram-demo' 'DEPLOY_USER=root' \
     'ROOT_WRAPPER=/usr/local/sbin/teagram-demo-deploy' \
+    'SSH_CONFIG=/etc/ssh/teagram-demo-deploy_sshd_config' \
+    'SERVICE_FILE=/etc/init.d/teagram-demo-deploy-sshd' \
+    'SERVICE_NAME=teagram-demo-deploy-sshd' \
+    'ADDRESS=100.117.107.78' 'PORT=2223' \
     'AUTHORIZED_KEYS_DIR=/etc/ssh/authorized_keys' \
     'AUTHORIZED_KEYS=/etc/ssh/authorized_keys/teagram-demo-deploy-root' \
     'LEGACY_DEPLOY_USER=teagram-deploy' \
@@ -173,8 +179,18 @@ ALPINE_FUNCTIONS="$TMP_DIR/alpine-functions.sh"
     'LEGACY_SUDOERS_FILE=/etc/sudoers.d/teagram-deploy' \
     'RUNTIME_DIR=/var/lib/teagram-demo/lima/runtime'
   sed -n '/^fail() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
+  sed -n '/^cleanup() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
   sed -n '/^require_root_owned() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
+  sed -n '/^install_file() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
   sed -n '/^install_key_file() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
+  sed -n '/^validate_deploy_key_file() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
+  sed -n '/^snapshot_file() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
+  sed -n '/^restore_file() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
+  sed -n '/^dedicated_listener_ready() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
+  sed -n '/^rollback_deploy_entry() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
+  sed -n '/^stage_deploy_entry() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
+  sed -n '/^activate_deploy_entry() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
+  sed -n '/^directory_hash() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
   sed -n '/^reject_unmanaged_sudoers_rule() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
   sed -n '/^verify_checkout_ownership() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
   sed -n '/^migrate_legacy_runtime_path() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
@@ -186,6 +202,7 @@ ALPINE_FUNCTIONS="$TMP_DIR/alpine-functions.sh"
 cat > "$TMP_DIR/alpine-deploy-entry-regression.sh" <<'BASH'
 set -Eeuo pipefail
 source /tmp/alpine-functions.sh
+TMP_DIR=$(mktemp -d /tmp/lima-installer-tests.XXXXXXXX)
 chmod 0755 /
 
 mkdir -p "$REPO/.git" "$REPO/deploy/teagram-demo"
@@ -341,8 +358,24 @@ expect_legacy_refusal 'a sudoers read error' \
   reject_with_sudoers_read_error
 rm -f /etc/sudoers.d/grep-read-error
 
+reject_with_sudoers_scan_error() {
+  find() {
+    if [[ ${1:-} == /etc/sudoers.d ]]; then
+      return 2
+    fi
+    command find "$@"
+  }
+  remove_legacy_deploy_access
+}
+expect_legacy_refusal 'a sudoers directory scan failure' \
+  'could not enumerate sudoers files' \
+  reject_with_sudoers_scan_error
+
 remove_legacy_deploy_access
-! id "$LEGACY_DEPLOY_USER" >/dev/null 2>&1
+if id "$LEGACY_DEPLOY_USER" >/dev/null 2>&1; then
+  printf 'legacy deploy account survived cleanup\n' >&2
+  exit 1
+fi
 [[ ! -e "$LEGACY_SUDOERS_FILE" && ! -e "$LEGACY_AUTHORIZED_KEYS" && ! -e "$LEGACY_ENTRY_PATH" ]]
 
 mkdir -p "$REPO/.git" "$REPO/deploy/teagram-demo/lima"
@@ -362,6 +395,181 @@ ssh-keygen -q -t ed25519 -N '' -f /tmp/fixture-key
 ssh-keygen -q -t ed25519 -N '' -f /tmp/other-key
 KEY_LINE="restrict,command=\"$ROOT_WRAPPER\" $(cat /tmp/fixture-key.pub)"
 SECOND_KEY_LINE="restrict,command=\"$ROOT_WRAPPER\" $(cat /tmp/other-key.pub)"
+INSTALL_SOURCE=/tmp/lima-installer-source
+mkdir -m 0700 "$INSTALL_SOURCE"
+cp /tmp/lima-sshd_config "$INSTALL_SOURCE/sshd_config"
+cp /tmp/deploy-sshd-initd "$INSTALL_SOURCE/teagram-demo-deploy-sshd.initd"
+cp /tmp/deploy-root-wrapper.sh "$INSTALL_SOURCE/deploy-root-wrapper.sh"
+cat > /tmp/installer-sshd-ok <<'SH'
+#!/bin/sh
+if [ "$1" = -t ]; then exit 0; fi
+if [ "$1" = -T ]; then
+  printf '%s\n' \
+    'port 2223' 'addressfamily inet' 'listenaddress 100.117.107.78:2223' \
+    'allowusers root' 'authorizedkeysfile /etc/ssh/authorized_keys/teagram-demo-deploy-root' \
+    'authenticationmethods publickey' 'passwordauthentication no' \
+    'kbdinteractiveauthentication no' 'permitrootlogin forced-commands-only' \
+    'disableforwarding yes' 'permittty no' 'permittunnel no' \
+    'permituserenvironment no' 'permituserrc no' \
+    'forcecommand /usr/local/sbin/teagram-demo-deploy'
+  exit 0
+fi
+exit 2
+SH
+cat > /tmp/installer-sshd-fail <<'SH'
+#!/bin/sh
+if [ "$1" = -t ]; then exit 1; fi
+exec /tmp/installer-sshd-ok "$@"
+SH
+chmod 0755 /tmp/installer-sshd-ok /tmp/installer-sshd-fail
+
+stage_failure_root=/tmp/lima-stage-failure
+mkdir -p "$stage_failure_root/live"
+printf 'old ssh config\n' > "$stage_failure_root/live/sshd_config"
+printf 'old service\n' > "$stage_failure_root/live/service"
+printf 'old wrapper\n' > "$stage_failure_root/live/wrapper"
+if (
+  TMP_DIR="$stage_failure_root/tmp"
+  mkdir -m 0700 "$TMP_DIR"
+  SCRIPT_DIR=$INSTALL_SOURCE
+  SSH_CONFIG="$stage_failure_root/live/sshd_config"
+  SERVICE_FILE="$stage_failure_root/live/service"
+  ROOT_WRAPPER="$stage_failure_root/live/wrapper"
+  AUTHORIZED_KEYS_DIR="$stage_failure_root/live/authorized_keys"
+  AUTHORIZED_KEYS="$AUTHORIZED_KEYS_DIR/root"
+  KEY_LINE=$KEY_LINE
+  SSHD_BIN=/tmp/installer-sshd-fail
+  stage_deploy_entry
+) > /tmp/stage-config-refusal.out 2>&1; then
+  printf 'installer accepted an invalid staged sshd config\n' >&2
+  exit 1
+fi
+grep -Fq 'dedicated deploy sshd config failed validation' /tmp/stage-config-refusal.out
+grep -Fqx 'old ssh config' "$stage_failure_root/live/sshd_config"
+grep -Fqx 'old service' "$stage_failure_root/live/service"
+grep -Fqx 'old wrapper' "$stage_failure_root/live/wrapper"
+[[ ! -e "$stage_failure_root/live/authorized_keys/root" ]]
+printf 'ok - invalid staged sshd config leaves live files and listener credentials untouched\n'
+
+stage_key_root=/tmp/lima-stage-key-failure
+mkdir -p "$stage_key_root/live/authorized_keys"
+chmod 0755 "$stage_key_root/live/authorized_keys"
+printf 'old ssh config\n' > "$stage_key_root/live/sshd_config"
+printf 'old service\n' > "$stage_key_root/live/service"
+printf 'old wrapper\n' > "$stage_key_root/live/wrapper"
+printf '%s\n' "$SECOND_KEY_LINE" > "$stage_key_root/live/authorized_keys/root"
+chmod 0600 "$stage_key_root/live/authorized_keys/root"
+if (
+  TMP_DIR="$stage_key_root/tmp"
+  mkdir -m 0700 "$TMP_DIR"
+  SCRIPT_DIR=$INSTALL_SOURCE
+  SSH_CONFIG="$stage_key_root/live/sshd_config"
+  SERVICE_FILE="$stage_key_root/live/service"
+  ROOT_WRAPPER="$stage_key_root/live/wrapper"
+  AUTHORIZED_KEYS_DIR="$stage_key_root/live/authorized_keys"
+  AUTHORIZED_KEYS="$AUTHORIZED_KEYS_DIR/root"
+  KEY_LINE=$KEY_LINE
+  SSHD_BIN=/tmp/installer-sshd-ok
+  stage_deploy_entry
+) > /tmp/stage-key-refusal.out 2>&1; then
+  printf 'installer accepted a mismatched staged deploy key\n' >&2
+  exit 1
+fi
+grep -Fq 'deploy authorized keys file differs from the requested deploy key' /tmp/stage-key-refusal.out || {
+  cat /tmp/stage-key-refusal.out >&2
+  exit 1
+}
+grep -Fqx 'old ssh config' "$stage_key_root/live/sshd_config"
+grep -Fqx 'old service' "$stage_key_root/live/service"
+grep -Fqx 'old wrapper' "$stage_key_root/live/wrapper"
+[[ "$(<"$stage_key_root/live/authorized_keys/root")" == "$SECOND_KEY_LINE" ]]
+printf 'ok - mismatched staged deploy key leaves the live wrapper and listener files untouched\n'
+
+activation_root=/tmp/lima-activation-failure
+mkdir -p "$activation_root/live" "$activation_root/state" /etc/runlevels/default
+printf 'old ssh config\n' > "$activation_root/live/sshd_config"
+printf 'old service\n' > "$activation_root/live/service"
+printf 'old wrapper\n' > "$activation_root/live/wrapper"
+chmod 0600 "$activation_root/live/sshd_config"
+chmod 0755 "$activation_root/live/service" "$activation_root/live/wrapper"
+touch "$activation_root/state/active" "$activation_root/state/fail-restart"
+rc-service() {
+  local service=$1 action=$2
+  [[ "$service" == "$SERVICE_NAME" ]] || return 2
+  printf '%s\n' "$action" >> "$SERVICE_STATE_DIR/actions"
+  case "$action" in
+    status) [[ -f "$SERVICE_STATE_DIR/active" ]] ;;
+    stop) rm -f "$SERVICE_STATE_DIR/active" ;;
+    start) touch "$SERVICE_STATE_DIR/active" ;;
+    restart)
+      if [[ -f "$SERVICE_STATE_DIR/fail-restart" ]]; then
+        rm -f "$SERVICE_STATE_DIR/fail-restart" "$SERVICE_STATE_DIR/active"
+        return 1
+      fi
+      touch "$SERVICE_STATE_DIR/active"
+      ;;
+    *) return 2 ;;
+  esac
+}
+netstat() {
+  [[ "$1" == -ltn ]] || return 2
+  printf 'active=%s address=%s port=%s\n' "$([[ -f "$SERVICE_STATE_DIR/active" ]] && printf yes || printf no)" \
+    "$ADDRESS" "$PORT" >> "$SERVICE_STATE_DIR/netstat.log"
+  if [[ -f "$SERVICE_STATE_DIR/active" ]]; then
+    printf 'tcp 0 0 %s:%s 0.0.0.0:*\n' "$ADDRESS" "$PORT"
+  fi
+}
+rc-update() {
+  local action=$1 service=$2
+  [[ "$service" == "$SERVICE_NAME" ]] || return 2
+  if [[ "$action" == add ]]; then
+    touch "/etc/runlevels/default/$service"
+  elif [[ "$action" == del ]]; then
+    rm -f "/etc/runlevels/default/$service"
+  else
+    return 2
+  fi
+}
+if (
+  TMP_DIR="$activation_root/tmp"
+  mkdir -m 0700 "$TMP_DIR"
+  SCRIPT_DIR=$INSTALL_SOURCE
+  SSH_CONFIG="$activation_root/live/sshd_config"
+  SERVICE_FILE="$activation_root/live/service"
+  ROOT_WRAPPER="$activation_root/live/wrapper"
+  AUTHORIZED_KEYS_DIR="$activation_root/live/authorized_keys"
+  AUTHORIZED_KEYS="$AUTHORIZED_KEYS_DIR/root"
+  SERVICE_NAME=teagram-activation-fixture
+  SERVICE_STATE_DIR="$activation_root/state"
+  KEY_LINE=$KEY_LINE
+  SSHD_BIN=/tmp/installer-sshd-ok
+  ACTIVATION_STARTED=0
+  ACTIVATION_COMPLETE=0
+  SERVICE_WAS_ACTIVE=0
+  SERVICE_WAS_ENABLED=0
+  trap cleanup EXIT
+  stage_deploy_entry
+  activate_deploy_entry
+) > /tmp/activation-rollback.out 2>&1; then
+  printf 'installer activation unexpectedly succeeded despite a failed listener restart\n' >&2
+  exit 1
+fi
+grep -Fqx 'old ssh config' "$activation_root/live/sshd_config"
+grep -Fqx 'old service' "$activation_root/live/service"
+grep -Fqx 'old wrapper' "$activation_root/live/wrapper"
+[[ ! -e "$activation_root/live/authorized_keys/root" ]]
+[[ -f "$activation_root/state/active" ]]
+[[ ! -e /etc/runlevels/default/teagram-activation-fixture ]]
+if grep -Fq 'rollback of previous files or listener failed' /tmp/activation-rollback.out; then
+  cat /tmp/activation-rollback.out "$activation_root/state/actions" "$activation_root/state/netstat.log" >&2
+  exit 1
+fi
+grep -Fqx 'start' "$activation_root/state/actions" || {
+  cat /tmp/activation-rollback.out "$activation_root/state/actions" >&2
+  exit 1
+}
+printf 'ok - failed listener activation restores prior files, credentials, runlevel state, and listener\n'
+
 install_key_file "$KEY_LINE"
 install_key_file "$KEY_LINE"
 [[ $(stat -c '%u:%a' "$AUTHORIZED_KEYS") == '0:600' ]]
@@ -401,6 +609,15 @@ if [[ "$output" != "executed:$VALID_COMMAND target:lima" ]]; then
   cat /tmp/ssh.err /tmp/sshd.log >&2
 fi
 [[ "$output" == "executed:$VALID_COMMAND target:lima" ]]
+legacy_output=$(env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  "$ROOT_WRAPPER" "$VALID_COMMAND")
+[[ "$legacy_output" == "executed:$VALID_COMMAND target:lima" ]]
+if SSH_ORIGINAL_COMMAND='bash -c id' "$ROOT_WRAPPER" "$VALID_COMMAND" \
+  >/tmp/ssh-wrapper-mismatch.out 2>&1; then
+  printf 'root wrapper accepted a mismatched legacy command argument\n' >&2
+  exit 1
+fi
+grep -Fq 'legacy deploy command does not match SSH_ORIGINAL_COMMAND' /tmp/ssh-wrapper-mismatch.out
 if ssh -F /dev/null -p 2223 -i /tmp/fixture-key -o IdentitiesOnly=yes \
   -o BatchMode=yes -o PreferredAuthentications=publickey \
   -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
@@ -433,6 +650,7 @@ else
     if ! docker cp "$ALPINE_FUNCTIONS" "$ALPINE_CONTAINER:/tmp/alpine-functions.sh" ||
       ! docker cp "$SCRIPT_DIR/sshd_config" "$ALPINE_CONTAINER:/tmp/lima-sshd_config" ||
       ! docker cp "$SCRIPT_DIR/deploy-root-wrapper.sh" "$ALPINE_CONTAINER:/tmp/deploy-root-wrapper.sh" ||
+      ! docker cp "$SCRIPT_DIR/teagram-demo-deploy-sshd.initd" "$ALPINE_CONTAINER:/tmp/deploy-sshd-initd" ||
       ! docker cp "$SCRIPT_DIR/command-contract.sh" "$ALPINE_CONTAINER:/tmp/command-contract.sh" ||
       ! docker cp "$TMP_DIR/alpine-deploy-entry-regression.sh" "$ALPINE_CONTAINER:/tmp/alpine-deploy-entry-regression.sh"; then
       alpine_test_status=1
