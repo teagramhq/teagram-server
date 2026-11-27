@@ -34,6 +34,7 @@ MEMORY_SAMPLE_RUNTIME_READY_FILE=
 MEMORY_SAMPLE_ERROR_FILE=
 MEMORY_SAMPLE_STOP_FILE=
 MEMORY_SAMPLER_PID=
+MEMORY_RUNTIME_SAMPLER_PID=
 IMAGE_REVISION=
 IMAGE_ID=
 MEMORY_MAX_BYTES=unknown
@@ -42,10 +43,16 @@ PROBE_PHASE=server_startup
 UPLOAD_OUTCOME=not_started
 
 stop_memory_sampler() {
-  if [[ -n $MEMORY_SAMPLER_PID ]]; then
+  if [[ -n $MEMORY_SAMPLER_PID || -n $MEMORY_RUNTIME_SAMPLER_PID ]]; then
     : >"$MEMORY_SAMPLE_STOP_FILE" 2>/dev/null || true
+  fi
+  if [[ -n $MEMORY_SAMPLER_PID ]]; then
     wait "$MEMORY_SAMPLER_PID" 2>/dev/null || true
     MEMORY_SAMPLER_PID=
+  fi
+  if [[ -n $MEMORY_RUNTIME_SAMPLER_PID ]]; then
+    wait "$MEMORY_RUNTIME_SAMPLER_PID" 2>/dev/null || true
+    MEMORY_RUNTIME_SAMPLER_PID=
   fi
 }
 
@@ -232,37 +239,6 @@ run_setup_command() {
   docker run "${docker_flags[@]}" "$IMAGE_ID" "$@"
 }
 
-sample_memory_cgroup() {
-  local last_runtime_sample_current=0 sampled_current runtime_sample_tmp
-  while [[ ! -e $MEMORY_SAMPLE_STOP_FILE && -r $MEMORY_PEAK_FILE && -r $MEMORY_EVENTS_FILE ]]; do
-    if ! lima_memory_record_cgroup_sample "$MEMORY_CGROUP_DIR" /proc "$container_pid" \
-      "$RUNNER_TEMP/lima-memory-sampled"; then
-      printf 'failed to capture a complete cgroup sample\n' >"$MEMORY_SAMPLE_ERROR_FILE"
-      break
-    fi
-    if [[ -e $MEMORY_SAMPLE_RUNTIME_READY_FILE && -r $MEMORY_SAMPLE_STAT_PEAK_FILE ]]; then
-      sampled_current=$(<"$MEMORY_SAMPLE_STAT_PEAK_FILE")
-      if [[ $sampled_current =~ ^[0-9]+$ ]] &&
-        (( sampled_current >= last_runtime_sample_current + RUNTIME_SAMPLE_INTERVAL_BYTES )); then
-        runtime_sample_tmp="$MEMORY_SAMPLE_RUNTIME_FILE.tmp"
-        if curl --noproxy '*' --fail --connect-timeout 1 --max-time 2 --silent --show-error \
-          --output "$runtime_sample_tmp" http://127.0.0.1:2447/debug/runtime-memory &&
-          [[ -s $runtime_sample_tmp ]]; then
-          mv -- "$runtime_sample_tmp" "$MEMORY_SAMPLE_RUNTIME_FILE"
-          printf '%s\n' "$sampled_current" >"$MEMORY_SAMPLE_RUNTIME_PEAK_FILE"
-          last_runtime_sample_current=$sampled_current
-        else
-          rm -f -- "$runtime_sample_tmp"
-          printf 'failed to capture Go runtime memory metrics at %s cgroup bytes\n' \
-            "$sampled_current" >"$MEMORY_SAMPLE_ERROR_FILE"
-          break
-        fi
-      fi
-    fi
-    sleep 0.01
-  done
-}
-
 container_pid=$(docker inspect --format '{{.State.Pid}}' "$CONTAINER")
 if [[ $container_pid =~ ^[1-9][0-9]*$ ]]; then
   cgroup_path=$(awk -F: '$1 == "0" { print $3 }' "/proc/$container_pid/cgroup")
@@ -292,8 +268,15 @@ if [[ $container_pid =~ ^[1-9][0-9]*$ ]]; then
       exit 1
     fi
 
-    sample_memory_cgroup &
+    lima_memory_sample_cgroup_loop "$MEMORY_CGROUP_DIR" /proc "$container_pid" \
+      "$RUNNER_TEMP/lima-memory-sampled" "$MEMORY_SAMPLE_STOP_FILE" "$MEMORY_SAMPLE_ERROR_FILE" \
+      0.01 &
     MEMORY_SAMPLER_PID=$!
+    lima_memory_sample_runtime_metrics_loop "$MEMORY_CURRENT_FILE" "$RUNTIME_SAMPLE_INTERVAL_BYTES" \
+      "$MEMORY_SAMPLE_RUNTIME_READY_FILE" "$MEMORY_SAMPLE_RUNTIME_FILE" \
+      "$MEMORY_SAMPLE_RUNTIME_PEAK_FILE" "$MEMORY_SAMPLE_ERROR_FILE" "$MEMORY_SAMPLE_STOP_FILE" \
+      0.01 &
+    MEMORY_RUNTIME_SAMPLER_PID=$!
   else
     echo 'runner does not expose the service container cgroup v2 path' >&2
     exit 1

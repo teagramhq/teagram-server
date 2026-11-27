@@ -162,4 +162,108 @@ if ! lima_memory_process_attribution_check 10 3000000 complete -; then
   exit 1
 fi
 
+runtime_cgroup="$fixture/runtime-cgroup"
+runtime_prefix="$fixture/runtime-sample"
+runtime_ready="$fixture/runtime-ready"
+runtime_stop="$fixture/runtime-stop"
+runtime_error="$fixture/runtime-error"
+runtime_file="$fixture/runtime.json"
+runtime_sample_current="$fixture/runtime-current"
+runtime_request_started="$fixture/runtime-request-started"
+runtime_request_release="$fixture/runtime-request-release"
+mkdir -p "$runtime_cgroup"
+printf '101\n102\n103\n' >"$runtime_cgroup/cgroup.procs"
+printf '3145728\n' >"$runtime_cgroup/memory.peak"
+printf 'low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\n' >"$runtime_cgroup/memory.events"
+printf '2500000\n' >"$runtime_cgroup/memory.current"
+printf 'anon 2000000\nfile 100000\nkernel 400000\n' >"$runtime_cgroup/memory.stat"
+touch "$runtime_ready"
+
+curl() {
+  local output=
+  while (($#)); do
+    if [[ "$1" == --output ]]; then
+      output="$2"
+      shift 2
+    else
+      shift
+    fi
+  done
+  : >"$runtime_request_started"
+  while [[ ! -e "$runtime_request_release" ]]; do
+    sleep 0.01
+  done
+  printf '{"heap_live_bytes":1}\n' >"$output"
+}
+
+lima_memory_sample_cgroup_loop "$runtime_cgroup" "$proc_root" 101 "$runtime_prefix" \
+  "$runtime_stop" "$runtime_error" 0.01 &
+cgroup_sampler_pid=$!
+lima_memory_sample_runtime_metrics_loop "$runtime_cgroup/memory.current" "$((512 * 1024))" "$runtime_ready" \
+  "$runtime_file" "$runtime_sample_current" "$runtime_error" "$runtime_stop" 0.01 &
+runtime_sampler_pid=$!
+for attempt in $(seq 200); do
+  if [[ -e "$runtime_request_started" ]]; then
+    break
+  fi
+  sleep 0.01
+done
+if [[ ! -e "$runtime_request_started" ]]; then
+  printf 'runtime sampler did not begin the blocking metrics request\n' >&2
+  : >"$runtime_request_release"
+  : >"$runtime_stop"
+  wait "$cgroup_sampler_pid" 2>/dev/null || true
+  wait "$runtime_sampler_pid" 2>/dev/null || true
+  exit 1
+fi
+
+# A delayed runtime request must not pause 10 ms process snapshots. Capture a
+# short-lived worker at the higher current, then lower current before it exits.
+mkdir -p "$proc_root/105"
+cat >"$proc_root/105/status" <<'EOF'
+Name:   photothumb
+VmRSS:  95 kB
+RssAnon: 90 kB
+EOF
+printf '101\n102\n103\n105\n' >"$runtime_cgroup/cgroup.procs"
+printf '3000000\n' >"$runtime_cgroup/memory.current"
+printf 'anon 2400000\nfile 100000\nkernel 500000\n' >"$runtime_cgroup/memory.stat"
+sampled_worker_count=
+for attempt in $(seq 200); do
+  if [[ -r "$runtime_prefix-processes" ]]; then
+    IFS='|' read -r sampled_current _ _ _ sampled_worker_count _ sampled_attribution _ \
+      <"$runtime_prefix-processes"
+    if [[ "$sampled_current" == 3000000 && "$sampled_worker_count" == 3 &&
+      "$sampled_attribution" == complete ]]; then
+      break
+    fi
+  fi
+  sleep 0.01
+done
+if [[ "$sampled_current" != 3000000 || "$sampled_worker_count" != 3 ||
+  "$sampled_attribution" != complete ]]; then
+  printf 'process sampler missed the short-lived worker while runtime metrics were blocked: %s\n' \
+    "$(<"$runtime_prefix-processes" 2>/dev/null || printf missing)" >&2
+  : >"$runtime_request_release"
+  : >"$runtime_stop"
+  wait "$cgroup_sampler_pid" 2>/dev/null || true
+  wait "$runtime_sampler_pid" 2>/dev/null || true
+  exit 1
+fi
+printf '2800000\n' >"$runtime_cgroup/memory.current"
+printf '101\n102\n103\n' >"$runtime_cgroup/cgroup.procs"
+rm -f -- "$proc_root/105/status"
+touch "$runtime_stop" "$runtime_request_release"
+wait "$cgroup_sampler_pid"
+wait "$runtime_sampler_pid"
+if [[ -e "$runtime_error" ]]; then
+  cat "$runtime_error" >&2
+  exit 1
+fi
+if [[ $(<"$runtime_sample_current") != 2500000 || $(<"$runtime_file") != '{"heap_live_bytes":1}' ]]; then
+  printf 'runtime metrics sample = %s at %s bytes, want fixture metrics at 2500000 bytes\n' \
+    "$(<"$runtime_file")" "$(<"$runtime_sample_current")" >&2
+  exit 1
+fi
+
 printf 'Lima process snapshot fixture passed\n'

@@ -228,6 +228,52 @@ lima_memory_record_cgroup_sample() {
   fi
 }
 
+lima_memory_sample_cgroup_loop() {
+  local cgroup_dir="$1" proc_root="$2" server_pid="$3" sample_prefix="$4"
+  local stop_file="$5" error_file="$6" interval_seconds="${7:-0.01}"
+
+  while [[ ! -e "$stop_file" && -r "$cgroup_dir/memory.peak" && -r "$cgroup_dir/memory.events" ]]; do
+    if ! lima_memory_record_cgroup_sample "$cgroup_dir" "$proc_root" "$server_pid" "$sample_prefix"; then
+      printf 'failed to capture a complete cgroup sample\n' >"$error_file"
+      return 1
+    fi
+    sleep "$interval_seconds"
+  done
+}
+
+lima_memory_sample_runtime_metrics_loop() {
+  local current_file="$1" sample_interval_bytes="$2" ready_file="$3"
+  local runtime_file="$4" runtime_sample_current_file="$5" error_file="$6" stop_file="$7"
+  local interval_seconds="${8:-0.01}" last_runtime_sample_current=0 sampled_current runtime_sample_tmp
+
+  while [[ ! -e "$stop_file" ]]; do
+    if [[ ! -e "$ready_file" ]]; then
+      sleep "$interval_seconds"
+      continue
+    fi
+    if ! sampled_current=$(<"$current_file") || [[ ! "$sampled_current" =~ ^[0-9]+$ ]]; then
+      printf 'failed to read cgroup current before Go runtime memory metrics request\n' >"$error_file"
+      return 1
+    fi
+    if (( sampled_current >= last_runtime_sample_current + sample_interval_bytes )); then
+      runtime_sample_tmp="$runtime_file.tmp"
+      if curl --noproxy '*' --fail --connect-timeout 1 --max-time 2 --silent --show-error \
+        --output "$runtime_sample_tmp" http://127.0.0.1:2447/debug/runtime-memory &&
+        [[ -s "$runtime_sample_tmp" ]]; then
+        mv -- "$runtime_sample_tmp" "$runtime_file"
+        printf '%s\n' "$sampled_current" >"$runtime_sample_current_file"
+        last_runtime_sample_current=$sampled_current
+      else
+        rm -f -- "$runtime_sample_tmp"
+        printf 'failed to capture Go runtime memory metrics at %s cgroup bytes\n' \
+          "$sampled_current" >"$error_file"
+        return 1
+      fi
+    fi
+    sleep "$interval_seconds"
+  done
+}
+
 lima_memory_peak_unattributed_bytes() {
   local peak_bytes="$1" sampled_current_bytes="$2"
   if [[ ! "$peak_bytes" =~ ^[0-9]+$ || ! "$sampled_current_bytes" =~ ^[0-9]+$ ]] ||
