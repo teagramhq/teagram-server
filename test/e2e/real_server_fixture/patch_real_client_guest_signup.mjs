@@ -15,10 +15,13 @@ export function patchRealClientGuestSignup(webRoot) {
   const runPath = join(webRoot, 'scripts/real-client/run.mjs');
   const browserPath = join(webRoot, 'scripts/real-client/browser.cjs');
   const observationPath = join(webRoot, 'scripts/real-client/observation.cjs');
+  const contractPath = join(webRoot, 'scripts/real-client/contract.mjs');
   let run = readFileSync(runPath, 'utf8');
   let browser = readFileSync(browserPath, 'utf8');
   let observation = readFileSync(observationPath, 'utf8');
-  if(run.includes('guestSignupQaBypassToken') || browser.includes('guestSignupQaBypassToken') || observation.includes('REAL_CLIENT_GUEST_SIGNUP_TAILNET')) {
+  let contract = readFileSync(contractPath, 'utf8');
+  if(run.includes('guestSignupQaBypassToken') || browser.includes('guestSignupQaBypassToken') ||
+      observation.includes('REAL_CLIENT_GUEST_SIGNUP_TAILNET') || contract.includes('PRIVATE_CSP_WSS')) {
     throw new Error('pinned web guest-signup runner is already patched');
   }
 
@@ -26,6 +29,15 @@ export function patchRealClientGuestSignup(webRoot) {
     "const PRIVATE_CSP_ORIGIN = 'https://teagramd.test';",
     "const PRIVATE_CSP_ORIGIN = process.env.REAL_CLIENT_GUEST_SIGNUP_TAILNET === '1' ? 'https://teagram-dev.tailaa4918.ts.net' : 'https://teagramd.test';",
     'guest-signup tailnet observation origin');
+
+  contract = replaceOnce(contract,
+    'const PRIVATE_CSP_ORIGIN = observation.PRIVATE_CSP_ORIGIN;',
+    "const PRIVATE_CSP_ORIGIN = observation.PRIVATE_CSP_ORIGIN;\nconst PRIVATE_CSP_WSS = `${PRIVATE_CSP_ORIGIN.replace('https:', 'wss:')}/apiws`;",
+    'guest-signup tailnet fixture origin');
+  contract = replaceOnce(contract,
+    "if(serverReady.endpoint !== 'https://teagramd.test' ||\n      serverReady.wssEndpoint !== 'wss://teagramd.test/apiws' ||",
+    'if(serverReady.endpoint !== PRIVATE_CSP_ORIGIN ||\n      serverReady.wssEndpoint !== PRIVATE_CSP_WSS ||',
+    'guest-signup tailnet fixture endpoint validation');
 
   run = replaceOnce(run,
     '  const guestSignupGateOff = args.guestSignupGateOff === true;',
@@ -149,6 +161,7 @@ export function patchRealClientGuestSignup(webRoot) {
   writeFileSync(runPath, run);
   writeFileSync(browserPath, browser);
   writeFileSync(observationPath, observation);
+  writeFileSync(contractPath, contract);
 }
 
 function parseArguments(argv) {
