@@ -116,24 +116,33 @@ func readLimaRuntimeMemorySample() (limaRuntimeMemorySample, error) {
 	}, nil
 }
 
-func applyLimaGoMemoryLimit() func() {
-	memoryMax, err := os.ReadFile(limaCgroupMemoryMaxPath)
+func applyLimaGoMemoryLimit(log *slog.Logger, memoryMaxPath string) func() {
+	memoryMax, err := os.ReadFile(memoryMaxPath) // #nosec G304 -- production passes the fixed cgroup path; tests use temporary files.
 	if err != nil {
+		log.Warn("skip Lima Go memory cap", "reason", "read cgroup memory.max", "path", memoryMaxPath, "err", err)
 		return func() {}
 	}
-	return applyLimaGoMemoryLimitForCgroupMax(string(memoryMax))
-}
-
-func applyLimaGoMemoryLimitForCgroupMax(memoryMax string) func() {
-	cgroupMemoryLimit, err := strconv.ParseInt(strings.TrimSpace(memoryMax), 10, 64)
-	if err != nil || cgroupMemoryLimit <= 0 || cgroupMemoryLimit > limaGoMemoryLimitCgroupThresholdBytes {
+	cgroupMemoryLimit, err := strconv.ParseInt(strings.TrimSpace(string(memoryMax)), 10, 64)
+	if err != nil {
+		log.Warn("skip Lima Go memory cap", "reason", "parse cgroup memory.max", "path", memoryMaxPath, "value", strings.TrimSpace(string(memoryMax)), "err", err)
+		return func() {}
+	}
+	if cgroupMemoryLimit <= 0 {
+		log.Warn("skip Lima Go memory cap", "reason", "invalid cgroup memory.max", "path", memoryMaxPath, "value", cgroupMemoryLimit)
+		return func() {}
+	}
+	if cgroupMemoryLimit > limaGoMemoryLimitCgroupThresholdBytes {
+		log.Info("Lima Go memory cap not applied", "reason", "cgroup memory.max exceeds threshold", "path", memoryMaxPath, "cgroup_memory_max_bytes", cgroupMemoryLimit, "threshold_bytes", limaGoMemoryLimitCgroupThresholdBytes)
 		return func() {}
 	}
 
 	previousMemoryLimit := debug.SetMemoryLimit(-1)
-	if previousMemoryLimit < 0 || previousMemoryLimit > limaGoMemoryLimitBytes {
-		debug.SetMemoryLimit(limaGoMemoryLimitBytes)
+	effectiveMemoryLimit := previousMemoryLimit
+	if effectiveMemoryLimit <= 0 || effectiveMemoryLimit > limaGoMemoryLimitBytes {
+		effectiveMemoryLimit = limaGoMemoryLimitBytes
 	}
+	debug.SetMemoryLimit(effectiveMemoryLimit)
+	log.Info("Lima Go memory cap applied", "path", memoryMaxPath, "cgroup_memory_max_bytes", cgroupMemoryLimit, "go_memory_limit_bytes", effectiveMemoryLimit)
 	return func() { debug.SetMemoryLimit(previousMemoryLimit) }
 }
 

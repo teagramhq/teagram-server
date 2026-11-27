@@ -324,6 +324,20 @@ if [[ $memory_limit != "$EXPECTED_LIMIT" ]]; then
   exit 1
 fi
 
+memory_cap_log=$(docker logs "$CONTAINER" 2>&1 | awk '/msg="Lima Go memory cap applied"/ { line = $0 } END { if (line != "") print line }')
+if [[ -z $memory_cap_log ]]; then
+  echo 'Lima Go memory cap applied log is missing from the server container' >&2
+  exit 1
+fi
+case "$memory_cap_log" in
+  *"cgroup_memory_max_bytes=$EXPECTED_LIMIT"*"go_memory_limit_bytes=$((16 * 1024 * 1024))"*) ;;
+  *)
+    printf 'Lima Go memory cap log does not match the probe cgroup and 16 MiB cap: %s\n' "$memory_cap_log" >&2
+    exit 1
+    ;;
+esac
+printf '%s\n' "$memory_cap_log"
+
 websocket_listener_ready=false
 for attempt in $(seq 30); do
   if curl --noproxy '*' --connect-timeout 1 --max-time 2 --silent --output /dev/null \

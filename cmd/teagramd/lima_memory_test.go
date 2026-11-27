@@ -1,39 +1,59 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"log/slog"
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"runtime/debug"
+	"strings"
 	"testing"
 )
 
-func TestApplyLimaGoMemoryLimitOnlyForSmallCgroups(t *testing.T) {
+func TestApplyLimaGoMemoryLimitReadsCgroupMemoryMax(t *testing.T) {
 	t.Setenv("TG_LIMA_MEMORY_DIAGNOSTICS", "")
 	tests := []struct {
 		name            string
 		memoryMax       string
+		writeMemoryMax  bool
 		previousLimit   int64
 		wantMemoryLimit int64
+		wantLogLevel    string
+		wantLogMessage  string
 	}{
-		{name: "Lima cgroup", memoryMax: "48234496", previousLimit: 20 << 20, wantMemoryLimit: 16 << 20},
-		{name: "threshold cgroup", memoryMax: "67108864", previousLimit: 20 << 20, wantMemoryLimit: 16 << 20},
-		{name: "production cgroup", memoryMax: "1073741824", previousLimit: math.MaxInt64, wantMemoryLimit: math.MaxInt64},
-		{name: "unlimited cgroup", memoryMax: "max", previousLimit: math.MaxInt64, wantMemoryLimit: math.MaxInt64},
+		{name: "Lima cgroup", memoryMax: "48234496", writeMemoryMax: true, previousLimit: 20 << 20, wantMemoryLimit: 16 << 20, wantLogLevel: "level=INFO", wantLogMessage: "Lima Go memory cap applied"},
+		{name: "threshold cgroup", memoryMax: "67108864", writeMemoryMax: true, previousLimit: 20 << 20, wantMemoryLimit: 16 << 20, wantLogLevel: "level=INFO", wantLogMessage: "Lima Go memory cap applied"},
+		{name: "production cgroup", memoryMax: "1073741824", writeMemoryMax: true, previousLimit: math.MaxInt64, wantMemoryLimit: math.MaxInt64, wantLogLevel: "level=INFO", wantLogMessage: "Lima Go memory cap not applied"},
+		{name: "unlimited cgroup", memoryMax: "max", writeMemoryMax: true, previousLimit: math.MaxInt64, wantMemoryLimit: math.MaxInt64, wantLogLevel: "level=WARN", wantLogMessage: "parse cgroup memory.max"},
+		{name: "missing cgroup file", previousLimit: 20 << 20, wantMemoryLimit: 20 << 20, wantLogLevel: "level=WARN", wantLogMessage: "read cgroup memory.max"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			previousLimit := debug.SetMemoryLimit(test.previousLimit)
 			t.Cleanup(func() { debug.SetMemoryLimit(previousLimit) })
-			restore := applyLimaGoMemoryLimitForCgroupMax(test.memoryMax)
+			memoryMaxPath := filepath.Join(t.TempDir(), "memory.max")
+			if test.writeMemoryMax {
+				if err := os.WriteFile(memoryMaxPath, []byte(test.memoryMax), 0o600); err != nil {
+					t.Fatalf("write memory.max: %v", err)
+				}
+			}
+			var logOutput bytes.Buffer
+			logger := slog.New(slog.NewTextHandler(&logOutput, nil))
+
+			restore := applyLimaGoMemoryLimit(logger, memoryMaxPath)
 			if got := currentLimaTestMemoryLimit(); got != test.wantMemoryLimit {
 				t.Fatalf("Go memory limit = %d bytes, want %d", got, test.wantMemoryLimit)
 			}
 			restore()
 			if got := currentLimaTestMemoryLimit(); got != test.previousLimit {
 				t.Fatalf("Go memory limit after restore = %d bytes, want previous limit %d", got, test.previousLimit)
+			}
+			if got := logOutput.String(); !strings.Contains(got, test.wantLogLevel) || !strings.Contains(got, test.wantLogMessage) {
+				t.Fatalf("memory limit log = %q, want %q and %q", got, test.wantLogLevel, test.wantLogMessage)
 			}
 		})
 	}
@@ -43,11 +63,23 @@ func TestApplyLimaGoMemoryLimitPreservesStricterLimit(t *testing.T) {
 	previousLimit := debug.SetMemoryLimit(12 << 20)
 	t.Cleanup(func() { debug.SetMemoryLimit(previousLimit) })
 
-	restore := applyLimaGoMemoryLimitForCgroupMax("48234496")
+	memoryMaxPath := writeLimaTestCgroupMemoryMax(t, "48234496")
+	var logOutput bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logOutput, nil))
+	restore := applyLimaGoMemoryLimit(logger, memoryMaxPath)
 	if got := currentLimaTestMemoryLimit(); got != 12<<20 {
 		t.Fatalf("Go memory limit = %d bytes, want preserved stricter limit %d", got, 12<<20)
 	}
 	restore()
+}
+
+func writeLimaTestCgroupMemoryMax(t *testing.T, value string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "memory.max")
+	if err := os.WriteFile(path, []byte(value), 0o600); err != nil {
+		t.Fatalf("write memory.max: %v", err)
+	}
+	return path
 }
 
 func currentLimaTestMemoryLimit() int64 {
