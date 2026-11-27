@@ -201,7 +201,14 @@ class PullBaseImagesTests(unittest.TestCase):
             r"run: (?:>- )?bash \.github/scripts/pull-base-images\.sh "
             r"--image mirror\.gcr\.io/postgres:18-alpine"
         )
-        for job_name in ("test-go", "test-smoke", "test-e2e-admin", "test-real-server-fixtures"):
+        for job_name in (
+            "test-go",
+            "test-go-e2e",
+            "test-go-fleet-cap",
+            "test-smoke",
+            "test-e2e-admin",
+            "test-real-server-fixtures",
+        ):
             with self.subTest(job=job_name):
                 job = re.search(
                     rf"(?ms)^  {re.escape(job_name)}:\n(.*?)(?=^  [a-z0-9-]+:|\Z)",
