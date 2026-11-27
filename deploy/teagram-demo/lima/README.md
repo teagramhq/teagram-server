@@ -16,7 +16,7 @@ charlie demo files are unchanged; this directory is a separate Compose file.
 | `check.sh` | Read-only preflight. Pulls nothing, starts and stops nothing, writes nothing. Ends with `would_apply` or `would_reject`. |
 | `test-lima-compose.sh` | Renders the stack against fixture values and asserts the acceptance criteria. CI runs it through `test-demo-compose.sh`. |
 | `deploy-main.sh` | Stops the old server, migrates, starts one new server, checks `/healthz`, and restores the previous image if the new release fails. |
-| `install-deploy-entry.sh` | Idempotent root installer for the `teagram-deploy` account and the port 2223 SSH listener. It moves the Stage 1 proxy temp and HAProxy socket paths into the external runtime directory before scanning checkout ownership. Run by Steward at cutover. |
+| `install-deploy-entry.sh` | Idempotent root installer for the root forced-command key and port 2223 SSH listener. It moves the Stage 1 proxy temp and HAProxy socket paths into the external runtime directory before scanning checkout ownership. Run by Steward at cutover. |
 
 ## Root-only inputs on the host
 
@@ -143,16 +143,30 @@ error text.
 
 At cutover, derive the public half of the existing `DEMO_DEPLOY_SSH_KEY` and
 pass it to the root installer as `TEAGRAM_DEMO_DEPLOY_PUBLIC_KEY`. The installer
-creates a non-root `teagram-deploy` account outside the Docker group and a
-separate OpenRC managed sshd bound only to `100.117.107.78:2223`. The account
-can authenticate with the configured public key and invoke only
-`/usr/local/sbin/teagram-demo-deploy`; the root wrapper checks the command again
-before it reaches the root-owned checkout. Lima's regular sshd configuration
-and listener on port 22 are verified unchanged.
+configures the separate OpenRC managed sshd on `100.117.107.78:2223` for root
+logins with `PermitRootLogin forced-commands-only`. It authorizes that key only
+in `/etc/ssh/authorized_keys/teagram-demo-deploy-root`, with
+`restrict,command="/usr/local/sbin/teagram-demo-deploy"`. The root wrapper reads
+`SSH_ORIGINAL_COMMAND`, checks the fixed command contract, and then reaches the
+root-owned checkout. The installer removes the old `teagram-deploy` account,
+its managed sudoers rule, authorized-key file, and unprivileged entrypoint. It
+does not install or remove the sudo package; after verifying the new login, the
+Steward removes the sudo package. Lima's regular sshd
+configuration and listener on port 22 are verified unchanged.
 
-The deploy workflow continues to read host, port, known hosts, and login user
-from the `demo` environment variables. At cutover, set those values to lima and
-`teagram-deploy`. QA invite remains pinned to charlie.
+The deploy workflow reads host, port, known hosts, and login user from the
+`demo` environment variables. Let any already queued demo deployment finish,
+then run the installer and pass the root key login and command-contract checks.
+After those checks, set `DEMO_DEPLOY_USER=root` in the `demo` environment. Set
+the host, port, and pinned host key to Lima at cutover. QA invite remains pinned
+to charlie.
+
+To roll back before removing sudo, restore the previous trusted main checkout
+and rerun its `install-deploy-entry.sh` with the same public key. It reinstalls
+the `teagram-deploy` account, sudo rule, and old listener configuration. The
+demo deploy key must then be tested as `teagram-deploy` on port 2223. Remove the
+sudo package only after the root forced-command login and command contract have
+been verified.
 
 Before stopping the current service, the deploy checks the Lima setup, verifies
 the active image is locally available for rollback, checks the live `/healthz`,

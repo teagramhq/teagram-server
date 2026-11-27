@@ -1522,7 +1522,6 @@ jobs:
           bash -n deploy/teagram-demo/lima/deploy-root-wrapper.sh
           bash -n deploy/teagram-demo/lima/install-deploy-entry.sh
           bash -n deploy/teagram-demo/lima/test-deploy-contract.sh
-          sh -n deploy/teagram-demo/lima/deploy-entry.sh
           sh -n deploy/teagram-demo/lima/teagram-demo-deploy-sshd.initd
           bash -n deploy/teagram-demo/test-tailnet-source-address.sh
           bash -n deploy/teagram-demo/test-identity-import.sh
@@ -1606,7 +1605,6 @@ jobs:
             deploy/teagram-demo/test-identity-import.sh \
             deploy/teagram-demo/lima/check.sh \
             deploy/teagram-demo/lima/command-contract.sh \
-            deploy/teagram-demo/lima/deploy-entry.sh \
             deploy/teagram-demo/lima/deploy-main.sh \
             deploy/teagram-demo/lima/deploy-root-wrapper.sh \
             deploy/teagram-demo/lima/install-deploy-entry.sh \
