@@ -100,8 +100,18 @@ check_ci_contract() {
     ci_fail 'every deploy workflow check must be assigned to exactly one fixed worker'
   [[ "$(ci_query '.jobs.ci.needs | to_entries[] | select(.value == "check-deploy-workflow") | .key')" == '19' ]] ||
     ci_fail 'the deploy workflow check must remain in its existing position in ci.needs'
-  grep -Fq 'sudo -n unshare --mount --propagation private' .github/scripts/run-deploy-workflow-checks.sh ||
-    ci_fail 'the alpha bootstrap fixture must receive a private root filesystem in the worker pool'
+  [[ "$(ci_query '.jobs."test-alpha-bootstrap".name')" == 'test: alpha-bootstrap' ]] ||
+    ci_fail 'the alpha bootstrap fixture must keep its dedicated test job name'
+  [[ "$(ci_query '.jobs."test-alpha-bootstrap".steps[] | select(.name == "Run alpha bootstrap apply fixture in a private root namespace") | .run | contains("sudo -n unshare --mount --propagation private")')" == 'true' ]] ||
+    ci_fail 'the alpha bootstrap fixture must keep its private root filesystem'
+  [[ "$(ci_query '.jobs.ci.needs | contains(["test-alpha-bootstrap"])')" == 'true' ]] ||
+    ci_fail 'the required CI gate must include the alpha bootstrap fixture'
+  [[ "$(ci_query '.jobs."publish-k8s-images".needs | contains(["test-alpha-bootstrap"])')" == 'true' ]] ||
+    ci_fail 'Kubernetes image publication must wait for the alpha bootstrap fixture'
+  [[ "$(ci_query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .env.TEST_ALPHA_BOOTSTRAP_RESULT')" == '${{ needs.test-alpha-bootstrap.result }}' ]] ||
+    ci_fail 'the required CI gate must receive the alpha bootstrap result'
+  grep -Fq '"$TEST_ALPHA_BOOTSTRAP_RESULT" != "success"' .github/workflows/ci.yml ||
+    ci_fail 'the required CI gate must fail when the alpha bootstrap fixture fails'
   grep -Fq "GOPROXY='https://proxy.golang.org|direct' .github/scripts/test-perf-workflow-contract.sh" .github/scripts/run-deploy-workflow-checks.sh ||
     ci_fail 'the RPC performance contract must fall back to direct downloads when the module proxy fails'
   if ! grep -Fq "'Check Lima demo egress isolation'" .github/scripts/run-deploy-workflow-checks.sh ||

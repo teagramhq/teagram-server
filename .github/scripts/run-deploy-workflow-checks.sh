@@ -17,7 +17,6 @@ CHECKS=(
   'Test production image pin resolution'
   'Test bounded K8s workload checks'
   'Test early post-apply release rollback'
-  'Test the alpha bootstrap apply path with mocks'
   'Check RPC performance workflow contract'
   'Check PR CI cancellation policy'
   'Check workflow contract script syntax'
@@ -45,14 +44,15 @@ CHECKS=(
   'Check demo Turnstile secret access'
   'Check demo image release pinning'
   'Lint deployment, performance, and real-client workflows'
+  'Test deploy workflow worker preserves command failures'
 )
 
 # Assign all checks once across a fixed pool, balanced using measured CI task times.
-readonly -a WORKER_1_TASKS=(9)
-readonly -a WORKER_2_TASKS=(27 23 31 16 2 35 11 25)
-readonly -a WORKER_3_TASKS=(28 8 21 3 19 4 18 29 17 15)
-readonly -a WORKER_4_TASKS=(12 0 20 7 33 5 10 6 26)
-readonly -a WORKER_5_TASKS=(36 22 14 13 24 34 30 32 1)
+readonly -a WORKER_1_TASKS=(26)
+readonly -a WORKER_2_TASKS=(1 2 5 10 12 14 15 22 27 28 31 35)
+readonly -a WORKER_3_TASKS=(3 4 6 7 16 20 21 30 32 34 36)
+readonly -a WORKER_4_TASKS=(0 8 9 11 17 18 23 24 25 29 33)
+readonly -a WORKER_5_TASKS=(13 19)
 
 run_with_loopback_port_lock() (
   # These fixtures select a free port, release it, then bind it; keep their assignments distinct.
@@ -97,13 +97,6 @@ run_check() {
     'Test early post-apply release rollback')
       python3 -B deploy/k8s/test-deploy-release-early-rollback.py
       ;;
-    'Test the alpha bootstrap apply path with mocks')
-      # The test writes a fixed /root kubeconfig; a private mount namespace gives it its own /root copy.
-      sudo -n unshare --mount --propagation private bash -c '
-        mount -t tmpfs -o mode=0755 tmpfs /root
-        exec "$1"
-      ' bootstrap-alpha-test "$REPO_ROOT/deploy/k8s/test-bootstrap-alpha.sh"
-      ;;
     'Check RPC performance workflow contract')
       GOPROXY='https://proxy.golang.org|direct' .github/scripts/test-perf-workflow-contract.sh
       ;;
@@ -113,6 +106,8 @@ run_check() {
     'Check workflow contract script syntax')
       bash -n .github/scripts/perf-run.sh .github/scripts/test-perf-workflow-contract.sh .github/scripts/test-ci-main-priority.sh
       shellcheck .github/scripts/test-perf-workflow-contract.sh .github/scripts/test-ci-main-priority.sh
+      bash -n .github/scripts/test-deploy-workflow-worker-fail-fast.sh
+      shellcheck .github/scripts/test-deploy-workflow-worker-fail-fast.sh
       bash -n .github/scripts/publish-k8s-image-digests.sh .github/scripts/test-k8s-image-digests.sh
       shellcheck .github/scripts/publish-k8s-image-digests.sh .github/scripts/test-k8s-image-digests.sh
       bash -n deploy/k8s/deploy-release.sh \
@@ -142,6 +137,9 @@ run_check() {
       shellcheck .github/scripts/check-k8s-prod-image-pins.sh
       bash -n .github/scripts/run-deploy-workflow-checks.sh
       shellcheck .github/scripts/run-deploy-workflow-checks.sh
+      ;;
+    'Test deploy workflow worker preserves command failures')
+      .github/scripts/test-deploy-workflow-worker-fail-fast.sh
       ;;
     'Test the alpha Incus host compatibility')
       # Fixed /tmp fixture paths are inside this check's fresh anonymous container.
@@ -459,7 +457,9 @@ validate_worker_assignments() {
 }
 
 run_worker() {
-  local worker=$1 task_index task_name task_log started_ns finished_ns elapsed_ms task_status failed=0
+  local worker=$1 requested_task=${2:-} task_index task_name task_log task_status_file
+  local started_ns finished_ns elapsed_ms task_status task_process_status task_pid
+  local requested_task_assigned=0 failed=0
   local -a task_indices=() summary_rows=()
   case "$worker" in
     1) task_indices=("${WORKER_1_TASKS[@]}") ;;
@@ -469,7 +469,23 @@ run_worker() {
     5) task_indices=("${WORKER_5_TASKS[@]}") ;;
     *) printf 'worker must be between 1 and %d\n' "$WORKER_COUNT" >&2; return 64 ;;
   esac
-  validate_worker_assignments
+  validate_worker_assignments || return $?
+  if [[ -n $requested_task ]]; then
+    [[ $requested_task =~ ^[0-9]+$ ]] || {
+      printf 'task index must be a non-negative integer: %s\n' "$requested_task" >&2
+      return 64
+    }
+    for task_index in "${task_indices[@]}"; do
+      if [[ $task_index == "$requested_task" ]]; then
+        requested_task_assigned=1
+      fi
+    done
+    [[ $requested_task_assigned == 1 ]] || {
+      printf 'task index %s is not assigned to worker %s\n' "$requested_task" "$worker" >&2
+      return 64
+    }
+    task_indices=("$requested_task")
+  fi
   local worker_dir="${DEPLOY_CHECK_POOL_DIR:?worker pool directory is required}/worker-$worker"
   mkdir -p "$worker_dir"
   exec >"$worker_dir/output.log" 2>&1
@@ -477,16 +493,30 @@ run_worker() {
 
   for task_index in "${task_indices[@]}"; do
     task_name=${CHECKS[$task_index]}
-    task_log="$worker_dir/$task_index.task.log"
+    task_log="$worker_dir/$task_index.log"
+    task_status_file="$worker_dir/$task_index.status"
+    rm -f -- "$task_log" "$task_status_file"
     started_ns=$(date +%s%N)
-    if (set -Eeuo pipefail; run_check "$task_name") >"$task_log" 2>&1; then
-      task_status=0
-    else
-      task_status=$?
-      failed=1
-    fi
+    # A fresh Bash process keeps errexit active inside run_check, even though
+    # this worker is called from a conditional to collect its final status.
+    DEPLOY_CHECK_POOL_DIR="$worker_dir" bash "$SCRIPT_DIR/run-deploy-workflow-checks.sh" --task "$task_index" &
+    task_pid=$!
+    task_process_status=0
+    wait "$task_pid" || task_process_status=$?
     finished_ns=$(date +%s%N)
     elapsed_ms=$(((finished_ns - started_ns) / 1000000))
+    if [[ -f $task_status_file ]]; then
+      IFS=$'\t' read -r task_status _ _ < "$task_status_file"
+    else
+      task_status=$task_process_status
+      [[ $task_status != 0 ]] || task_status=1
+    fi
+    if [[ $task_status == 0 && $task_process_status != 0 ]]; then
+      task_status=$task_process_status
+    fi
+    if [[ $task_status != 0 ]]; then
+      failed=1
+    fi
     printf '\n===== %s =====\n' "$task_name"
     [[ ! -s $task_log ]] || cat "$task_log"
     if [[ $task_status == 0 ]]; then
@@ -517,11 +547,22 @@ if [[ "${1:-}" == '--check-groups' ]]; then
 fi
 
 if [[ "${1:-}" == '--worker' ]]; then
-  [[ $# -eq 2 ]] || { printf 'usage: %s --worker <1-%d>\n' "${BASH_SOURCE[0]}" "$WORKER_COUNT" >&2; exit 64; }
-  if run_worker "$2"; then
-    exit 0
+  if [[ $# -eq 2 ]]; then
+    if run_worker "$2"; then
+      exit 0
+    else
+      exit 1
+    fi
+  elif [[ $# -eq 4 && $3 == '--task-index' ]]; then
+    if run_worker "$2" "$4"; then
+      exit 0
+    else
+      exit 1
+    fi
   else
-    exit 1
+    printf 'usage: %s --worker <1-%d> [--task-index <index>]\n' \
+      "${BASH_SOURCE[0]}" "$WORKER_COUNT" >&2
+    exit 64
   fi
 fi
 

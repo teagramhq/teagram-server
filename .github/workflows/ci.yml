@@ -1316,6 +1316,24 @@ jobs:
           WEB_PERMANENT_WEB_ROOT: ${{ github.workspace }}/web-client
         run: bash .github/scripts/run-websocket-permanent-exchange.sh
 
+  test-alpha-bootstrap:
+    name: 'test: alpha-bootstrap'
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Run alpha bootstrap apply fixture in a private root namespace
+        run: |
+          sudo -n unshare --mount --propagation private bash -c '
+            mount -t tmpfs -o mode=0755 tmpfs /root
+            exec "$1"
+          ' bootstrap-alpha-test deploy/k8s/test-bootstrap-alpha.sh
+
   check-deploy-workflow:
     name: 'check: deploy-workflow'
     if: ${{ !cancelled() }}
@@ -2415,6 +2433,7 @@ jobs:
       - test-go-e2e
       - test-go-fleet-cap
       - ops-go-build-cache
+      - test-alpha-bootstrap
     runs-on: ubuntu-26.04
     timeout-minutes: 5
 
@@ -2448,6 +2467,7 @@ jobs:
           TEST_GO_E2E_RESULT: ${{ needs.test-go-e2e.result }}
           TEST_GO_FLEET_CAP_RESULT: ${{ needs.test-go-fleet-cap.result }}
           GO_BUILD_CACHE_RESULT: ${{ needs.ops-go-build-cache.result }}
+          TEST_ALPHA_BOOTSTRAP_RESULT: ${{ needs.test-alpha-bootstrap.result }}
           PULL_REQUEST_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name || '' }}
         run: |
           expected_publish_result=success
@@ -2485,6 +2505,7 @@ jobs:
             "test-go-e2e=$TEST_GO_E2E_RESULT"
             "test-go-fleet-cap=$TEST_GO_FLEET_CAP_RESULT"
             "ops-go-build-cache=$GO_BUILD_CACHE_RESULT"
+            "test-alpha-bootstrap=$TEST_ALPHA_BOOTSTRAP_RESULT"
           )
           if [[ "$CHECK_SECURITY_RESULT" != "success" ||
                 "$TEST_GO_RESULT" != "success" ||
@@ -2512,7 +2533,8 @@ jobs:
                 "$BUILD_DARWIN_RESULT" != "success" ||
                 "$TEST_GO_E2E_RESULT" != "success" ||
                 "$TEST_GO_FLEET_CAP_RESULT" != "success" ||
-                "$GO_BUILD_CACHE_RESULT" != "success" ]]; then
+                "$GO_BUILD_CACHE_RESULT" != "success" ||
+                "$TEST_ALPHA_BOOTSTRAP_RESULT" != "success" ]]; then
             echo "::error::Required CI lanes did not pass"
             printf '%s\n' "${lane_results[@]}"
             exit 1
@@ -2553,6 +2575,7 @@ jobs:
       - build-browser-acceptance-image
       - test-migrations
       - check-deploy-workflow
+      - test-alpha-bootstrap
       - check-k8s-manifests
       - test-k8s-deploy
     runs-on: ubuntu-26.04
