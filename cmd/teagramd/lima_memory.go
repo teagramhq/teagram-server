@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"runtime/debug"
 	"runtime/metrics"
 	"time"
 )
@@ -16,6 +17,8 @@ import (
 const (
 	limaMemoryDiagnosticsEnv  = "TG_LIMA_MEMORY_DIAGNOSTICS"
 	limaMemoryDiagnosticsAddr = "127.0.0.1:2447"
+	// Leave headroom for non-Go and cgroup-charged memory in the 46 MiB Lima probe.
+	limaDiagnosticsGoMemoryLimitBytes = 16 << 20
 )
 
 type limaRuntimeMemorySample struct {
@@ -113,9 +116,17 @@ func startLimaRuntimeMemoryDiagnostics(log *slog.Logger) (func(), error) {
 	if os.Getenv(limaMemoryDiagnosticsEnv) != "1" {
 		return func() {}, nil
 	}
+	previousMemoryLimit := debug.SetMemoryLimit(-1)
+	effectiveMemoryLimit := previousMemoryLimit
+	if effectiveMemoryLimit < 0 || effectiveMemoryLimit > limaDiagnosticsGoMemoryLimitBytes {
+		effectiveMemoryLimit = limaDiagnosticsGoMemoryLimitBytes
+	}
+	debug.SetMemoryLimit(effectiveMemoryLimit)
+	restoreMemoryLimit := func() { debug.SetMemoryLimit(previousMemoryLimit) }
 	var listenConfig net.ListenConfig
 	listener, err := listenConfig.Listen(context.Background(), "tcp", limaMemoryDiagnosticsAddr)
 	if err != nil {
+		restoreMemoryLimit()
 		return nil, fmt.Errorf("listen for Lima runtime memory diagnostics: %w", err)
 	}
 	server := &http.Server{
@@ -127,7 +138,8 @@ func startLimaRuntimeMemoryDiagnostics(log *slog.Logger) (func(), error) {
 	go func() {
 		serveDone <- server.Serve(listener)
 	}()
-	log.Info("Lima runtime memory diagnostics listening", "addr", limaMemoryDiagnosticsAddr)
+	log.Info("Lima runtime memory diagnostics listening", "addr", limaMemoryDiagnosticsAddr,
+		"go_memory_limit_bytes", effectiveMemoryLimit)
 	return func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
@@ -137,5 +149,6 @@ func startLimaRuntimeMemoryDiagnostics(log *slog.Logger) (func(), error) {
 		if err := <-serveDone; err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Error("Lima runtime memory diagnostics server", "err", err)
 		}
+		restoreMemoryLimit()
 	}, nil
 }

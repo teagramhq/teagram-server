@@ -2,10 +2,52 @@ package main
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"runtime/debug"
 	"testing"
 )
+
+func TestLimaRuntimeMemoryDiagnosticsCapsAndRestoresGoMemoryLimit(t *testing.T) {
+	previousLimit := debug.SetMemoryLimit(20 << 20)
+	t.Cleanup(func() { debug.SetMemoryLimit(previousLimit) })
+	t.Setenv("TG_LIMA_MEMORY_DIAGNOSTICS", "1")
+
+	stop, err := startLimaRuntimeMemoryDiagnostics(slog.Default())
+	if err != nil {
+		t.Fatalf("start Lima runtime memory diagnostics: %v", err)
+	}
+	effectiveLimit := currentLimaTestMemoryLimit()
+	stop()
+	if effectiveLimit != 16<<20 {
+		t.Fatalf("diagnostic Go memory limit = %d bytes, want %d", effectiveLimit, 16<<20)
+	}
+	if got := currentLimaTestMemoryLimit(); got != 20<<20 {
+		t.Fatalf("Go memory limit after diagnostics stop = %d bytes, want restored limit %d", got, 20<<20)
+	}
+}
+
+func currentLimaTestMemoryLimit() int64 {
+	limit := debug.SetMemoryLimit(-1)
+	debug.SetMemoryLimit(limit)
+	return limit
+}
+
+func TestLimaRuntimeMemoryDiagnosticsDoesNotChangeLimitWhenDisabled(t *testing.T) {
+	previousLimit := debug.SetMemoryLimit(20 << 20)
+	t.Cleanup(func() { debug.SetMemoryLimit(previousLimit) })
+	t.Setenv("TG_LIMA_MEMORY_DIAGNOSTICS", "")
+
+	stop, err := startLimaRuntimeMemoryDiagnostics(slog.Default())
+	if err != nil {
+		t.Fatalf("start disabled Lima runtime memory diagnostics: %v", err)
+	}
+	stop()
+	if got := currentLimaTestMemoryLimit(); got != 20<<20 {
+		t.Fatalf("Go memory limit with diagnostics disabled = %d bytes, want %d", got, 20<<20)
+	}
+}
 
 func TestLimaRuntimeMemoryEndpointReportsGoHeapAndRuntimeAttribution(t *testing.T) {
 	t.Setenv("TG_LIMA_MEMORY_DIAGNOSTICS", "1")
