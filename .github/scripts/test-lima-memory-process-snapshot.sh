@@ -165,7 +165,8 @@ fi
 runtime_cgroup="$fixture/runtime-cgroup"
 runtime_prefix="$fixture/runtime-sample"
 runtime_ready="$fixture/runtime-ready"
-runtime_stop="$fixture/runtime-stop"
+runtime_cgroup_stop="$fixture/runtime-cgroup-stop"
+runtime_stop="$fixture/runtime-runtime-stop"
 runtime_error="$fixture/runtime-error"
 runtime_file="$fixture/runtime.json"
 runtime_sample_current="$fixture/runtime-current"
@@ -180,10 +181,14 @@ printf 'anon 2000000\nfile 100000\nkernel 400000\n' >"$runtime_cgroup/memory.sta
 lima_memory_record_cgroup_sample "$runtime_cgroup" "$proc_root" 101 "$runtime_prefix"
 # The runtime request must carry the selected cgroup sample, even if the live
 # current value advances before the request finishes.
+: >"$runtime_prefix-stat-peak"
+(sleep 0.05; printf '2500000\n' >"$runtime_prefix-stat-peak") &
+sample_peak_writer_pid=$!
 printf '2600000\n' >"$runtime_cgroup/memory.current"
 printf 'anon 2100000\nfile 100000\nkernel 400000\n' >"$runtime_cgroup/memory.stat"
 touch "$runtime_ready"
 
+runtime_curl_calls=0
 curl() {
   local output=
   while (($#)); do
@@ -194,11 +199,14 @@ curl() {
       shift
     fi
   done
-  : >"$runtime_request_started"
-  while [[ ! -e "$runtime_request_release" ]]; do
-    sleep 0.01
-  done
-  printf '{"heap_live_bytes":1}\n' >"$output"
+  runtime_curl_calls=$((runtime_curl_calls + 1))
+  if (( runtime_curl_calls == 1 )); then
+    : >"$runtime_request_started"
+    while [[ ! -e "$runtime_request_release" ]]; do
+      sleep 0.01
+    done
+  fi
+  printf '{"heap_live_bytes":%s}\n' "$runtime_curl_calls" >"$output"
 }
 
 lima_memory_sample_runtime_metrics_loop "$runtime_prefix-stat-peak" "$((512 * 1024))" "$runtime_ready" \
@@ -214,11 +222,12 @@ if [[ ! -e "$runtime_request_started" ]]; then
   printf 'runtime sampler did not begin the blocking metrics request\n' >&2
   : >"$runtime_request_release"
   : >"$runtime_stop"
+  wait "$sample_peak_writer_pid" 2>/dev/null || true
   wait "$runtime_sampler_pid" 2>/dev/null || true
   exit 1
 fi
 lima_memory_sample_cgroup_loop "$runtime_cgroup" "$proc_root" 101 "$runtime_prefix" \
-  "$runtime_stop" "$runtime_error" 0.01 &
+  "$runtime_cgroup_stop" "$runtime_error" 0.01 &
 cgroup_sampler_pid=$!
 
 # A delayed runtime request must not pause 10 ms process snapshots. Capture a
@@ -255,6 +264,7 @@ if [[ "$sampled_current" != 3000000 || "$sampled_worker_count" != 3 ||
   printf 'process sampler missed the short-lived worker while runtime metrics were blocked: %s\n' \
     "$process_snapshot" >&2
   : >"$runtime_request_release"
+  : >"$runtime_cgroup_stop"
   : >"$runtime_stop"
   wait "$cgroup_sampler_pid" 2>/dev/null || true
   wait "$runtime_sampler_pid" 2>/dev/null || true
@@ -263,15 +273,17 @@ fi
 printf '2800000\n' >"$runtime_cgroup/memory.current"
 printf '101\n102\n103\n' >"$runtime_cgroup/cgroup.procs"
 rm -f -- "$proc_root/105/status"
-touch "$runtime_stop" "$runtime_request_release"
+wait "$sample_peak_writer_pid"
+: >"$runtime_cgroup_stop"
 wait "$cgroup_sampler_pid"
+touch "$runtime_stop" "$runtime_request_release"
 wait "$runtime_sampler_pid"
 if [[ -e "$runtime_error" ]]; then
   cat "$runtime_error" >&2
   exit 1
 fi
-if [[ $(<"$runtime_sample_current") != 2500000 || $(<"$runtime_file") != '{"heap_live_bytes":1}' ]]; then
-  printf 'runtime metrics sample = %s at %s bytes, want fixture metrics at 2500000 bytes\n' \
+if [[ $(<"$runtime_sample_current") != 3000000 || $(<"$runtime_file") != '{"heap_live_bytes":2}' ]]; then
+  printf 'final runtime metrics sample = %s at %s bytes, want fixture metrics at selected 3000000-byte peak\n' \
     "$(<"$runtime_file")" "$(<"$runtime_sample_current")" >&2
   exit 1
 fi

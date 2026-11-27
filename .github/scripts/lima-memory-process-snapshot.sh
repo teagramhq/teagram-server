@@ -140,6 +140,12 @@ lima_memory_process_attribution_check() {
   [[ "$attempts" == 3 ]]
 }
 
+lima_memory_write_sample_file() {
+  local sample_file="$1" sample_value="$2" sample_tmp="$1.tmp"
+  printf '%s\n' "$sample_value" >"$sample_tmp" || return 1
+  mv -- "$sample_tmp" "$sample_file"
+}
+
 lima_memory_record_cgroup_sample() {
   local cgroup_dir="$1" proc_root="$2" server_pid="$3" sample_prefix="$4"
   local process_snapshot peak_bytes events current_bytes stat_snapshot stat_name stat_value
@@ -216,7 +222,6 @@ lima_memory_record_cgroup_sample() {
       attribution=incomplete
       incomplete_processes=$(printf '%s\n' "${incomplete_pids[@]}" | LC_ALL=C sort -u | paste -sd, -)
     fi
-    printf '%s\n' "$current_bytes" >"$sample_prefix-stat-peak" || return 1
     printf '%s\n' "$current_bytes" >"$sample_prefix-current" || return 1
     printf '%s\n' "$stat_anon_bytes" >"$sample_prefix-anon" || return 1
     printf '%s\n' "$stat_file_bytes" >"$sample_prefix-file" || return 1
@@ -225,6 +230,7 @@ lima_memory_record_cgroup_sample() {
       "$current_bytes" "$server_process_pid" "$server_process_rss_bytes" "$server_process_anon_bytes" \
       "$photo_worker_process_count" "$photo_worker_processes" "$attribution" "$incomplete_processes" \
       >"$sample_prefix-processes" || return 1
+    lima_memory_write_sample_file "$sample_prefix-stat-peak" "$current_bytes" || return 1
   fi
 }
 
@@ -244,18 +250,27 @@ lima_memory_sample_cgroup_loop() {
 lima_memory_sample_runtime_metrics_loop() {
   local sampled_peak_file="$1" sample_interval_bytes="$2" ready_file="$3"
   local runtime_file="$4" runtime_sample_current_file="$5" error_file="$6" stop_file="$7"
-  local interval_seconds="${8:-0.01}" last_runtime_sample_current=0 sampled_current runtime_sample_tmp
+  local interval_seconds="${8:-0.01}" last_runtime_sample_current=0 sampled_current final_sampled_current runtime_sample_tmp
 
-  while [[ ! -e "$stop_file" ]]; do
+  while true; do
     if [[ ! -e "$ready_file" ]]; then
+      if [[ -e "$stop_file" ]]; then
+        return 0
+      fi
       sleep "$interval_seconds"
       continue
     fi
-    if ! sampled_current=$(<"$sampled_peak_file") || [[ ! "$sampled_current" =~ ^[0-9]+$ ]]; then
-      printf 'failed to read sampled cgroup current peak before Go runtime memory metrics request\n' >"$error_file"
-      return 1
+    if [[ ! -r "$sampled_peak_file" ]] ||
+      ! sampled_current=$(<"$sampled_peak_file") || [[ ! "$sampled_current" =~ ^[0-9]+$ ]]; then
+      if [[ -e "$stop_file" ]]; then
+        printf 'failed to read sampled cgroup current peak before Go runtime memory metrics request\n' >"$error_file"
+        return 1
+      fi
+      sleep "$interval_seconds"
+      continue
     fi
-    if (( sampled_current >= last_runtime_sample_current + sample_interval_bytes )); then
+    if (( sampled_current >= last_runtime_sample_current + sample_interval_bytes )) ||
+      [[ -e "$stop_file" && $sampled_current != "$last_runtime_sample_current" ]]; then
       runtime_sample_tmp="$runtime_file.tmp"
       if curl --noproxy '*' --fail --connect-timeout 1 --max-time 2 --silent --show-error \
         --output "$runtime_sample_tmp" http://127.0.0.1:2447/debug/runtime-memory &&
@@ -268,6 +283,15 @@ lima_memory_sample_runtime_metrics_loop() {
         printf 'failed to capture Go runtime memory metrics at %s cgroup bytes\n' \
           "$sampled_current" >"$error_file"
         return 1
+      fi
+    fi
+    if [[ -e "$stop_file" ]]; then
+      if ! final_sampled_current=$(<"$sampled_peak_file") || [[ ! "$final_sampled_current" =~ ^[0-9]+$ ]]; then
+        printf 'failed to read final sampled cgroup current peak for Go runtime memory metrics request\n' >"$error_file"
+        return 1
+      fi
+      if [[ "$final_sampled_current" == "$last_runtime_sample_current" ]]; then
+        return 0
       fi
     fi
     sleep "$interval_seconds"

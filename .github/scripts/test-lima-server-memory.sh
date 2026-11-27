@@ -31,6 +31,7 @@ MEMORY_SAMPLE_PROCESS_FILE=
 MEMORY_SAMPLE_RUNTIME_FILE=
 MEMORY_SAMPLE_RUNTIME_PEAK_FILE=
 MEMORY_SAMPLE_RUNTIME_READY_FILE=
+MEMORY_SAMPLE_RUNTIME_STOP_FILE=
 MEMORY_SAMPLE_ERROR_FILE=
 MEMORY_SAMPLE_STOP_FILE=
 MEMORY_SAMPLER_PID=
@@ -43,14 +44,13 @@ PROBE_PHASE=server_startup
 UPLOAD_OUTCOME=not_started
 
 stop_memory_sampler() {
-  if [[ -n $MEMORY_SAMPLER_PID || -n $MEMORY_RUNTIME_SAMPLER_PID ]]; then
-    : >"$MEMORY_SAMPLE_STOP_FILE" 2>/dev/null || true
-  fi
   if [[ -n $MEMORY_SAMPLER_PID ]]; then
+    : >"$MEMORY_SAMPLE_STOP_FILE" 2>/dev/null || true
     wait "$MEMORY_SAMPLER_PID" 2>/dev/null || true
     MEMORY_SAMPLER_PID=
   fi
   if [[ -n $MEMORY_RUNTIME_SAMPLER_PID ]]; then
+    : >"$MEMORY_SAMPLE_RUNTIME_STOP_FILE" 2>/dev/null || true
     wait "$MEMORY_RUNTIME_SAMPLER_PID" 2>/dev/null || true
     MEMORY_RUNTIME_SAMPLER_PID=
   fi
@@ -161,12 +161,13 @@ fi
 # exclusive-create guard, but remove this attempt's previous photo fixture.
 rm -f "$RUNNER_TEMP/lima-memory-start-gate" "$RUNNER_TEMP/lima-memory-photo.jpg" \
   "$RUNNER_TEMP/lima-memory-sampled-peak" "$RUNNER_TEMP/lima-memory-sampled-events" \
-  "$RUNNER_TEMP/lima-memory-sampled-stat-peak" \
+  "$RUNNER_TEMP/lima-memory-sampled-stat-peak" "$RUNNER_TEMP/lima-memory-sampled-stat-peak.tmp" \
   "$RUNNER_TEMP/lima-memory-sampled-current" "$RUNNER_TEMP/lima-memory-sampled-anon" \
   "$RUNNER_TEMP/lima-memory-sampled-file" "$RUNNER_TEMP/lima-memory-sampled-kernel" \
   "$RUNNER_TEMP/lima-memory-sampled-processes" "$RUNNER_TEMP/lima-memory-sampled-error" \
   "$RUNNER_TEMP/lima-memory-sampled-stop" "$RUNNER_TEMP/lima-memory-sampled-runtime" \
   "$RUNNER_TEMP/lima-memory-sampled-runtime-peak" "$RUNNER_TEMP/lima-memory-sampled-runtime-ready" \
+  "$RUNNER_TEMP/lima-memory-sampled-runtime-stop" \
   "$RUNNER_TEMP/lima-memory-sampled-runtime.tmp"
 if ! docker image inspect "$LIMA_SERVICE_IMAGE" >/dev/null 2>&1; then
   printf 'Lima service image is not present in the local daemon: %s\n' "$LIMA_SERVICE_IMAGE" >&2
@@ -259,6 +260,7 @@ if [[ $container_pid =~ ^[1-9][0-9]*$ ]]; then
     MEMORY_SAMPLE_RUNTIME_FILE="$RUNNER_TEMP/lima-memory-sampled-runtime"
     MEMORY_SAMPLE_RUNTIME_PEAK_FILE="$RUNNER_TEMP/lima-memory-sampled-runtime-peak"
     MEMORY_SAMPLE_RUNTIME_READY_FILE="$RUNNER_TEMP/lima-memory-sampled-runtime-ready"
+    MEMORY_SAMPLE_RUNTIME_STOP_FILE="$RUNNER_TEMP/lima-memory-sampled-runtime-stop"
     MEMORY_SAMPLE_ERROR_FILE="$RUNNER_TEMP/lima-memory-sampled-error"
     MEMORY_SAMPLE_STOP_FILE="$RUNNER_TEMP/lima-memory-sampled-stop"
     if [[ -r $MEMORY_PEAK_FILE && -r $MEMORY_EVENTS_FILE && -r $MEMORY_CURRENT_FILE && -r $MEMORY_STAT_FILE && -r $MEMORY_CGROUP_DIR/memory.max && -r $MEMORY_CGROUP_DIR/cgroup.procs ]]; then
@@ -274,7 +276,7 @@ if [[ $container_pid =~ ^[1-9][0-9]*$ ]]; then
     MEMORY_SAMPLER_PID=$!
     lima_memory_sample_runtime_metrics_loop "$MEMORY_SAMPLE_STAT_PEAK_FILE" "$RUNTIME_SAMPLE_INTERVAL_BYTES" \
       "$MEMORY_SAMPLE_RUNTIME_READY_FILE" "$MEMORY_SAMPLE_RUNTIME_FILE" \
-      "$MEMORY_SAMPLE_RUNTIME_PEAK_FILE" "$MEMORY_SAMPLE_ERROR_FILE" "$MEMORY_SAMPLE_STOP_FILE" \
+      "$MEMORY_SAMPLE_RUNTIME_PEAK_FILE" "$MEMORY_SAMPLE_ERROR_FILE" "$MEMORY_SAMPLE_RUNTIME_STOP_FILE" \
       0.01 &
     MEMORY_RUNTIME_SAMPLER_PID=$!
   else
@@ -313,9 +315,9 @@ if [[ -z $memory_cap_log ]]; then
   exit 1
 fi
 case "$memory_cap_log" in
-  *"cgroup_memory_max_bytes=$EXPECTED_LIMIT"*"go_memory_limit_bytes=$((14 * 1024 * 1024))"*) ;;
+  *"cgroup_memory_max_bytes=$EXPECTED_LIMIT"*"go_memory_limit_bytes=$((12 * 1024 * 1024))"*) ;;
   *)
-    printf 'Lima Go memory cap log does not match the probe cgroup and 14 MiB cap: %s\n' "$memory_cap_log" >&2
+    printf 'Lima Go memory cap log does not match the probe cgroup and 12 MiB cap: %s\n' "$memory_cap_log" >&2
     exit 1
     ;;
 esac

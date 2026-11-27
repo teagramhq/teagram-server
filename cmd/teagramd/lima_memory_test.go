@@ -25,8 +25,8 @@ func TestApplyLimaGoMemoryLimitReadsCgroupMemoryMax(t *testing.T) {
 		wantLogLevel    string
 		wantLogMessage  string
 	}{
-		{name: "Lima cgroup", memoryMax: "48234496", writeMemoryMax: true, previousLimit: 20 << 20, wantMemoryLimit: 14 << 20, wantLogLevel: "level=INFO", wantLogMessage: "Lima Go memory cap applied"},
-		{name: "threshold cgroup", memoryMax: "67108864", writeMemoryMax: true, previousLimit: 20 << 20, wantMemoryLimit: 14 << 20, wantLogLevel: "level=INFO", wantLogMessage: "Lima Go memory cap applied"},
+		{name: "Lima cgroup", memoryMax: "48234496", writeMemoryMax: true, previousLimit: 20 << 20, wantMemoryLimit: 12 << 20, wantLogLevel: "level=INFO", wantLogMessage: "Lima Go memory cap applied"},
+		{name: "threshold cgroup", memoryMax: "67108864", writeMemoryMax: true, previousLimit: 20 << 20, wantMemoryLimit: 12 << 20, wantLogLevel: "level=INFO", wantLogMessage: "Lima Go memory cap applied"},
 		{name: "production cgroup", memoryMax: "1073741824", writeMemoryMax: true, previousLimit: math.MaxInt64, wantMemoryLimit: math.MaxInt64, wantLogLevel: "level=INFO", wantLogMessage: "Lima Go memory cap not applied"},
 		{name: "unlimited cgroup", memoryMax: "max", writeMemoryMax: true, previousLimit: math.MaxInt64, wantMemoryLimit: math.MaxInt64, wantLogLevel: "level=WARN", wantLogMessage: "parse cgroup memory.max"},
 		{name: "missing cgroup file", previousLimit: 20 << 20, wantMemoryLimit: 20 << 20, wantLogLevel: "level=WARN", wantLogMessage: "read cgroup memory.max"},
@@ -60,15 +60,15 @@ func TestApplyLimaGoMemoryLimitReadsCgroupMemoryMax(t *testing.T) {
 }
 
 func TestApplyLimaGoMemoryLimitPreservesStricterLimit(t *testing.T) {
-	previousLimit := debug.SetMemoryLimit(12 << 20)
+	previousLimit := debug.SetMemoryLimit(10 << 20)
 	t.Cleanup(func() { debug.SetMemoryLimit(previousLimit) })
 
 	memoryMaxPath := writeLimaTestCgroupMemoryMax(t, "48234496")
 	var logOutput bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logOutput, nil))
 	restore := applyLimaGoMemoryLimit(logger, memoryMaxPath)
-	if got := currentLimaTestMemoryLimit(); got != 12<<20 {
-		t.Fatalf("Go memory limit = %d bytes, want preserved stricter limit %d", got, 12<<20)
+	if got := currentLimaTestMemoryLimit(); got != 10<<20 {
+		t.Fatalf("Go memory limit = %d bytes, want preserved stricter limit %d", got, 10<<20)
 	}
 	restore()
 }
