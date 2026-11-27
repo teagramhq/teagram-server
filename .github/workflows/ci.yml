@@ -1377,7 +1377,9 @@ jobs:
       - name: Check workflow contract script syntax
         run: |
           bash -n .github/scripts/install-playwright-apt-cache.sh
+          bash -n .github/scripts/install-playwright-apt-fallback.sh
           shellcheck .github/scripts/install-playwright-apt-cache.sh
+          shellcheck .github/scripts/install-playwright-apt-fallback.sh
           bash -n .github/scripts/perf-run.sh .github/scripts/test-perf-workflow-contract.sh .github/scripts/test-ci-main-priority.sh
           shellcheck .github/scripts/test-perf-workflow-contract.sh .github/scripts/test-ci-main-priority.sh
           bash -n .github/scripts/publish-k8s-image-digests.sh .github/scripts/test-k8s-image-digests.sh
@@ -3361,42 +3363,7 @@ jobs:
             # install and report the attempt as a success.
             set -e
             if [ "$MODE" = "packages" ]; then
-              bash .github/scripts/prepare-playwright-apt-cache.sh .apt-cache
-              sudo apt-get update
-              # The cached dpkg install may have deconfigured a conflicting
-              # preinstalled version. Let apt repair that state before deriving
-              # and installing the current dependency set.
-              sudo apt-get -f install -y --no-install-recommends
-              # The first dry-run used the apt indexes baked into the runner
-              # image. Refreshing those indexes can change the package names
-              # Playwright needs, so derive the install list again before
-              # asking apt to install it. Keep apt-packages.txt unchanged: it
-              # identifies the cache lookup for this runner image, while these
-              # refreshed packages are the contents saved under that key.
-              status=0
-              pnpm exec playwright install-deps --dry-run chromium >deps-after-update.txt 2>&1 || status=$?
-              cat deps-after-update.txt
-              if grep -q 'All system dependencies are installed' deps-after-update.txt; then
-                : >apt-install-packages.txt
-              elif grep -q 'Missing system dependencies' deps-after-update.txt; then
-                sed -n 's/^  \([^ ]*\)$/\1/p' deps-after-update.txt | sort >apt-install-packages.txt
-                if [ ! -s apt-install-packages.txt ]; then
-                  echo "::error::could not parse Playwright dependencies after apt-get update"
-                  return 1
-                fi
-              elif [ "$status" -ne 0 ]; then
-                echo "::error::could not determine Playwright dependencies after apt-get update"
-                return "$status"
-              else
-                echo "::error::Playwright did not report dependencies after apt-get update"
-                return 1
-              fi
-              if [ -s apt-install-packages.txt ]; then
-                sudo apt-get install -y --no-install-recommends \
-                  -o "Dir::Cache::archives=$PWD/.apt-cache" \
-                  $(tr '\n' ' ' <apt-install-packages.txt)
-              fi
-              sudo chown -R "$(id -u):$(id -g)" .apt-cache
+              bash .github/scripts/install-playwright-apt-fallback.sh .apt-cache
             else
               pnpm exec playwright install-deps chromium
             fi
