@@ -21,8 +21,8 @@ const (
 	limaMemoryDiagnosticsAddr             = "127.0.0.1:2447"
 	limaCgroupMemoryMaxPath               = "/sys/fs/cgroup/memory.max"
 	limaGoMemoryLimitCgroupThresholdBytes = 64 << 20
-	// Leave headroom for non-Go and cgroup-charged memory in the 46 MiB Lima probe.
-	limaGoMemoryLimitBytes = 16 << 20
+	// Leave 4 MiB below the 46 MiB cgroup limit for non-Go and charged heap pages.
+	limaGoMemoryLimitBytes = 14 << 20
 )
 
 type limaRuntimeMemorySample struct {

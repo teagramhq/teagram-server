@@ -330,9 +330,9 @@ if [[ -z $memory_cap_log ]]; then
   exit 1
 fi
 case "$memory_cap_log" in
-  *"cgroup_memory_max_bytes=$EXPECTED_LIMIT"*"go_memory_limit_bytes=$((16 * 1024 * 1024))"*) ;;
+  *"cgroup_memory_max_bytes=$EXPECTED_LIMIT"*"go_memory_limit_bytes=$((14 * 1024 * 1024))"*) ;;
   *)
-    printf 'Lima Go memory cap log does not match the probe cgroup and 16 MiB cap: %s\n' "$memory_cap_log" >&2
+    printf 'Lima Go memory cap log does not match the probe cgroup and 14 MiB cap: %s\n' "$memory_cap_log" >&2
     exit 1
     ;;
 esac
