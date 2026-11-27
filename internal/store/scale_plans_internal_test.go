@@ -470,12 +470,24 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 	}
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO channel_participants (channel_id, user_id, available_min_id)
-		SELECT $1::bigint + n, $2, 19999 FROM generate_series(1, $3::int) AS n`, extraVisibleChannelBase, ownerID, extraVisibleChannels,
+		SELECT $1::bigint + n, $2, CASE WHEN n = 1 THEN 0 ELSE 19999 END
+		FROM generate_series(1, $3::int) AS n`, extraVisibleChannelBase, ownerID, extraVisibleChannels,
 	); err != nil {
 		t.Fatalf("seed extra visible channel memberships: %v", err)
 	}
 	if _, err := pool.Exec(ctx, "ANALYZE channel_participants"); err != nil {
 		t.Fatalf("analyze visible channel memberships: %v", err)
+	}
+	const expectedFloorGroups = 2
+	var floorGroups int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(DISTINCT available_min_id)
+		FROM channel_participants
+		WHERE user_id = $1`, ownerID).Scan(&floorGroups); err != nil {
+		t.Fatalf("count visible channel history floors: %v", err)
+	}
+	if floorGroups != expectedFloorGroups {
+		t.Fatalf("visible channel history floor groups = %d, want %d", floorGroups, expectedFloorGroups)
 	}
 	if err := pool.QueryRow(ctx, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "+query, queries[0].Args...).Scan(&raw); err != nil {
 		t.Fatalf("explain 500-channel historical emoji references: %v", err)
@@ -487,8 +499,8 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 	if len(plans) != 1 {
 		t.Fatalf("500-channel historical emoji plan count = %d, want 1", len(plans))
 	}
-	if loops := plans[0].Plan.indexLoops(channelEmojiIndex); loops != 1 {
-		t.Errorf("500-channel custom emoji GIN probe loops = %.0f, want 1: %s", loops,
+	if loops := plans[0].Plan.indexLoops(channelEmojiIndex); loops < 1 || loops > float64(expectedFloorGroups) {
+		t.Errorf("500-channel custom emoji GIN probe loops = %.0f, want 1 to %d for the distinct floors: %s", loops, expectedFloorGroups,
 			strings.Join(plans[0].Plan.accessSummary(), "; "))
 	}
 	for _, table := range plans[0].Plan.sequentialTables() {
@@ -505,8 +517,8 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 		t.Errorf("500-channel sticker-history plan has %.0f channel message bitmap candidates for %d IDs: %s",
 			candidates, len(planFileIDs), strings.Join(plans[0].Plan.accessSummary(), "; "))
 	}
-	t.Logf("visible_channels=500 channel_heap_rows=%.0f channel_bitmap_candidates=%.0f planning_ms=%.3f execution_ms=%.3f shared_hits=%d shared_reads=%d",
-		plans[0].Plan.rowsRead("channel_messages"), plans[0].Plan.bitmapCandidatesFrom("channel_messages"),
+	t.Logf("visible_channels=500 channel_gin_probes=%.0f channel_heap_rows=%.0f channel_bitmap_candidates=%.0f planning_ms=%.3f execution_ms=%.3f shared_hits=%d shared_reads=%d",
+		plans[0].Plan.indexLoops(channelEmojiIndex), plans[0].Plan.rowsRead("channel_messages"), plans[0].Plan.bitmapCandidatesFrom("channel_messages"),
 		plans[0].PlanningTime, plans[0].ExecutionTime, plans[0].Plan.Hits, plans[0].Plan.Reads)
 }
 

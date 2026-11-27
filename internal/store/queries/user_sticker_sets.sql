@@ -287,31 +287,26 @@ visible_channels AS MATERIALIZED (
     WHERE cp.user_id = sqlc.arg(owner_id)
       AND (cp.banned_until IS NULL OR cp.banned_until <= now())
       AND c.deleted_at IS NULL
-), visible_channel_ids AS MATERIALIZED (
-    SELECT COALESCE(array_agg(channel_id), ARRAY[]::bigint[]) AS channel_ids
+), visible_channel_floor_groups AS MATERIALIZED (
+    SELECT available_min_id, array_agg(channel_id) AS channel_ids
     FROM visible_channels
-), visible_channel_floor AS MATERIALIZED (
-    SELECT COALESCE(min(available_min_id), 0::bigint) AS minimum_available_min_id
-    FROM visible_channels
+    GROUP BY available_min_id
 ), channel_candidates AS MATERIALIZED (
-    -- The array-expression GIN index probes visible channels, post-floor
-    -- messages and requested documents together in one set-based scan.
-    SELECT cm.entities
-    FROM channel_messages cm
-    CROSS JOIN visible_channel_ids vci
-    CROSS JOIN visible_channel_floor vcf
-    WHERE ARRAY[cm.channel_id] && vci.channel_ids
-      AND cm.local_id > vcf.minimum_available_min_id
-      AND cm.local_id > (
-          SELECT vc.available_min_id
-          FROM visible_channels vc
-          WHERE vc.channel_id = cm.channel_id
-      )
-      AND cm.deleted = false
-      AND cm.entities IS NOT NULL
-      AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
-      AND cardinality(message_custom_emoji_document_ids(cm.entities)) > 0
-      AND message_custom_emoji_document_ids(cm.entities) && sqlc.arg(file_ids)::text[]
+    -- Bind each GIN probe to channels sharing one history floor. This keeps
+    -- the range exact while avoiding a separate probe for every channel.
+    SELECT candidates.entities
+    FROM visible_channel_floor_groups vcg
+    CROSS JOIN LATERAL (
+        SELECT cm.entities
+        FROM channel_messages cm
+        WHERE ARRAY[cm.channel_id] && vcg.channel_ids
+          AND cm.local_id > vcg.available_min_id
+          AND cm.deleted = false
+          AND cm.entities IS NOT NULL
+          AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
+          AND cardinality(message_custom_emoji_document_ids(cm.entities)) > 0
+          AND message_custom_emoji_document_ids(cm.entities) && sqlc.arg(file_ids)::text[]
+    ) candidates
 ), visible_entities AS (
     SELECT m.entities
     FROM messages m
