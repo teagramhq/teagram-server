@@ -3,25 +3,39 @@ package main
 import (
 	"encoding/json"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"runtime/debug"
 	"testing"
 )
 
-func TestApplyLimaGoMemoryLimitCapsDefaultServerPathAndRestores(t *testing.T) {
-	previousLimit := debug.SetMemoryLimit(20 << 20)
-	t.Cleanup(func() { debug.SetMemoryLimit(previousLimit) })
+func TestApplyLimaGoMemoryLimitOnlyForSmallCgroups(t *testing.T) {
 	t.Setenv("TG_LIMA_MEMORY_DIAGNOSTICS", "")
-
-	restore := applyLimaGoMemoryLimit()
-	effectiveLimit := currentLimaTestMemoryLimit()
-	restore()
-	if effectiveLimit != 16<<20 {
-		t.Fatalf("default server Go memory limit = %d bytes, want %d", effectiveLimit, 16<<20)
+	tests := []struct {
+		name            string
+		memoryMax       string
+		previousLimit   int64
+		wantMemoryLimit int64
+	}{
+		{name: "Lima cgroup", memoryMax: "48234496", previousLimit: 20 << 20, wantMemoryLimit: 16 << 20},
+		{name: "threshold cgroup", memoryMax: "67108864", previousLimit: 20 << 20, wantMemoryLimit: 16 << 20},
+		{name: "production cgroup", memoryMax: "1073741824", previousLimit: math.MaxInt64, wantMemoryLimit: math.MaxInt64},
+		{name: "unlimited cgroup", memoryMax: "max", previousLimit: math.MaxInt64, wantMemoryLimit: math.MaxInt64},
 	}
-	if got := currentLimaTestMemoryLimit(); got != 20<<20 {
-		t.Fatalf("Go memory limit after restore = %d bytes, want previous limit %d", got, 20<<20)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			previousLimit := debug.SetMemoryLimit(test.previousLimit)
+			t.Cleanup(func() { debug.SetMemoryLimit(previousLimit) })
+			restore := applyLimaGoMemoryLimitForCgroupMax(test.memoryMax)
+			if got := currentLimaTestMemoryLimit(); got != test.wantMemoryLimit {
+				t.Fatalf("Go memory limit = %d bytes, want %d", got, test.wantMemoryLimit)
+			}
+			restore()
+			if got := currentLimaTestMemoryLimit(); got != test.previousLimit {
+				t.Fatalf("Go memory limit after restore = %d bytes, want previous limit %d", got, test.previousLimit)
+			}
+		})
 	}
 }
 
@@ -29,9 +43,9 @@ func TestApplyLimaGoMemoryLimitPreservesStricterLimit(t *testing.T) {
 	previousLimit := debug.SetMemoryLimit(12 << 20)
 	t.Cleanup(func() { debug.SetMemoryLimit(previousLimit) })
 
-	restore := applyLimaGoMemoryLimit()
+	restore := applyLimaGoMemoryLimitForCgroupMax("48234496")
 	if got := currentLimaTestMemoryLimit(); got != 12<<20 {
-		t.Fatalf("default server Go memory limit = %d bytes, want preserved stricter limit %d", got, 12<<20)
+		t.Fatalf("Go memory limit = %d bytes, want preserved stricter limit %d", got, 12<<20)
 	}
 	restore()
 }

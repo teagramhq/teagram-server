@@ -11,12 +11,16 @@ import (
 	"os"
 	"runtime/debug"
 	"runtime/metrics"
+	"strconv"
+	"strings"
 	"time"
 )
 
 const (
-	limaMemoryDiagnosticsEnv  = "TG_LIMA_MEMORY_DIAGNOSTICS"
-	limaMemoryDiagnosticsAddr = "127.0.0.1:2447"
+	limaMemoryDiagnosticsEnv              = "TG_LIMA_MEMORY_DIAGNOSTICS"
+	limaMemoryDiagnosticsAddr             = "127.0.0.1:2447"
+	limaCgroupMemoryMaxPath               = "/sys/fs/cgroup/memory.max"
+	limaGoMemoryLimitCgroupThresholdBytes = 64 << 20
 	// Leave headroom for non-Go and cgroup-charged memory in the 46 MiB Lima probe.
 	limaGoMemoryLimitBytes = 16 << 20
 )
@@ -113,6 +117,19 @@ func readLimaRuntimeMemorySample() (limaRuntimeMemorySample, error) {
 }
 
 func applyLimaGoMemoryLimit() func() {
+	memoryMax, err := os.ReadFile(limaCgroupMemoryMaxPath)
+	if err != nil {
+		return func() {}
+	}
+	return applyLimaGoMemoryLimitForCgroupMax(string(memoryMax))
+}
+
+func applyLimaGoMemoryLimitForCgroupMax(memoryMax string) func() {
+	cgroupMemoryLimit, err := strconv.ParseInt(strings.TrimSpace(memoryMax), 10, 64)
+	if err != nil || cgroupMemoryLimit <= 0 || cgroupMemoryLimit > limaGoMemoryLimitCgroupThresholdBytes {
+		return func() {}
+	}
+
 	previousMemoryLimit := debug.SetMemoryLimit(-1)
 	if previousMemoryLimit < 0 || previousMemoryLimit > limaGoMemoryLimitBytes {
 		debug.SetMemoryLimit(limaGoMemoryLimitBytes)
