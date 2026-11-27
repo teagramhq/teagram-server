@@ -188,7 +188,9 @@ demo subnet at the start of `FORWARD` and in `DOCKER-USER`, plus a separate
 preserving the order of those host rules for all traffic. The egress chain
 allows traffic between demo networks, drops RFC1918, carrier-grade NAT,
 link-local and multicast destinations, then returns all other traffic to
-Docker. The INPUT chain allows established replies first, then blocks those
+Docker. The proxy, edge and tunnel containers use explicit public DNS upstreams
+so forwarding DNS does not depend on Lima's private DHCP or MagicDNS resolver.
+The INPUT chain allows established replies first, then blocks those
 destinations and each bridge gateway address without a subnet return. Docker's
 embedded DNS is queried at `127.0.0.11`; no direct DNS exception to the bridge
 gateways is needed. Other containers and host-originated traffic do not match
@@ -222,6 +224,10 @@ OpenRC respawns the supervisor if it exits. Its output is sent to syslog with th
 the ordering guarantee. The read-only `check` mode reports missing, duplicate,
 misordered or drifted hooks and chain rules without changing them or taking a
 lock.
+
+A tailscaled restart can briefly put its forwarding accept ahead of the demo
+hooks. The supervisor repairs that drift on its next Docker-ready cycle; see
+the threat model for this residual tailnet egress window.
 
 On Lima, run the probe as root after the Compose stack is up:
 

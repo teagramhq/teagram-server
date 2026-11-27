@@ -267,6 +267,8 @@ expect 'criterion 1: every image is pinned by sha256 digest' \
   '[.services[] | .image | select(test("@sha256:[0-9a-f]{64}$") | not)] | length == 0'
 expect 'criterion 1: Docker does not auto-start demo containers before isolation' \
   '[.services[] | select(.restart != "no")] | length == 0'
+expect 'criterion 1: outbound services use public DNS upstreams' \
+  '.services["turnstile-egress"].dns == ["1.1.1.1", "1.0.0.1"] and .services.edge.dns == ["1.1.1.1", "1.0.0.1"] and .services.cloudflared.dns == ["1.1.1.1", "1.0.0.1"]'
 
 if grep -Fq 'supervisor=supervise-daemon' "$SCRIPT_DIR/install-egress-isolation.sh" \
   && grep -Fq 'command_args_foreground="stack-supervise"' "$SCRIPT_DIR/install-egress-isolation.sh" \

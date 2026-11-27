@@ -24,6 +24,9 @@ these rules and is outside this policy's protection.
   related or established replies, drops RFC1918, carrier-grade NAT, link-local
   and multicast destinations, then returns other traffic. This preserves
   internal Compose traffic, embedded DNS at `127.0.0.11`, and public egress.
+  The egress proxy, edge and cloudflared services pin upstream DNS to the public
+  resolvers `1.1.1.1` and `1.0.0.1`, avoiding private Lima DHCP or MagicDNS
+  upstreams that the policy blocks.
 - Packets from demo bridges addressed to Lima enter a separate
   `TEAGRAM_DEMO_INPUT` chain. It returns established replies, drops the bridge
   gateway addresses and the same blocked destination ranges, then returns
@@ -68,3 +71,7 @@ restrict access to public addresses. IPv6 protections apply only to networks
 that Docker reports as IPv6-enabled. The host-side probe can verify only
 addresses and ports that answer from Lima itself. Host root, Docker, or other
 firewall managers remain able to alter the policy and are trusted components.
+When tailscaled starts or restarts, its filter-table forwarding jump can briefly
+precede the demo hooks and admit demo-to-tailnet packets. The supervisor repairs
+that drift on its next Docker-ready cycle; Docker unavailability or deploy-lock
+contention can extend the window.
