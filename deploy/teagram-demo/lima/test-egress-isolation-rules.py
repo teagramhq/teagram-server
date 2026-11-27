@@ -163,6 +163,22 @@ elif operation == "-I":
     chain, index = args[1], int(args[2]) - 1
     if chain not in firewall:
         missing_chain(chain)
+    target = args[args.index("-j") + 1]
+    fail_target = os.environ.get("TEAGRAM_TEST_FAIL_INSERT_TARGET")
+    fail_mode = os.environ.get("TEAGRAM_TEST_FAIL_INSERT_MODE", "first")
+    fail_marker = state_path.with_name("failed-insert")
+    if (
+        target == fail_target
+        and fail_target
+        and not fail_marker.exists()
+        and (
+            fail_mode == "first"
+            or (fail_mode == "stable" and "--comment" not in args)
+        )
+    ):
+        fail_marker.write_text("failed", encoding="utf-8")
+        print(f"{tool}: simulated insert failure for {target}", file=sys.stderr)
+        raise SystemExit(4)
     firewall[chain].insert(index, f"-A {chain} {' '.join(args[3:])}")
     save()
 elif operation == "-D":
@@ -311,6 +327,8 @@ class EgressIsolationRuleTests(unittest.TestCase):
         docker_ready_after: int,
         docker_info_mode: str = "ready",
         interleave_rule_change: bool = False,
+        fail_insert_target: str = "",
+        fail_insert_mode: str = "first",
     ) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env.update(
@@ -321,6 +339,8 @@ class EgressIsolationRuleTests(unittest.TestCase):
                 "TEAGRAM_TEST_IPV6_NETWORKS": "",
                 "TEAGRAM_TEST_LISTING_FAILURE": "",
                 "TEAGRAM_TEST_INTERLEAVE_RULE_CHANGE": "1" if interleave_rule_change else "0",
+                "TEAGRAM_TEST_FAIL_INSERT_TARGET": fail_insert_target,
+                "TEAGRAM_TEST_FAIL_INSERT_MODE": fail_insert_mode,
                 "TEAGRAM_TEST_DOCKER_READY_AFTER": str(docker_ready_after),
                 "TEAGRAM_TEST_DOCKER_INFO_MODE": docker_info_mode,
                 "TEAGRAM_TEST_DOCKER_INFO_COUNT": str(
@@ -873,8 +893,19 @@ stack_supervise
             self.assertEqual(marker.read_text(encoding="utf-8"), "inserted")
             state = json.loads(state_file.read_text(encoding="utf-8"))
             self.assertIn(
-                "-A DOCKER-USER -m comment --comment injected-foreign -j ACCEPT",
-                state["iptables"]["DOCKER-USER"],
+                "-A FORWARD -m comment --comment injected-foreign -j ACCEPT",
+                state["iptables"]["FORWARD"],
+            )
+            self.assertEqual(
+                state["iptables"]["FORWARD"][:3],
+                [
+                    f"-A FORWARD -s {subnet} -j {IPTABLES_CHAIN}"
+                    for subnet in (
+                        "198.18.130.0/24",
+                        "198.18.132.0/24",
+                        "198.18.133.0/24",
+                    )
+                ],
             )
             self.assertEqual(
                 state["iptables"]["DOCKER-USER"][:3],
@@ -887,6 +918,96 @@ stack_supervise
                     )
                 ],
             )
+
+    def test_apply_keeps_existing_hooks_when_staging_insert_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            mock_bin, state_file = self._mock_firewall(directory)
+            before = json.loads(state_file.read_text(encoding="utf-8"))
+            before["iptables"]["FORWARD"].insert(
+                0,
+                f"-A FORWARD -s 198.18.129.0/24 -j {IPTABLES_CHAIN}",
+            )
+            state_file.write_text(json.dumps(before, sort_keys=True), encoding="utf-8")
+
+            result = self._run_apply_rules_function(
+                mock_bin,
+                state_file,
+                docker_ready_after=1,
+                fail_insert_target=IPTABLES_CHAIN,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("simulated insert failure", result.stderr)
+            self.assertEqual(
+                state_file.with_name("failed-insert").read_text(encoding="utf-8"),
+                "failed",
+            )
+            after = json.loads(state_file.read_text(encoding="utf-8"))
+            for chain in ("FORWARD", "DOCKER-USER", "INPUT"):
+                with self.subTest(chain=chain):
+                    self.assertEqual(
+                        after["iptables"][chain], before["iptables"][chain]
+                    )
+
+    def test_apply_keeps_staging_hooks_when_final_insert_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            mock_bin, state_file = self._mock_firewall(directory)
+            before = json.loads(state_file.read_text(encoding="utf-8"))
+            before["iptables"]["FORWARD"].insert(
+                0,
+                f"-A FORWARD -s 198.18.129.0/24 -j {IPTABLES_CHAIN}",
+            )
+            state_file.write_text(json.dumps(before, sort_keys=True), encoding="utf-8")
+
+            result = self._run_apply_rules_function(
+                mock_bin,
+                state_file,
+                docker_ready_after=1,
+                fail_insert_target=IPTABLES_CHAIN,
+                fail_insert_mode="stable",
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("simulated insert failure", result.stderr)
+            self.assertEqual(
+                state_file.with_name("failed-insert").read_text(encoding="utf-8"),
+                "failed",
+            )
+            after = json.loads(state_file.read_text(encoding="utf-8"))
+            active_subnets = (
+                "198.18.130.0/24",
+                "198.18.132.0/24",
+                "198.18.133.0/24",
+            )
+            expected_targets = {
+                "FORWARD": IPTABLES_CHAIN,
+                "DOCKER-USER": IPTABLES_CHAIN,
+                "INPUT": INPUT_CHAIN,
+            }
+            for chain, target in expected_targets.items():
+                with self.subTest(chain=chain):
+                    rules = after["iptables"][chain]
+                    self.assertTrue(
+                        any(
+                            f"-j {target}" in rule
+                            or (
+                                chain == "INPUT"
+                                and f"-j {IPTABLES_CHAIN}" in rule
+                            )
+                            for rule in rules
+                        ),
+                        f"{chain} lost its demo isolation hook: {rules}",
+                    )
+                    if chain == "FORWARD":
+                        for subnet in active_subnets:
+                            self.assertTrue(
+                                any(
+                                    f"-s {subnet}" in rule
+                                    and f"-j {target}" in rule
+                                    for rule in rules
+                                ),
+                                f"{chain} lost its active staged hook for {subnet}",
+                            )
 
     def test_stack_reconciler_recovers_missing_services_and_leaves_migrate_stopped(
         self,

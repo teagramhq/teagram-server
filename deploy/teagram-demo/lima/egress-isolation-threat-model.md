@@ -44,6 +44,9 @@ these rules and is outside this policy's protection.
 - Firewall apply and removal delete listed hooks by exact rule specification.
   If Docker or Tailscale changes another rule between inspection and deletion,
   the update cannot remove that unrelated rule by a stale line number.
+- During a hook rebuild, temporary source-scoped hooks reach the same isolation
+  chains before stale hooks are removed. A failed replacement insert therefore
+  leaves an active hook in place until the stable prefix is installed.
 
 ## Verification and residual risk
 

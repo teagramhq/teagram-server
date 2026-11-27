@@ -366,6 +366,7 @@ ensure_source_hooks() {
   local binary=$1 parent_chain=$2 hook_chain=$3 stale_chain=$4 interface=$5
   local subnet index hook_index line prefix_matches=1 listing status
   local hook_count=0 stale_count=0 hook_start=-1 matches
+  local staging_comment="teagram-demo-stage-${BASHPID}"
   shift 5
   local -a subnets=("$@")
   local -a expected_hooks=() parent_rules=() interface_args=()
@@ -431,18 +432,51 @@ ensure_source_hooks() {
     return 0
   fi
 
-  # For missing, duplicated, or misordered hooks, remove exact listed rules
-  # before rebuilding the desired prefix. Concurrent host rules cannot be
-  # deleted by stale line numbers.
+  # Install temporary hooks before removing any existing ones. They match the
+  # same source subnets and target the same isolation chain, so a failed later
+  # insert cannot leave traffic without a hook.
+  for ((index = ${#subnets[@]} - 1; index >= 0; index--)); do
+    "$binary" -w 10 -I "$parent_chain" 1 -m comment --comment "$staging_comment" \
+      "${interface_args[@]}" -s "${subnets[$index]}" -j "$hook_chain"
+  done
+
+  if chain_listing "$binary" "$parent_chain"; then
+    listing=$CHAIN_LISTING
+  else
+    status=$?
+    chain_listing_error "$binary" "$parent_chain" "$status" "$binary is missing $parent_chain"
+  fi
+  mapfile -t parent_rules < <(sed -n "/^-A $parent_chain /p" <<<"$listing")
+
+  # Remove exact listed stale or duplicate rules, leaving the staging hooks in
+  # place. A concurrent host rule cannot be deleted by a stale line number.
   for ((index = ${#parent_rules[@]} - 1; index >= 0; index--)); do
     if [[ "${parent_rules[$index]}" == *" -j $hook_chain" ]] \
       || [[ -n $stale_chain && "${parent_rules[$index]}" == *" -j $stale_chain" ]]; then
+      if [[ "${parent_rules[$index]}" == *"--comment $staging_comment"* ]]; then
+        continue
+      fi
       delete_listed_rule "$binary" "$parent_chain" "${parent_rules[$index]}"
     fi
   done
+
+  # Restore the stable prefix, then remove the temporary protective hooks.
   for ((index = ${#subnets[@]} - 1; index >= 0; index--)); do
     "$binary" -w 10 -I "$parent_chain" 1 "${interface_args[@]}" \
       -s "${subnets[$index]}" -j "$hook_chain"
+  done
+
+  if chain_listing "$binary" "$parent_chain"; then
+    listing=$CHAIN_LISTING
+  else
+    status=$?
+    chain_listing_error "$binary" "$parent_chain" "$status" "$binary is missing $parent_chain"
+  fi
+  mapfile -t parent_rules < <(sed -n "/^-A $parent_chain /p" <<<"$listing")
+  for line in "${parent_rules[@]}"; do
+    if [[ "$line" == *"--comment $staging_comment"* && "$line" == *" -j $hook_chain" ]]; then
+      delete_listed_rule "$binary" "$parent_chain" "$line"
+    fi
   done
 }
 
