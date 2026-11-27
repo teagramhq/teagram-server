@@ -195,6 +195,67 @@ func TestPollDescriptionCustomEmojiFollowsChannelVisibility(t *testing.T) {
 	assertPollCustomEmojiDownloads(t, s, sender.ID, files, false)
 }
 
+func TestChannelCustomEmojiReferencesRespectMemberHistoryFloor(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := open(t)
+	sender := mustUser(t, s, "+15559202009")
+	member := mustUser(t, s, "+15559202010")
+	beforeFloor := stickerSetFileWithBytes(t, s, sender, []byte("hello world"))
+	afterFloor := stickerSetFileWithBytes(t, s, sender, []byte("hello world"))
+	set := createPollCustomEmojiSet(t, ctx, s, sender, "History", "poll_channel_history_floor", beforeFloor, afterFloor)
+
+	channel, _, err := store.SeedChannelWithMember(ctx, s, sender.ID, member.ID)
+	if err != nil {
+		t.Fatalf("seed history-floor channel: %v", err)
+	}
+	postWithEmoji := func(randomID int64, file store.File) store.ChannelMessage {
+		t.Helper()
+		entities := []store.PollDescriptionEntity{{
+			Type: store.PollDescriptionEntityCustomEmoji, Offset: 0, Length: 1, Argument: file.ID,
+		}}
+		post, _, duplicate, postErr := s.PostChannelMessageAsWithEntities(
+			ctx, channel.ID, sender.ID, "⭐", randomID, nil, 0, entities,
+		)
+		if postErr != nil || duplicate {
+			t.Fatalf("post channel custom emoji %d: duplicate=%t err=%v", file.ID, duplicate, postErr)
+		}
+		return post
+	}
+	oldPost := postWithEmoji(92206, beforeFloor)
+	barrier, _, duplicate, err := s.PostChannelMessageAs(ctx, channel.ID, sender.ID, "history floor", 92207, nil, 0)
+	if err != nil || duplicate {
+		t.Fatalf("post history-floor barrier: duplicate=%t err=%v", duplicate, err)
+	}
+	newPost := postWithEmoji(92208, afterFloor)
+	if oldPost.LocalID >= barrier.LocalID || newPost.LocalID <= barrier.LocalID {
+		t.Fatalf("post order = old %d, barrier %d, new %d; want old < barrier < new",
+			oldPost.LocalID, barrier.LocalID, newPost.LocalID)
+	}
+	if err = s.DeleteUserStickerSet(ctx, sender.ID, set.ID); err != nil {
+		t.Fatalf("delete custom emoji set: %v", err)
+	}
+
+	if _, err = store.StorePool(s).Exec(ctx,
+		`UPDATE channel_participants SET available_min_id=$1 WHERE channel_id=$2 AND user_id=$3`,
+		barrier.LocalID, channel.ID, member.ID,
+	); err != nil {
+		t.Fatalf("raise member history floor: %v", err)
+	}
+	got, err := s.UserStickerSetMessageReferencedFileIDs(ctx, member.ID, []int64{beforeFloor.ID, afterFloor.ID})
+	if err != nil {
+		t.Fatalf("resolve custom emoji above member history floor: %v", err)
+	}
+	if _, found := got[beforeFloor.ID]; found {
+		t.Errorf("custom emoji %d from channel post %d resolved below member floor %d",
+			beforeFloor.ID, oldPost.LocalID, barrier.LocalID)
+	}
+	if _, found := got[afterFloor.ID]; !found {
+		t.Errorf("custom emoji %d from channel post %d was not resolved above member floor %d",
+			afterFloor.ID, newPost.LocalID, barrier.LocalID)
+	}
+}
+
 func assertNoPollCustomEmojiReferences(t *testing.T, s *store.Store, ownerID int64, fileIDs []int64) {
 	t.Helper()
 	got, err := s.UserStickerSetMessageReferencedFileIDs(context.Background(), ownerID, fileIDs)
