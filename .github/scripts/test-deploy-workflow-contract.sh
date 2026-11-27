@@ -201,7 +201,7 @@ check_ci_contract() {
     ci_fail 'the git-hooks lane must run the pre-push regression fixture'
   grep -Fq 'bash .github/scripts/pull-base-images.sh --image mirror.gcr.io/library/postgres:18-alpine' .github/scripts/run-deploy-workflow-checks.sh ||
     ci_fail 'the QA password timestamp check must pull PostgreSQL through the canonical retry/fallback helper'
-  grep -Fq 'bash .github/scripts/pull-base-images.sh \' .github/scripts/run-deploy-workflow-checks.sh ||
+  grep -Fq "bash .github/scripts/pull-base-images.sh \\" .github/scripts/run-deploy-workflow-checks.sh ||
     ci_fail 'the media dump check must pull its digest-pinned PostgreSQL image through the canonical helper'
   grep -Fq 'deploy/teagram/test-qa-password-timestamps.sh' .github/scripts/run-deploy-workflow-checks.sh ||
     ci_fail 'the QA password timestamp check must stay in the deploy workflow worker pool'

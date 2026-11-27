@@ -458,7 +458,7 @@ validate_worker_assignments() {
 
 run_worker() {
   local worker=$1 requested_task=${2:-} task_index task_name task_log task_status_file
-  local started_ns finished_ns elapsed_ms task_status task_process_status task_pid
+  local started_ns finished_ns elapsed_ms task_status task_process_status
   local requested_task_assigned=0 failed=0
   local -a task_indices=() summary_rows=()
   case "$worker" in
@@ -497,12 +497,10 @@ run_worker() {
     task_status_file="$worker_dir/$task_index.status"
     rm -f -- "$task_log" "$task_status_file"
     started_ns=$(date +%s%N)
-    # A fresh Bash process keeps errexit active inside run_check, even though
-    # this worker is called from a conditional to collect its final status.
-    DEPLOY_CHECK_POOL_DIR="$worker_dir" bash "$SCRIPT_DIR/run-deploy-workflow-checks.sh" --task "$task_index" &
-    task_pid=$!
-    task_process_status=0
-    wait "$task_pid" || task_process_status=$?
+    # Foreground execution preserves signal handling; the task shell keeps
+    # errexit active inside run_check and records its check status separately.
+    DEPLOY_CHECK_POOL_DIR="$worker_dir" bash "$SCRIPT_DIR/run-deploy-workflow-checks.sh" --task "$task_index"
+    task_process_status=$?
     finished_ns=$(date +%s%N)
     elapsed_ms=$(((finished_ns - started_ns) / 1000000))
     if [[ -f $task_status_file ]]; then
