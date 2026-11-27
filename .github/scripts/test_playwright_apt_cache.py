@@ -56,6 +56,9 @@ else:
         "deconfigured": False,
         "auto_deconfigured": False,
         "playwright_packages": ["libnss3-tools"] if installed else [],
+        "required_packages": json.loads(
+            os.environ.get("PLAYWRIGHT_REQUIRED_PACKAGES", '["libnss3-tools"]')
+        ),
         "installed_packages": [],
         "apt_updated": False,
     }
@@ -202,6 +205,14 @@ elif "--download-only" in args and "--reinstall" in args:
     if not packages or not any(arg.startswith("Dir::Cache::archives=") for arg in args):
         print("cache refresh needs packages and an archive directory", file=sys.stderr)
         sys.exit(1)
+    disappeared_package = os.environ.get("DISAPPEARED_APT_PACKAGE")
+    if state["apt_updated"] and disappeared_package in packages:
+        record("download-failed")
+        print(
+            f"package {disappeared_package} is no longer present in refreshed indexes",
+            file=sys.stderr,
+        )
+        sys.exit(100)
     for package in packages:
         save_package(package, os.environ["NETWORK_PACKAGE_VERSION"])
     record("download")
@@ -212,15 +223,20 @@ elif args[:1] == ["install"]:
     if "libnss3-tools" not in args:
         print("expected the refreshed Playwright dependency", file=sys.stderr)
         sys.exit(1)
+    package_start = args.index("install") + 1
+    packages = [
+        arg
+        for arg in args[package_start:]
+        if not arg.startswith("-") and not arg.startswith("Dir::")
+    ]
     state["playwright_packages"] = sorted(
-        set(state["playwright_packages"]) | {"libnss3-tools"}
+        set(state["playwright_packages"]) | set(packages)
     )
     state["installed_packages"] = sorted(
-        set(state["installed_packages"]) | {"libnss3-tools"}
+        set(state["installed_packages"]) | set(packages)
     )
-    for package in args:
-        if package == "libnss3-tools":
-            save_package(package, os.environ["NETWORK_PACKAGE_VERSION"])
+    for package in packages:
+        save_package(package, os.environ["NETWORK_PACKAGE_VERSION"])
     record("install")
 else:
     print("unexpected apt-get arguments: " + " ".join(args), file=sys.stderr)
@@ -244,9 +260,14 @@ if not state["configured"] or state["data_version"] != state["t64_version"]:
     print("Missing system dependencies:")
     print("  libasound2-data")
     sys.exit(1)
-if "libnss3-tools" not in state["playwright_packages"]:
+missing_packages = sorted(
+    set(state.get("required_packages", ["libnss3-tools"]))
+    - set(state["playwright_packages"])
+)
+if missing_packages:
     print("Missing system dependencies:")
-    print("  libnss3-tools")
+    for package in missing_packages:
+        print("  " + package)
     sys.exit(1)
 print("All system dependencies are installed")
 """
@@ -405,13 +426,17 @@ class PlaywrightAptCacheTests(unittest.TestCase):
             fallback = subprocess.run(
                 ["bash", str(INSTALL_FALLBACK), str(cache), "apt-packages.txt"],
                 cwd=root,
-                env=env,
+                env={**env, "GITHUB_OUTPUT": str(root / "fallback-output")},
                 capture_output=True,
                 text=True,
                 check=False,
             )
             self.assertEqual(fallback.returncode, 0, fallback.stderr)
             self.assertIn("All system dependencies are installed", fallback.stdout)
+            self.assertEqual(
+                (root / "fallback-output").read_text(encoding="utf-8"),
+                "cache_ready=true\n",
+            )
 
             self.assertFalse(corrupt_archive.exists())
             self.assertEqual(
@@ -482,6 +507,85 @@ class PlaywrightAptCacheTests(unittest.TestCase):
                 fresh_apt_log.exists(), "restoring the repaired cache must stay offline"
             )
 
+    def test_disappeared_package_skips_cache_publish_after_runner_verifies(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="playwright-apt-disappeared-package-"
+        ) as temporary:
+            root = Path(temporary)
+            cache = root / ".apt-cache"
+            output = root / "github-output"
+            output.write_text("", encoding="utf-8")
+            package_list = root / "apt-packages.txt"
+            package_list.write_text(
+                "retired-transitive-dep\nlibnss3-tools\n", encoding="utf-8"
+            )
+            env, state_path, apt_log = self._fake_package_environment(
+                root,
+                "1.2.15.3-1ubuntu1.1",
+                playwright_package_installed=False,
+            )
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "runner_version": "1.2.15.3-1ubuntu1.1",
+                        "data_version": "1.2.15.3-1ubuntu1.1",
+                        "t64_version": "1.2.15.3-1ubuntu1.1",
+                        "configured": True,
+                        "deconfigured": False,
+                        "auto_deconfigured": False,
+                        "playwright_packages": [],
+                        "required_packages": [
+                            "replacement-transitive-dep",
+                            "libnss3-tools",
+                        ],
+                        "installed_packages": [],
+                        "apt_updated": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            env.update(
+                {
+                    "DISAPPEARED_APT_PACKAGE": "retired-transitive-dep",
+                    "GITHUB_OUTPUT": str(output),
+                    "PLAYWRIGHT_REQUIRED_PACKAGES": json.dumps(
+                        ["replacement-transitive-dep", "libnss3-tools"]
+                    ),
+                }
+            )
+
+            fallback = subprocess.run(
+                ["bash", str(INSTALL_FALLBACK), str(cache), str(package_list)],
+                cwd=root,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(fallback.returncode, 0, fallback.stderr)
+            self.assertIn("All system dependencies are installed", fallback.stdout)
+            self.assertIn("::warning::APT cache rebuild failed", fallback.stdout)
+            self.assertIn("skipping cache publish", fallback.stdout)
+            self.assertEqual(
+                output.read_text(encoding="utf-8"), "cache_ready=false\n"
+            )
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertTrue(state["configured"])
+            self.assertEqual(
+                set(state["required_packages"]), set(state["playwright_packages"])
+            )
+            self.assertEqual(
+                apt_log.read_text(encoding="utf-8"),
+                "update\nrepair\ninstall\ndownload-failed\n",
+            )
+            self.assertFalse(
+                any(
+                    path.name.startswith("retired-transitive-dep_")
+                    for path in cache.glob("*.deb")
+                )
+            )
+
     def test_failed_cache_restore_saves_repaired_packages_under_a_fresh_key(
         self,
     ) -> None:
@@ -536,6 +640,10 @@ class PlaywrightAptCacheTests(unittest.TestCase):
                 )
                 self.assertIn(
                     "steps.apt-cached-install.outputs.installed == 'false'",
+                    steps[save_name],
+                )
+                self.assertIn(
+                    "steps.apt-network-install.outputs.cache_ready == 'true'",
                     steps[save_name],
                 )
                 self.assertIn(

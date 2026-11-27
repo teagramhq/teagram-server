@@ -3425,7 +3425,7 @@ jobs:
       # package set available to later runs without changing the restored entry.
       - name: Save the Playwright apt dependencies
         continue-on-error: true
-        if: ${{ steps.playwright-deps.outputs.mode == 'packages' && (steps.apt-cache.outputs.cache-matched-key == '' || steps.apt-cached-install.outputs.installed == 'false') }}
+        if: ${{ steps.playwright-deps.outputs.mode == 'packages' && (steps.apt-cache.outputs.cache-matched-key == '' || steps.apt-cached-install.outputs.installed == 'false') && steps.apt-network-install.outputs.cache_ready == 'true' }}
         uses: actions/cache/save@v6.1.0
         with:
           path: .apt-cache/*.deb
