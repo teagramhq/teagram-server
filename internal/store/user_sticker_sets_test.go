@@ -38,14 +38,21 @@ func createPollCustomEmojiSet(
 	owner store.User,
 	title, shortName string,
 	first, second store.File,
+	additional ...store.File,
 ) store.UserStickerSet {
 	t.Helper()
+	files := append([]store.File{first, second}, additional...)
+	emojis := []string{"⭐", "✨", "🌟"}
+	items := make([]store.UserStickerSetItem, len(files))
+	for i, file := range files {
+		items[i] = store.UserStickerSetItem{
+			FileID: file.ID, AccessHash: file.AccessHash, Size: file.Size,
+			Emoji: emojis[i%len(emojis)], Format: "TGS", Width: 100, Height: 100,
+		}
+	}
 	set, err := createStickerSetWithTestFingerprints(t, ctx, s, store.UserStickerSet{
 		CreatorID: owner.ID, Title: title, ShortName: shortName, Kind: "emojis",
-	}, []store.UserStickerSetItem{
-		{FileID: first.ID, AccessHash: first.AccessHash, Size: first.Size, Emoji: "⭐", Format: "TGS", Width: 100, Height: 100},
-		{FileID: second.ID, AccessHash: second.AccessHash, Size: second.Size, Emoji: "✨", Format: "TGS", Width: 100, Height: 100},
-	}, first, second)
+	}, items, files...)
 	if err != nil {
 		t.Fatalf("create poll custom emoji set: %v", err)
 	}
@@ -202,8 +209,9 @@ func TestChannelCustomEmojiReferencesRespectMemberHistoryFloor(t *testing.T) {
 	sender := mustUser(t, s, "+15559202009")
 	member := mustUser(t, s, "+15559202010")
 	beforeFloor := stickerSetFileWithBytes(t, s, sender, []byte("hello world"))
+	atFloor := stickerSetFileWithBytes(t, s, sender, []byte("hello world"))
 	afterFloor := stickerSetFileWithBytes(t, s, sender, []byte("hello world"))
-	set := createPollCustomEmojiSet(t, ctx, s, sender, "History", "poll_channel_history_floor", beforeFloor, afterFloor)
+	set := createPollCustomEmojiSet(t, ctx, s, sender, "History", "poll_channel_history_floor", beforeFloor, atFloor, afterFloor)
 
 	channel, _, err := store.SeedChannelWithMember(ctx, s, sender.ID, member.ID)
 	if err != nil {
@@ -233,10 +241,7 @@ func TestChannelCustomEmojiReferencesRespectMemberHistoryFloor(t *testing.T) {
 		return post
 	}
 	oldPost := postWithEmoji(channel.ID, 92206, beforeFloor)
-	barrier, _, duplicate, err := s.PostChannelMessageAs(ctx, channel.ID, sender.ID, "history floor", 92207, nil, 0)
-	if err != nil || duplicate {
-		t.Fatalf("post history-floor barrier: duplicate=%t err=%v", duplicate, err)
-	}
+	barrier := postWithEmoji(channel.ID, 92207, atFloor)
 	newPost := postWithEmoji(channel.ID, 92208, afterFloor)
 	if oldPost.LocalID >= barrier.LocalID || newPost.LocalID <= barrier.LocalID {
 		t.Fatalf("post order = old %d, barrier %d, new %d; want old < barrier < new",
@@ -275,7 +280,7 @@ func TestChannelCustomEmojiReferencesRespectMemberHistoryFloor(t *testing.T) {
 	if secondOldPost.LocalID <= secondChannelFloor {
 		t.Fatalf("second channel old post %d is not above its unraised floor %d", secondOldPost.LocalID, secondChannelFloor)
 	}
-	fileIDs := []int64{beforeFloor.ID, afterFloor.ID, secondChannelBeforeFloor.ID, secondChannelAfterFloor.ID}
+	fileIDs := []int64{beforeFloor.ID, atFloor.ID, afterFloor.ID, secondChannelBeforeFloor.ID, secondChannelAfterFloor.ID}
 	got, err := s.UserStickerSetMessageReferencedFileIDs(ctx, member.ID, fileIDs)
 	if err != nil {
 		t.Fatalf("resolve custom emoji above member history floor: %v", err)
@@ -283,6 +288,10 @@ func TestChannelCustomEmojiReferencesRespectMemberHistoryFloor(t *testing.T) {
 	if _, found := got[beforeFloor.ID]; found {
 		t.Errorf("custom emoji %d from channel post %d resolved below member floor %d",
 			beforeFloor.ID, oldPost.LocalID, barrier.LocalID)
+	}
+	if _, found := got[atFloor.ID]; found {
+		t.Errorf("custom emoji %d from barrier post %d resolved at member floor %d",
+			atFloor.ID, barrier.LocalID, barrier.LocalID)
 	}
 	if _, found := got[afterFloor.ID]; !found {
 		t.Errorf("custom emoji %d from channel post %d was not resolved above member floor %d",

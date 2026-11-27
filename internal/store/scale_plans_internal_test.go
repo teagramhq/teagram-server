@@ -120,20 +120,6 @@ func (p scalePlan) rowsReadFrom(table string) float64 {
 	return rows
 }
 
-func (p scalePlan) bitmapCandidatesFrom(table string) float64 {
-	// BitmapAnd inputs can overlap, so the largest input is the candidate bound.
-	var rows float64
-	if p.Node == "Bitmap Index Scan" && strings.HasPrefix(p.IndexName, table+"_") {
-		rows = (p.Rows + p.RemovedByFilter + p.RemovedByJoinFilter + p.RemovedByIndexRecheck) * p.Loops
-	}
-	for _, child := range p.Plans {
-		if candidates := child.bitmapCandidatesFrom(table); candidates > rows {
-			rows = candidates
-		}
-	}
-	return rows
-}
-
 func (p scalePlan) indexCandidatesFrom(table string) float64 {
 	var rows float64
 	if p.Node == "Bitmap Index Scan" && strings.HasPrefix(p.IndexName, table+"_") {
@@ -177,7 +163,7 @@ func TestScalePlanCountsLargestBitmapAndCandidateSet(t *testing.T) {
 	if len(plans) != 1 {
 		t.Fatalf("canned plan count = %d, want 1", len(plans))
 	}
-	rows := plans[0].Plan.bitmapCandidatesFrom("channel_messages")
+	rows := plans[0].Plan.indexCandidatesFrom("channel_messages")
 	if rows != 20_099 || rows <= 800 {
 		t.Fatalf("canned bitmap-and plan has %.0f channel_messages candidates, want largest candidate set 20099 (> 800)", rows)
 	}
@@ -197,7 +183,7 @@ func TestScalePlanCountsBitmapIndexCandidates(t *testing.T) {
 	if len(plans) != 1 {
 		t.Fatalf("canned plan count = %d, want 1", len(plans))
 	}
-	rows := plans[0].Plan.bitmapCandidatesFrom("channel_messages")
+	rows := plans[0].Plan.indexCandidatesFrom("channel_messages")
 	if rows != 20_000 || rows <= 800 {
 		t.Fatalf("canned pkey bitmap plan has %.0f channel_messages candidates, want 20000 (> 800)", rows)
 	}
@@ -493,12 +479,14 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 			t.Errorf("historical emoji plan read %.0f %s rows for %d IDs: %s", rows, table, len(planFileIDs), strings.Join(plans[0].Plan.accessSummary(), "; "))
 		}
 	}
-	if candidates := plans[0].Plan.indexCandidatesFrom("channel_messages"); candidates > 800 {
-		t.Errorf("one-channel sticker-history plan has %.0f channel message index candidates for %d IDs: %s",
-			candidates, len(planFileIDs), strings.Join(plans[0].Plan.accessSummary(), "; "))
+	for _, table := range []string{"messages", "channel_messages"} {
+		if candidates := plans[0].Plan.indexCandidatesFrom(table); candidates > 800 {
+			t.Errorf("one-channel sticker-history plan has %.0f %s index candidates for %d IDs: %s",
+				candidates, table, len(planFileIDs), strings.Join(plans[0].Plan.accessSummary(), "; "))
+		}
 	}
-	t.Logf("visible_channels=1 channel_heap_rows=%.0f channel_index_candidates=%.0f planning_ms=%.3f execution_ms=%.3f shared_hits=%d shared_reads=%d",
-		plans[0].Plan.rowsRead("channel_messages"), plans[0].Plan.indexCandidatesFrom("channel_messages"),
+	t.Logf("visible_channels=1 channel_heap_rows=%.0f private_index_candidates=%.0f channel_index_candidates=%.0f planning_ms=%.3f execution_ms=%.3f shared_hits=%d shared_reads=%d",
+		plans[0].Plan.rowsRead("channel_messages"), plans[0].Plan.indexCandidatesFrom("messages"), plans[0].Plan.indexCandidatesFrom("channel_messages"),
 		plans[0].PlanningTime, plans[0].ExecutionTime, plans[0].Plan.Hits, plans[0].Plan.Reads)
 
 	const extraVisibleChannels = 499
@@ -571,12 +559,14 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 			t.Errorf("500-channel historical emoji plan read %.0f %s rows for %d IDs: %s", rows, table, len(planFileIDs), strings.Join(plans[0].Plan.accessSummary(), "; "))
 		}
 	}
-	if candidates := plans[0].Plan.indexCandidatesFrom("channel_messages"); candidates > 800 {
-		t.Errorf("500-channel sticker-history plan has %.0f channel message index candidates for %d IDs: %s",
-			candidates, len(planFileIDs), strings.Join(plans[0].Plan.accessSummary(), "; "))
+	for _, table := range []string{"messages", "channel_messages"} {
+		if candidates := plans[0].Plan.indexCandidatesFrom(table); candidates > 800 {
+			t.Errorf("500-channel sticker-history plan has %.0f %s index candidates for %d IDs: %s",
+				candidates, table, len(planFileIDs), strings.Join(plans[0].Plan.accessSummary(), "; "))
+		}
 	}
-	t.Logf("visible_channels=500 channel_gist_probes=%.0f channel_heap_rows=%.0f channel_index_candidates=%.0f planning_ms=%.3f execution_ms=%.3f shared_hits=%d shared_reads=%d",
-		plans[0].Plan.indexLoops(channelEmojiIndex), plans[0].Plan.rowsRead("channel_messages"), plans[0].Plan.indexCandidatesFrom("channel_messages"),
+	t.Logf("visible_channels=500 channel_gist_probes=%.0f channel_heap_rows=%.0f private_index_candidates=%.0f channel_index_candidates=%.0f planning_ms=%.3f execution_ms=%.3f shared_hits=%d shared_reads=%d",
+		plans[0].Plan.indexLoops(channelEmojiIndex), plans[0].Plan.rowsRead("channel_messages"), plans[0].Plan.indexCandidatesFrom("messages"), plans[0].Plan.indexCandidatesFrom("channel_messages"),
 		plans[0].PlanningTime, plans[0].ExecutionTime, plans[0].Plan.Hits, plans[0].Plan.Reads)
 }
 
