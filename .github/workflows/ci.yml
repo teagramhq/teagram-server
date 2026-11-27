@@ -654,8 +654,8 @@ jobs:
         uses: actions/cache/restore@v6.1.0
         with:
           path: ~/.cache/go-build
-          key: go-build-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: go-build-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-
+          key: go-build-v2-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: go-build-v2-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-
 
       - name: Build
         run: go build ./...
@@ -831,13 +831,18 @@ jobs:
           docker logs --tail 50 "$TG_PGTEST_CONTAINER_NAME" 2>&1 || true
           free -m
 
+      # Artifact zips normalize Unix file modes; tar preserves cached executables.
+      - name: Archive Go build cache snapshot
+        if: ${{ success() && github.ref == 'refs/heads/main' }}
+        run: tar -cf "$RUNNER_TEMP/go-build-cache.tar" -C "$HOME/.cache" go-build
+
       - name: Upload Go build cache snapshot
         id: upload_go_build_cache
         if: ${{ success() && github.ref == 'refs/heads/main' }}
         uses: actions/upload-artifact@v7.0.1
         with:
           name: go-build-cache-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
-          path: ~/.cache/go-build
+          path: ${{ runner.temp }}/go-build-cache.tar
           if-no-files-found: error
           retention-days: 1
 
@@ -879,8 +884,8 @@ jobs:
         uses: actions/cache/restore@v6.1.0
         with:
           path: ~/.cache/go-build
-          key: go-build-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: go-build-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-
+          key: go-build-v2-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: go-build-v2-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-
 
       - name: Pre-pull the shared PostgreSQL test image with retry
         run: bash .github/scripts/pull-base-images.sh --image mirror.gcr.io/postgres:18-alpine
@@ -895,13 +900,18 @@ jobs:
           docker logs --tail 50 "$TG_PGTEST_CONTAINER_NAME" 2>&1 || true
           free -m
 
+      # Artifact zips normalize Unix file modes; tar preserves cached executables.
+      - name: Archive Go build cache snapshot
+        if: ${{ success() && github.ref == 'refs/heads/main' }}
+        run: tar -cf "$RUNNER_TEMP/go-build-cache.tar" -C "$HOME/.cache" go-build
+
       - name: Upload Go build cache snapshot
         id: upload_go_build_cache
         if: ${{ success() && github.ref == 'refs/heads/main' }}
         uses: actions/upload-artifact@v7.0.1
         with:
           name: go-build-cache-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
-          path: ~/.cache/go-build
+          path: ${{ runner.temp }}/go-build-cache.tar
           if-no-files-found: error
           retention-days: 1
 
@@ -949,8 +959,8 @@ jobs:
         uses: actions/cache/restore@v6.1.0
         with:
           path: ~/.cache/go-build
-          key: go-build-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: go-build-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-
+          key: go-build-v2-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: go-build-v2-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-
 
       - name: Pre-pull the shared PostgreSQL test image with retry
         run: bash .github/scripts/pull-base-images.sh --image mirror.gcr.io/postgres:18-alpine
@@ -965,13 +975,18 @@ jobs:
           docker logs --tail 50 "$TG_PGTEST_CONTAINER_NAME" 2>&1 || true
           free -m
 
+      # Artifact zips normalize Unix file modes; tar preserves cached executables.
+      - name: Archive Go build cache snapshot
+        if: ${{ success() && github.ref == 'refs/heads/main' }}
+        run: tar -cf "$RUNNER_TEMP/go-build-cache.tar" -C "$HOME/.cache" go-build
+
       - name: Upload Go build cache snapshot
         id: upload_go_build_cache
         if: ${{ success() && github.ref == 'refs/heads/main' }}
         uses: actions/upload-artifact@v7.0.1
         with:
           name: go-build-cache-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
-          path: ~/.cache/go-build
+          path: ${{ runner.temp }}/go-build-cache.tar
           if-no-files-found: error
           retention-days: 1
 
@@ -1029,8 +1044,8 @@ jobs:
         uses: actions/cache/restore@v6.1.0
         with:
           path: ~/.cache/go-build
-          key: go-build-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: go-build-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-
+          key: go-build-v2-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: go-build-v2-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-
 
       # Download each snapshot by itself. A multi-ID request can warn and still
       # succeed when one ID is absent, so each action must resolve one artifact.
@@ -1039,21 +1054,33 @@ jobs:
         uses: actions/download-artifact@v8.0.2
         with:
           artifact-ids: ${{ needs.test-go.outputs.build_cache_artifact_id }}
-          path: ~/.cache/go-build
+          path: ${{ runner.temp }}/go-build-cache/test-go
 
       - name: Download Go build cache from test-go-e2e
         if: ${{ steps.eligibility.outputs.eligible == 'true' }}
         uses: actions/download-artifact@v8.0.2
         with:
           artifact-ids: ${{ needs.test-go-e2e.outputs.build_cache_artifact_id }}
-          path: ~/.cache/go-build
+          path: ${{ runner.temp }}/go-build-cache/test-go-e2e
 
       - name: Download Go build cache from test-go-fleet-cap
         if: ${{ steps.eligibility.outputs.eligible == 'true' }}
         uses: actions/download-artifact@v8.0.2
         with:
           artifact-ids: ${{ needs.test-go-fleet-cap.outputs.build_cache_artifact_id }}
-          path: ~/.cache/go-build
+          path: ${{ runner.temp }}/go-build-cache/test-go-fleet-cap
+
+      - name: Restore Go build cache file modes
+        if: ${{ steps.eligibility.outputs.eligible == 'true' }}
+        run: |
+          mkdir -p "$HOME/.cache"
+          for snapshot in "$RUNNER_TEMP"/go-build-cache/*/go-build-cache.tar; do
+            if [[ ! -f "$snapshot" ]]; then
+              echo "::error::missing archived Go build cache snapshot: $snapshot"
+              exit 1
+            fi
+            tar -xf "$snapshot" -C "$HOME/.cache"
+          done
 
       # These single-ID downloads fail if any snapshot is absent. Keep pruning
       # after all three so a partial rerun cannot save an incomplete cache.
@@ -1061,7 +1088,7 @@ jobs:
         if: ${{ steps.eligibility.outputs.eligible == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
-          GO_BUILD_CACHE_KEY: go-build-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          GO_BUILD_CACHE_KEY: go-build-v2-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
         run: python3 .github/scripts/prune_go_build_cache.py
 
       - name: Save Go build and test results
@@ -1069,7 +1096,7 @@ jobs:
         uses: actions/cache/save@v6.1.0
         with:
           path: ~/.cache/go-build
-          key: go-build-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: go-build-v2-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
 
   test-real-server-fixtures:
     name: 'test: real-server-fixtures'
@@ -1112,8 +1139,8 @@ jobs:
         uses: actions/cache/restore@v6.1.0
         with:
           path: ~/.cache/go-build
-          key: go-build-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: go-build-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-
+          key: go-build-v2-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: go-build-v2-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-
 
       - uses: actions/setup-node@v7.0.0
         with:
@@ -1376,6 +1403,16 @@ jobs:
 
       - name: Check workflow contract script syntax
         run: |
+          bash -n .github/scripts/install-playwright-apt-cache.sh
+          bash -n .github/scripts/install-playwright-apt-fallback.sh
+          bash -n .github/scripts/rebuild-playwright-apt-cache.sh
+          bash -n .github/scripts/run-playwright-apt-cache-rebuild.sh
+          bash -n .github/scripts/discard-playwright-apt-cache.sh
+          shellcheck .github/scripts/install-playwright-apt-cache.sh
+          shellcheck .github/scripts/install-playwright-apt-fallback.sh
+          shellcheck .github/scripts/rebuild-playwright-apt-cache.sh
+          shellcheck .github/scripts/run-playwright-apt-cache-rebuild.sh
+          shellcheck .github/scripts/discard-playwright-apt-cache.sh
           bash -n .github/scripts/perf-run.sh .github/scripts/test-perf-workflow-contract.sh .github/scripts/test-ci-main-priority.sh
           shellcheck .github/scripts/test-perf-workflow-contract.sh .github/scripts/test-ci-main-priority.sh
           bash -n .github/scripts/publish-k8s-image-digests.sh .github/scripts/test-k8s-image-digests.sh
@@ -3139,11 +3176,22 @@ jobs:
           go-version-file: go.mod
           cache: false
 
-      - name: Cache Go modules
-        uses: actions/cache@v6.1.0
+      # Resolve the key before the test steps run and carry that exact string
+      # into the explicit save. The cache action's post-job save re-evaluated
+      # hashFiles after the test job and failed even though the tests passed.
+      - name: Resolve Go module cache key
+        id: go-modules-key
+        env:
+          GO_MODULE_CACHE_KEY: go-mod-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
+        run: echo "key=$GO_MODULE_CACHE_KEY" >>"$GITHUB_OUTPUT"
+
+      - name: Restore Go modules
+        id: go-modules-cache
+        continue-on-error: true
+        uses: actions/cache/restore@v6.1.0
         with:
           path: ~/go/pkg/mod
-          key: go-mod-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
+          key: ${{ steps.go-modules-key.outputs.key }}
           restore-keys: go-mod-${{ runner.os }}-
 
       # Read-only on purpose, unlike the ci job: that job's key is built to
@@ -3155,7 +3203,7 @@ jobs:
         uses: actions/cache/restore@v6.1.0
         with:
           path: ~/.cache/go-build
-          key: go-build-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-
+          key: go-build-v2-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-
 
       # Before setup-node, whose pnpm cache mode shells out to pnpm to find the
       # store path. Version pinned here because package.json carries no
@@ -3275,35 +3323,35 @@ jobs:
 
       # The .deb files rather than the installed libraries: /usr/lib is the
       # runner image's, and restoring a tree over it is how a cache turns into a
-      # broken system. Keyed on the image the packages were resolved against as
-      # well as the packages themselves, so a runner image bump re-downloads
-      # instead of dpkg-installing debs built for the previous one.
+      # broken system. Keyed on the image and package set. Cache entries are
+      # immutable, so each run gets a fresh primary key while the restore prefix
+      # picks up the latest usable package set, including legacy entries.
       - name: Cache the Playwright apt dependencies
         id: apt-cache
         if: steps.playwright-deps.outputs.mode == 'packages'
-        uses: actions/cache@v6.1.0
+        uses: actions/cache/restore@v6.1.0
         with:
           path: .apt-cache/*.deb
-          key: playwright-apt-${{ steps.playwright-deps.outputs.image }}-${{ hashFiles('apt-packages.txt') }}
+          key: playwright-apt-${{ steps.playwright-deps.outputs.image }}-${{ hashFiles('apt-packages.txt') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            playwright-apt-${{ steps.playwright-deps.outputs.image }}-${{ hashFiles('apt-packages.txt') }}-
+            playwright-apt-${{ steps.playwright-deps.outputs.image }}-${{ hashFiles('apt-packages.txt') }}
 
-      # The warm path: dpkg installs the whole cached set in one call, which is
-      # what lets it resolve the ordering among them, and touches no mirror. The
-      # dry-run afterwards is the check that it actually worked — if anything is
-      # still missing, or dpkg refused, the step falls through to the network
-      # path rather than leaving a half-installed runner to fail in the browser.
+      # The warm path installs the cached set together, deconfigures conflicting
+      # package versions, and completes pending configuration without touching a
+      # mirror. Its dry-run checks the result; anything incomplete falls through
+      # to the repair and network path rather than failing in the browser.
       #
-      # A bad entry falls back to the network. PR jobs do not get an Actions
-      # write token to delete cache entries; the trusted main run can refresh it.
+      # A bad entry falls back to the network and is saved under this run's fresh
+      # key below, so the restore prefix prefers the repaired package set next time.
       - name: Install the system dependencies from cache
         id: apt-cached-install
-        if: steps.apt-cache.outputs.cache-hit == 'true'
-        run: |
-          if sudo dpkg -i .apt-cache/*.deb && pnpm exec playwright install-deps --dry-run chromium; then
-            echo "installed=true" >>"$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo "::warning::cached debs did not satisfy the dependencies; falling back to the network install"
-          echo "installed=false" >>"$GITHUB_OUTPUT"
+        if: steps.apt-cache.outputs.cache-matched-key != ''
+        run: bash .github/scripts/install-playwright-apt-cache.sh .apt-cache
+
+      - name: Discard the rejected apt cache
+        if: steps.apt-cached-install.outputs.installed == 'false'
+        run: bash .github/scripts/discard-playwright-apt-cache.sh .apt-cache
 
       # The cold path, and the only step here that needs the network. Download
       # and install are separate so the debs land in a directory the cache can
@@ -3360,38 +3408,7 @@ jobs:
             # install and report the attempt as a success.
             set -e
             if [ "$MODE" = "packages" ]; then
-              bash .github/scripts/prepare-playwright-apt-cache.sh .apt-cache
-              sudo apt-get update
-              # The first dry-run used the apt indexes baked into the runner
-              # image. Refreshing those indexes can change the package names
-              # Playwright needs, so derive the install list again before
-              # asking apt to install it. Keep apt-packages.txt unchanged: it
-              # identifies the cache lookup for this runner image, while these
-              # refreshed packages are the contents saved under that key.
-              status=0
-              pnpm exec playwright install-deps --dry-run chromium >deps-after-update.txt 2>&1 || status=$?
-              cat deps-after-update.txt
-              if grep -q 'All system dependencies are installed' deps-after-update.txt; then
-                : >apt-install-packages.txt
-              elif grep -q 'Missing system dependencies' deps-after-update.txt; then
-                sed -n 's/^  \([^ ]*\)$/\1/p' deps-after-update.txt | sort >apt-install-packages.txt
-                if [ ! -s apt-install-packages.txt ]; then
-                  echo "::error::could not parse Playwright dependencies after apt-get update"
-                  return 1
-                fi
-              elif [ "$status" -ne 0 ]; then
-                echo "::error::could not determine Playwright dependencies after apt-get update"
-                return "$status"
-              else
-                echo "::error::Playwright did not report dependencies after apt-get update"
-                return 1
-              fi
-              if [ -s apt-install-packages.txt ]; then
-                sudo apt-get install -y --no-install-recommends \
-                  -o "Dir::Cache::archives=$PWD/.apt-cache" \
-                  $(tr '\n' ' ' <apt-install-packages.txt)
-              fi
-              sudo chown -R "$(id -u):$(id -g)" .apt-cache
+              bash .github/scripts/install-playwright-apt-fallback.sh .apt-cache apt-packages.txt
             else
               pnpm exec playwright install-deps chromium
             fi
@@ -3412,19 +3429,23 @@ jobs:
           echo "::error::system dependency install failed after 2 attempts"
           exit 1
 
-      # After a network install, which is either a miss or an entry that was
-      # just deleted for not satisfying the check; on a working hit the cache
-      # action holds the entry already, and on the satisfied path there is
-      # nothing to save. continue-on-error because the debs are an optimisation:
-      # a failed save costs the next run its warm path and nothing else, and
-      # must not red a job whose suite has yet to run.
+      # Rebuild is separate from the required install timeout and is best effort.
+      # Publish only when every requested package has an archive.
+      - name: Rebuild the Playwright apt cache
+        id: apt-cache-rebuild
+        if: ${{ steps.playwright-deps.outputs.mode == 'packages' && (steps.apt-cache.outputs.cache-matched-key == '' || steps.apt-cached-install.outputs.installed == 'false') }}
+        timeout-minutes: 6
+        run: bash .github/scripts/run-playwright-apt-cache-rebuild.sh .apt-cache apt-packages.txt
+
+      # Cache entries are immutable; the run-scoped primary key makes a repaired
+      # package set available to later runs without changing the restored entry.
       - name: Save the Playwright apt dependencies
         continue-on-error: true
-        if: ${{ steps.playwright-deps.outputs.mode == 'packages' && (steps.apt-cache.outputs.cache-hit != 'true' || steps.apt-cached-install.outputs.installed == 'false') }}
+        if: ${{ steps.playwright-deps.outputs.mode == 'packages' && (steps.apt-cache.outputs.cache-matched-key == '' || steps.apt-cached-install.outputs.installed == 'false') && steps.apt-cache-rebuild.outputs.cache_ready == 'true' }}
         uses: actions/cache/save@v6.1.0
         with:
           path: .apt-cache/*.deb
-          key: playwright-apt-${{ steps.playwright-deps.outputs.image }}-${{ hashFiles('apt-packages.txt') }}
+          key: ${{ steps.apt-cache.outputs.cache-primary-key }}
 
       # Whichever path ran, the browser has to be able to start. This is the
       # same simulation as above and costs a second; it is here so a missing
@@ -3454,6 +3475,17 @@ jobs:
         env:
           PLAYWRIGHT_HTML_OPEN: never
         run: pnpm exec playwright test --reporter=list,html
+
+      # Module caching is an optimization; a failed or racing cache save must
+      # not turn a passing browser suite into a failed CI job. Saving after the
+      # tests also avoids persisting modules from an unsuccessful run.
+      - name: Save Go modules cache
+        if: ${{ success() && steps.go-modules-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ steps.go-modules-key.outputs.key }}
 
       # Both directories, because they answer different questions: the report is
       # the readable summary, and test-results/ holds the traces the config

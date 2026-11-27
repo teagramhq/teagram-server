@@ -219,25 +219,27 @@ jobs:
       - name: Cache Chromium apt dependencies
         id: apt-cache
         if: steps.playwright-deps.outputs.mode == 'packages'
-        uses: actions/cache@v6.1.0
+        uses: actions/cache/restore@v6.1.0
         with:
           path: .apt-cache/*.deb
-          key: playwright-apt-${{ steps.playwright-deps.outputs.image }}-${{ hashFiles('web-source/apt-packages.txt') }}
+          key: playwright-apt-${{ steps.playwright-deps.outputs.image }}-${{ hashFiles('web-source/apt-packages.txt') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            playwright-apt-${{ steps.playwright-deps.outputs.image }}-${{ hashFiles('web-source/apt-packages.txt') }}-
+            playwright-apt-${{ steps.playwright-deps.outputs.image }}-${{ hashFiles('web-source/apt-packages.txt') }}
 
       # The warm path: install the cached set in one call so dpkg can resolve
       # ordering and deconfigure older runner packages during version changes.
       # The dry-run afterwards checks the completed package set without a mirror.
       - name: Install Chromium system dependencies from cache
         id: apt-cached-install
-        if: steps.apt-cache.outputs.cache-hit == 'true'
+        if: steps.apt-cache.outputs.cache-matched-key != ''
         working-directory: web-source
-        run: |
-          if sudo dpkg --auto-deconfigure -i ../.apt-cache/*.deb && pnpm exec playwright install-deps --dry-run chromium; then
-            echo "installed=true" >>"$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo "::warning::cached debs did not satisfy the dependencies; falling back to the network install"
-          echo "installed=false" >>"$GITHUB_OUTPUT"
+        run: bash ../.github/scripts/install-playwright-apt-cache.sh ../.apt-cache
+
+      - name: Discard the rejected apt cache
+        if: steps.apt-cached-install.outputs.installed == 'false'
+        working-directory: web-source
+        run: bash ../.github/scripts/discard-playwright-apt-cache.sh ../.apt-cache
 
       - name: Install Chromium system dependencies from the network
         id: apt-network-install
@@ -278,33 +280,7 @@ jobs:
           attempt_install() {
             set -e
             if [ "$MODE" = "packages" ]; then
-              bash ../.github/scripts/prepare-playwright-apt-cache.sh ../.apt-cache
-              sudo apt-get update
-              status=0
-              pnpm exec playwright install-deps --dry-run chromium >deps-after-update.txt 2>&1 || status=$?
-              cat deps-after-update.txt
-              if grep -q 'All system dependencies are installed' deps-after-update.txt; then
-                : >apt-install-packages.txt
-              elif grep -q 'Missing system dependencies' deps-after-update.txt; then
-                sed -n 's/^  \([^ ]*\)$/\1/p' deps-after-update.txt | sort >apt-install-packages.txt
-                if [ ! -s apt-install-packages.txt ]; then
-                  echo "::error::could not parse Playwright dependencies after apt-get update"
-                  return 1
-                fi
-              elif [ "$status" -ne 0 ]; then
-                echo "::error::could not determine Playwright dependencies after apt-get update"
-                return "$status"
-              else
-                echo "::error::Playwright did not report dependencies after apt-get update"
-                return 1
-              fi
-              if [ -s apt-install-packages.txt ]; then
-                mapfile -t apt_packages <apt-install-packages.txt
-                sudo apt-get install -y --no-install-recommends \
-                  -o "Dir::Cache::archives=$GITHUB_WORKSPACE/.apt-cache" \
-                  "${apt_packages[@]}"
-              fi
-              sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE/.apt-cache"
+              bash ../.github/scripts/install-playwright-apt-fallback.sh ../.apt-cache apt-packages.txt
             else
               pnpm exec playwright install-deps chromium
             fi
@@ -325,13 +301,20 @@ jobs:
           echo "::error::system dependency install failed after 2 attempts"
           exit 1
 
+      - name: Rebuild Chromium apt cache
+        id: apt-cache-rebuild
+        if: ${{ steps.playwright-deps.outputs.mode == 'packages' && (steps.apt-cache.outputs.cache-matched-key == '' || steps.apt-cached-install.outputs.installed == 'false') }}
+        timeout-minutes: 6
+        working-directory: web-source
+        run: bash ../.github/scripts/run-playwright-apt-cache-rebuild.sh ../.apt-cache apt-packages.txt
+
       - name: Save Chromium apt dependencies
         continue-on-error: true
-        if: ${{ steps.playwright-deps.outputs.mode == 'packages' && (steps.apt-cache.outputs.cache-hit != 'true' || steps.apt-cached-install.outputs.installed == 'false') }}
+        if: ${{ steps.playwright-deps.outputs.mode == 'packages' && (steps.apt-cache.outputs.cache-matched-key == '' || steps.apt-cached-install.outputs.installed == 'false') && steps.apt-cache-rebuild.outputs.cache_ready == 'true' }}
         uses: actions/cache/save@v6.1.0
         with:
           path: .apt-cache/*.deb
-          key: playwright-apt-${{ steps.playwright-deps.outputs.image }}-${{ hashFiles('web-source/apt-packages.txt') }}
+          key: ${{ steps.apt-cache.outputs.cache-primary-key }}
 
       - name: Verify Chromium system dependencies
         working-directory: web-source

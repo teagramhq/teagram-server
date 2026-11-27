@@ -447,7 +447,16 @@ class RealServerFixtureGateTests(unittest.TestCase):
             job.group("body"),
         )
         self.assertIsNotNone(cached_install, "cached dependency install step is missing")
-        self.assertIn("falling back to the network install", cached_install.group("body"))
+        self.assertIn(
+            "install-playwright-apt-cache.sh .apt-cache",
+            cached_install.group("body"),
+        )
+        cached_install_script = (
+            repo_root / ".github" / "scripts" / "install-playwright-apt-cache.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "falling back to the network install", cached_install_script
+        )
         self.assertNotIn("gh cache delete", cached_install.group("body"))
         self.assertNotIn("GH_TOKEN", cached_install.group("body"))
 

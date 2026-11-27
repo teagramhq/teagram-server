@@ -6,19 +6,23 @@ import subprocess
 MAIN_REF = "refs/heads/main"
 
 
+def cache_key_prefixes(runner_os: str) -> tuple[str, str]:
+    return f"go-build-{runner_os}-", f"go-build-v2-{runner_os}-"
+
+
 def stale_cache_ids(
     caches: list[dict[str, object]], current_key: str, runner_os: str, ref: str
 ) -> list[int]:
     if ref != MAIN_REF:
         return []
 
-    prefix = f"go-build-{runner_os}-"
+    prefixes = cache_key_prefixes(runner_os)
     return [
         int(cache["id"])
         for cache in caches
         if cache.get("ref") == MAIN_REF
         and isinstance(cache.get("key"), str)
-        and cache["key"].startswith(prefix)
+        and cache["key"].startswith(prefixes)
         and cache["key"] != current_key
     ]
 
@@ -28,7 +32,8 @@ def main() -> int:
     ref = os.environ["GITHUB_REF"]
     runner_os = os.environ["RUNNER_OS"]
     current_key = os.environ["GO_BUILD_CACHE_KEY"]
-    prefix = f"go-build-{runner_os}-"
+    prefix = f"go-build-v2-{runner_os}-"
+    query_prefix = "go-build-"
 
     if ref != MAIN_REF:
         return 0
@@ -47,7 +52,7 @@ def main() -> int:
             "-f",
             f"ref={ref}",
             "-f",
-            f"key={prefix}",
+            f"key={query_prefix}",
             "-F",
             "per_page=100",
         ],
