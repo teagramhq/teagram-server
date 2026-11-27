@@ -228,8 +228,10 @@ EOF
 printf '101\n102\n103\n105\n' >"$runtime_cgroup/cgroup.procs"
 printf '3000000\n' >"$runtime_cgroup/memory.current"
 printf 'anon 2400000\nfile 100000\nkernel 500000\n' >"$runtime_cgroup/memory.stat"
+sampled_current=
 sampled_worker_count=
-for attempt in $(seq 200); do
+sampled_attribution=
+for _ in $(seq 200); do
   if [[ -r "$runtime_prefix-processes" ]]; then
     IFS='|' read -r sampled_current _ _ _ sampled_worker_count _ sampled_attribution _ \
       <"$runtime_prefix-processes"
@@ -242,8 +244,12 @@ for attempt in $(seq 200); do
 done
 if [[ "$sampled_current" != 3000000 || "$sampled_worker_count" != 3 ||
   "$sampled_attribution" != complete ]]; then
+  process_snapshot=missing
+  if [[ -r "$runtime_prefix-processes" ]]; then
+    process_snapshot=$(<"$runtime_prefix-processes")
+  fi
   printf 'process sampler missed the short-lived worker while runtime metrics were blocked: %s\n' \
-    "$(<"$runtime_prefix-processes" 2>/dev/null || printf missing)" >&2
+    "$process_snapshot" >&2
   : >"$runtime_request_release"
   : >"$runtime_stop"
   wait "$cgroup_sampler_pid" 2>/dev/null || true
