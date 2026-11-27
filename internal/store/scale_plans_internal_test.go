@@ -102,11 +102,29 @@ func (p scalePlan) rowsReadFrom(table string) float64 {
 	var rows float64
 	if p.Relation == table {
 		rows += (p.Rows + p.RemovedByFilter + p.RemovedByJoinFilter + p.RemovedByIndexRecheck) * p.Loops
+		if p.Node == "Bitmap Heap Scan" {
+			if candidates := p.bitmapCandidatesFrom(table); candidates > rows {
+				rows = candidates
+			}
+			return rows
+		}
 	}
-	// Bitmap index scans report each input to a BitmapAnd separately; only the
-	// relation node reports tuples read after those candidate sets intersect.
 	for _, child := range p.Plans {
 		rows += child.rowsReadFrom(table)
+	}
+	return rows
+}
+
+func (p scalePlan) bitmapCandidatesFrom(table string) float64 {
+	// BitmapAnd inputs can overlap, so the largest input is the candidate bound.
+	var rows float64
+	if p.Node == "Bitmap Index Scan" && strings.HasPrefix(p.IndexName, table+"_") {
+		rows = (p.Rows + p.RemovedByFilter + p.RemovedByJoinFilter + p.RemovedByIndexRecheck) * p.Loops
+	}
+	for _, child := range p.Plans {
+		if candidates := child.bitmapCandidatesFrom(table); candidates > rows {
+			rows = candidates
+		}
 	}
 	return rows
 }
@@ -127,7 +145,7 @@ func (p scalePlan) accessSummary() []string {
 	return accesses
 }
 
-func TestScalePlanCountsBitmapAndHeapRowsAfterIntersection(t *testing.T) {
+func TestScalePlanCountsLargestBitmapAndCandidateSet(t *testing.T) {
 	const explain = `[{"Plan":{"Node Type":"Bitmap Heap Scan","Relation Name":"channel_messages","Actual Rows":99,"Actual Loops":1,"Plans":[{"Node Type":"BitmapAnd","Actual Loops":1,"Plans":[{"Node Type":"Bitmap Index Scan","Index Name":"channel_messages_pkey","Actual Rows":20000,"Actual Loops":1},{"Node Type":"Bitmap Index Scan","Index Name":"channel_messages_channel_custom_emoji_document_ids_gin_idx","Actual Rows":20099,"Actual Loops":1}]}]}}]`
 	var plans []struct {
 		Plan scalePlan `json:"Plan"`
@@ -139,13 +157,13 @@ func TestScalePlanCountsBitmapAndHeapRowsAfterIntersection(t *testing.T) {
 		t.Fatalf("canned plan count = %d, want 1", len(plans))
 	}
 	rows := plans[0].Plan.rowsRead("channel_messages")
-	if rows != 99 {
-		t.Fatalf("canned bitmap-and plan read %.0f channel_messages rows, want 99 rows after index intersection", rows)
+	if rows != 20_099 || rows <= 800 {
+		t.Fatalf("canned bitmap-and plan read %.0f channel_messages rows, want largest candidate set 20099 (> 800)", rows)
 	}
 }
 
-func TestScalePlanCountsBitmapHeapRowsRemovedByFilter(t *testing.T) {
-	const explain = `[{"Plan":{"Node Type":"Bitmap Heap Scan","Relation Name":"channel_messages","Actual Rows":500,"Actual Loops":1,"Rows Removed by Filter":19500,"Plans":[{"Node Type":"Bitmap Index Scan","Index Name":"channel_messages_pkey","Actual Rows":20000,"Actual Loops":1}]}}]`
+func TestScalePlanCountsBitmapIndexCandidates(t *testing.T) {
+	const explain = `[{"Plan":{"Node Type":"Bitmap Heap Scan","Relation Name":"channel_messages","Actual Rows":500,"Actual Loops":1,"Plans":[{"Node Type":"Bitmap Index Scan","Index Name":"channel_messages_pkey","Actual Rows":20000,"Actual Loops":1}]}}]`
 	var plans []struct {
 		Plan scalePlan `json:"Plan"`
 	}
@@ -157,7 +175,7 @@ func TestScalePlanCountsBitmapHeapRowsRemovedByFilter(t *testing.T) {
 	}
 	rows := plans[0].Plan.rowsRead("channel_messages")
 	if rows != 20_000 || rows <= 800 {
-		t.Fatalf("canned broad bitmap plan read %.0f channel_messages rows, want 20000 (> 800)", rows)
+		t.Fatalf("canned pkey bitmap plan read %.0f channel_messages rows, want 20000 (> 800)", rows)
 	}
 }
 

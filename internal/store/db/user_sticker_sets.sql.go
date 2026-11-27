@@ -2025,19 +2025,23 @@ visible_channels AS MATERIALIZED (
       AND (cp.banned_until IS NULL OR cp.banned_until <= now())
       AND c.deleted_at IS NULL
 ), channel_candidates AS MATERIALIZED (
-    SELECT cm.entities
-    FROM channel_messages cm
-    JOIN visible_channels vc
-      ON vc.channel_id = cm.channel_id
-     AND cm.local_id > vc.available_min_id
-    -- Repeat this authorized set only to make channel_id a GIN index condition;
-    -- the join above remains authoritative for membership and min-ID visibility.
-    WHERE cm.channel_id = ANY(ARRAY(SELECT channel_id FROM visible_channels))
-      AND cm.deleted = false
-      AND cm.entities IS NOT NULL
-      AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
-      AND cardinality(message_custom_emoji_document_ids(cm.entities)) > 0
-      AND message_custom_emoji_document_ids(cm.entities) && $1::text[]
+    -- Probe channel/document candidates once per visible channel, then apply
+    -- that channel's history floor to the smaller result set.
+    SELECT candidates.entities
+    FROM visible_channels vc
+    CROSS JOIN LATERAL (
+        SELECT cm.local_id, cm.entities
+        FROM channel_messages cm
+        WHERE cm.channel_id = vc.channel_id
+          AND cm.deleted = false
+          AND cm.entities IS NOT NULL
+          AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
+          AND cardinality(message_custom_emoji_document_ids(cm.entities)) > 0
+          AND message_custom_emoji_document_ids(cm.entities) && $1::text[]
+        -- Keep the history-floor predicate outside this index path.
+        OFFSET 0
+    ) AS candidates
+    WHERE candidates.local_id > vc.available_min_id
 ), visible_entities AS (
     SELECT m.entities
     FROM messages m
