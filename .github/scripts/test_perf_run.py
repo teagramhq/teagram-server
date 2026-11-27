@@ -40,6 +40,9 @@ case "${1:-}" in
 set -euo pipefail
 printf 'head\n' >> "$PERF_TEST_CALLS"
 printf 'fixture version %s\n' "${TG_PERF_FIXTURE_VERSION:-}" >> "$PERF_TEST_CALLS"
+if [[ "${TG_PERF_DATE_INDEX_PROBE:-}" == 1 ]]; then
+  printf 'date index probe\n' >> "$PERF_TEST_CALLS"
+fi
 printf '{"version":1,"results":[]}\n' > "$TG_PERF_REPORT"
 SH
     chmod +x "$output"
@@ -59,6 +62,11 @@ SH
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'perfreport\n' >> "$PERF_TEST_CALLS"
+printf 'perfreport args %s\n' "$*" >> "$PERF_TEST_CALLS"
+if [[ "$*" == *date-index-probe.json* ]]; then
+  echo '- `messages.getHistory jump to date` (`rows`): rows read 100000 at 100x is 10.0x the 1x 10000'
+  exit 1
+fi
 count=0
 if [[ -n "${PERF_TEST_REPORT_COUNT:-}" && -f "$PERF_TEST_REPORT_COUNT" ]]; then
   count=$(<"$PERF_TEST_REPORT_COUNT")
@@ -236,13 +244,65 @@ class PerfRunTests(unittest.TestCase):
             self.assertIn("timing checks failed; measuring once more", result.stdout)
             self.assertEqual("2", report_count.read_text(encoding="utf-8").strip())
             self.assertEqual(
-                ["head", "perfreport", "head", "perfreport"],
+                ["head", "perfreport", "head", "perfreport", "head", "perfreport"],
                 [
                     line
                     for line in calls.read_text(encoding="utf-8").splitlines()
                     if line in {"head", "perfreport"}
                 ],
             )
+
+    def test_measure_fault_injects_missing_date_index_into_cloned_fixtures(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            runner_temp = root / "runner-temp"
+            runner_temp.mkdir()
+            calls = root / "calls"
+            for name, content in (
+                ("atlas", FAKE_ATLAS),
+                ("docker", FAKE_DOCKER),
+                ("go", FAKE_GO),
+            ):
+                executable = bin_dir / name
+                executable.write_text(content, encoding="utf-8")
+                executable.chmod(0o755)
+
+            env = {
+                **os.environ,
+                "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                "PERF_CACHE": str(root / "cache"),
+                "PERF_HISTORY": str(root / "history"),
+                "PERF_PG_CONTAINER": "perf-test-pg",
+                "PERF_PG_URL": "postgres://postgres:perf@localhost:5432/",
+                "PERF_TEST_CALLS": str(calls),
+                "PERF_WORK": str(root / "work"),
+                "PERF_ROUNDS": "1",
+                "RUNNER_TEMP": str(runner_temp),
+            }
+            env.pop("PERF_BASE_SHA", None)
+            env.pop("GITHUB_STEP_SUMMARY", None)
+            result = subprocess.run(
+                ["bash", str(SCRIPT), "measure"],
+                cwd=ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertIn("messages.getHistory jump to date` (`rows`)", result.stdout)
+            lines = calls.read_text(encoding="utf-8").splitlines()
+            for fixture in ("1x", "100x"):
+                clone = f"perf_{fixture}_date_index_probe"
+                self.assertTrue(any(f"CREATE DATABASE {clone} TEMPLATE perf_{fixture}" in line for line in lines), lines)
+                self.assertTrue(any(f"DROP INDEX messages_owner_peer_date_idx" in line and f"-d {clone}" in line for line in lines), lines)
+                self.assertTrue(any(f"DROP DATABASE IF EXISTS {clone} WITH (FORCE)" in line for line in lines), lines)
+            self.assertIn("date index probe", lines)
+            self.assertTrue(any("date-index-probe.json" in line for line in lines if line.startswith("perfreport args ")), lines)
 
     def test_server_setup_change_skips_base_comparison(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

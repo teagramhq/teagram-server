@@ -60,6 +60,13 @@ maximum values must stay at or below 50 ms.
   regression must exceed max(15%, 3
   standard deviations) and 2 ms. A timing failure is measured once more before
   it counts.
+- `messages.getHistory jump to date` skips only the 1x/100x p50 ratio because
+  its indexed query runs in low single-digit milliseconds. The harness captures
+  and runs `EXPLAIN ANALYZE` on the RPC's SQL on both fixtures, so its p95
+  budget, rows-read scale check, query-plan checks, and main-relative checks
+  still run. Each CI measurement also removes the date index from disposable
+  fixture clones and requires the same report judge to reject the resulting
+  measured plan or row regression.
 
 `required_scenarios.json` lists the scenarios the gate must see measured on
 both fixtures. It is kept apart from the harness on purpose: a scenario dropped

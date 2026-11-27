@@ -61,6 +61,31 @@ func TestEvaluatePassesInvariantScenarioWithinBudget(t *testing.T) {
 	}
 }
 
+func TestEvaluateSkipsOnlyLatencyScaleForDateJump(t *testing.T) {
+	name := "messages.getHistory jump to date"
+	rs := pair(name, perfreport.Read, result(2.3, 3, 1, 100), result(3.8, 4, 1, 100))
+	v := perfreport.Evaluate(perfreport.Input{Head: rounds(rs...)})
+	if len(v.Failures)+len(v.TimingFailures)+len(v.Reported) != 0 {
+		t.Fatalf("date-jump timing noise failed the report: %s%s%s", reasons(v.Failures), reasons(v.TimingFailures), reasons(v.Reported))
+	}
+
+	other := pair("messages.getHistory newest page", perfreport.Read, result(2.3, 3, 1, 100), result(3.8, 4, 1, 100))
+	if got := reasons(perfreport.Evaluate(perfreport.Input{Head: rounds(other...)}).Reported); !strings.Contains(got, "p50 3.8 ms at 100x is 1.7x the 1x 2.3 ms") {
+		t.Fatalf("other history scenario did not retain its timing ratio check: %q", got)
+	}
+}
+
+func TestEvaluateBlocksRegressedDateJumpPlan(t *testing.T) {
+	rs := pair("messages.getHistory jump to date", perfreport.Read, result(3, 4, 1, 100), result(3, 4, 1, 100_000))
+	rs[1].SeqScans = []string{"messages#deadbeef (1000000 rows): history page by date"}
+	got := reasons(perfreport.Evaluate(perfreport.Input{Head: rounds(rs...)}).Failures)
+	for _, want := range []string{"rows read 100000 at 100x", "sequential scan on messages#deadbeef"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("failures = %q, want %q", got, want)
+		}
+	}
+}
+
 func TestEvaluateBlocksSearchCountersDispatchWaitAboveBudget(t *testing.T) {
 	name := "messages.getSearchCounters dispatch wait"
 	rs := pair(name, perfreport.Read, result(2, 3, 4, 100), result(2, 3, 4, 100))
@@ -233,6 +258,26 @@ func TestEvaluateBlocksCounterRegressionAgainstBase(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("failures = %q, want %q", got, want)
 		}
+	}
+}
+
+func TestEvaluateIgnoresUnmeasuredBaseRows(t *testing.T) {
+	name := "messages.getHistory jump to date"
+	base := rounds(pair(name, perfreport.Read, result(1.6, 2.4, 6, 0), result(1.5, 2.3, 6, 0))...)
+	head := rounds(pair(name, perfreport.Read, result(1.6, 2.4, 6, 230), result(1.5, 2.3, 6, 130))...)
+	v := perfreport.Evaluate(perfreport.Input{Head: head, Base: base})
+	if got := reasons(v.Failures); got != "" {
+		t.Fatalf("newly measured rows failed against an unmeasured base: %s", got)
+	}
+}
+
+func TestEvaluateBlocksUnmeasuredBaseRowsForOtherRPC(t *testing.T) {
+	name := "messages.getHistory newest page"
+	base := rounds(pair(name, perfreport.Read, result(1.6, 2.4, 6, 0), result(1.5, 2.3, 6, 0))...)
+	head := rounds(pair(name, perfreport.Read, result(1.6, 2.4, 6, 100), result(1.5, 2.3, 6, 100))...)
+	got := reasons(perfreport.Evaluate(perfreport.Input{Head: head, Base: base}).Failures)
+	if !strings.Contains(got, "messages.getHistory newest page: rows read 100 at 100x, main reads 0") {
+		t.Fatalf("zero-row base hid another RPC's row regression: %q", got)
 	}
 }
 
