@@ -219,17 +219,20 @@ jobs:
       - name: Cache Chromium apt dependencies
         id: apt-cache
         if: steps.playwright-deps.outputs.mode == 'packages'
-        uses: actions/cache@v6.1.0
+        uses: actions/cache/restore@v6.1.0
         with:
           path: .apt-cache/*.deb
-          key: playwright-apt-${{ steps.playwright-deps.outputs.image }}-${{ hashFiles('web-source/apt-packages.txt') }}
+          key: playwright-apt-${{ steps.playwright-deps.outputs.image }}-${{ hashFiles('web-source/apt-packages.txt') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            playwright-apt-${{ steps.playwright-deps.outputs.image }}-${{ hashFiles('web-source/apt-packages.txt') }}-
+            playwright-apt-${{ steps.playwright-deps.outputs.image }}-${{ hashFiles('web-source/apt-packages.txt') }}
 
       # The warm path: install the cached set in one call so dpkg can resolve
       # ordering and deconfigure older runner packages during version changes.
       # The dry-run afterwards checks the completed package set without a mirror.
       - name: Install Chromium system dependencies from cache
         id: apt-cached-install
-        if: steps.apt-cache.outputs.cache-hit == 'true'
+        if: steps.apt-cache.outputs.cache-matched-key != ''
         working-directory: web-source
         run: bash ../.github/scripts/install-playwright-apt-cache.sh ../.apt-cache
 
@@ -295,11 +298,11 @@ jobs:
 
       - name: Save Chromium apt dependencies
         continue-on-error: true
-        if: ${{ steps.playwright-deps.outputs.mode == 'packages' && (steps.apt-cache.outputs.cache-hit != 'true' || steps.apt-cached-install.outputs.installed == 'false') }}
+        if: ${{ steps.playwright-deps.outputs.mode == 'packages' && (steps.apt-cache.outputs.cache-matched-key == '' || steps.apt-cached-install.outputs.installed == 'false') }}
         uses: actions/cache/save@v6.1.0
         with:
           path: .apt-cache/*.deb
-          key: playwright-apt-${{ steps.playwright-deps.outputs.image }}-${{ hashFiles('web-source/apt-packages.txt') }}
+          key: ${{ steps.apt-cache.outputs.cache-primary-key }}
 
       - name: Verify Chromium system dependencies
         working-directory: web-source

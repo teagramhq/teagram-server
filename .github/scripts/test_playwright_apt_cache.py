@@ -344,6 +344,67 @@ class PlaywrightAptCacheTests(unittest.TestCase):
                 apt_log.read_text(encoding="utf-8"), "update\nrepair\ninstall\n"
             )
 
+    def test_failed_cache_restore_saves_repaired_packages_under_a_fresh_key(
+        self,
+    ) -> None:
+        workflows = (
+            (
+                WORKFLOW,
+                "Cache the Playwright apt dependencies",
+                "Install the system dependencies from cache",
+                "Save the Playwright apt dependencies",
+                "playwright-apt-${{ steps.playwright-deps.outputs.image }}-"
+                "${{ hashFiles('apt-packages.txt') }}",
+            ),
+            (
+                REAL_CLIENT_WORKFLOW,
+                "Cache Chromium apt dependencies",
+                "Install Chromium system dependencies from cache",
+                "Save Chromium apt dependencies",
+                "playwright-apt-${{ steps.playwright-deps.outputs.image }}-"
+                "${{ hashFiles('web-source/apt-packages.txt') }}",
+            ),
+        )
+        for path, cache_name, install_name, save_name, key_prefix in workflows:
+            with self.subTest(workflow=path.name):
+                workflow = path.read_text(encoding="utf-8")
+                steps = {}
+                for name in (cache_name, install_name, save_name):
+                    step = re.search(
+                        rf"(?ms)^      - name: {re.escape(name)}\n"
+                        r"(?P<body>.*?)(?=^      - name:|\Z)",
+                        workflow,
+                    )
+                    self.assertIsNotNone(step, f"{name} step is missing")
+                    steps[name] = step.group("body")
+
+                cache = steps[cache_name]
+                self.assertIn("uses: actions/cache/restore@v6.1.0", cache)
+                self.assertIn(
+                    f"key: {key_prefix}-${{{{ github.run_id }}}}-"
+                    "${{ github.run_attempt }}",
+                    cache,
+                )
+                self.assertIn("restore-keys: |", cache)
+                self.assertIn(key_prefix + "-\n", cache)
+                self.assertIn(key_prefix + "\n", cache)
+                self.assertIn(
+                    "if: steps.apt-cache.outputs.cache-matched-key != ''",
+                    steps[install_name],
+                )
+                self.assertIn(
+                    "steps.apt-cache.outputs.cache-matched-key == ''",
+                    steps[save_name],
+                )
+                self.assertIn(
+                    "steps.apt-cached-install.outputs.installed == 'false'",
+                    steps[save_name],
+                )
+                self.assertIn(
+                    "key: ${{ steps.apt-cache.outputs.cache-primary-key }}",
+                    steps[save_name],
+                )
+
     def test_e2e_admin_apt_cache_is_image_scoped_and_warm_path_stays_offline(
         self,
     ) -> None:
@@ -372,7 +433,7 @@ class PlaywrightAptCacheTests(unittest.TestCase):
         )
         self.assertIsNotNone(cached_install, "cached dependency install step is missing")
         self.assertIn(
-            "if: steps.apt-cache.outputs.cache-hit == 'true'",
+            "if: steps.apt-cache.outputs.cache-matched-key != ''",
             cached_install.group("body"),
         )
         self.assertIn(
@@ -497,7 +558,9 @@ class PlaywrightAptCacheTests(unittest.TestCase):
             "${{ hashFiles('apt-packages.txt') }}",
             ci_workflow,
         )
-        self.assertIn("if: steps.apt-cache.outputs.cache-hit == 'true'", workflow)
+        self.assertIn(
+            "if: steps.apt-cache.outputs.cache-matched-key != ''", workflow
+        )
         self.assertIn(
             "bash ../.github/scripts/install-playwright-apt-cache.sh ../.apt-cache",
             workflow,

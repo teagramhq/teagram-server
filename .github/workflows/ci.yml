@@ -3285,27 +3285,30 @@ jobs:
 
       # The .deb files rather than the installed libraries: /usr/lib is the
       # runner image's, and restoring a tree over it is how a cache turns into a
-      # broken system. Keyed on the image the packages were resolved against as
-      # well as the packages themselves, so a runner image bump re-downloads
-      # instead of dpkg-installing debs built for the previous one.
+      # broken system. Keyed on the image and package set. Cache entries are
+      # immutable, so each run gets a fresh primary key while the restore prefix
+      # picks up the latest usable package set, including legacy entries.
       - name: Cache the Playwright apt dependencies
         id: apt-cache
         if: steps.playwright-deps.outputs.mode == 'packages'
-        uses: actions/cache@v6.1.0
+        uses: actions/cache/restore@v6.1.0
         with:
           path: .apt-cache/*.deb
-          key: playwright-apt-${{ steps.playwright-deps.outputs.image }}-${{ hashFiles('apt-packages.txt') }}
+          key: playwright-apt-${{ steps.playwright-deps.outputs.image }}-${{ hashFiles('apt-packages.txt') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            playwright-apt-${{ steps.playwright-deps.outputs.image }}-${{ hashFiles('apt-packages.txt') }}-
+            playwright-apt-${{ steps.playwright-deps.outputs.image }}-${{ hashFiles('apt-packages.txt') }}
 
       # The warm path installs the cached set together, deconfigures conflicting
       # package versions, and completes pending configuration without touching a
       # mirror. Its dry-run checks the result; anything incomplete falls through
       # to the repair and network path rather than failing in the browser.
       #
-      # A bad entry falls back to the network. PR jobs do not get an Actions
-      # write token to delete cache entries; the trusted main run can refresh it.
+      # A bad entry falls back to the network and is saved under this run's fresh
+      # key below, so the restore prefix prefers the repaired package set next time.
       - name: Install the system dependencies from cache
         id: apt-cached-install
-        if: steps.apt-cache.outputs.cache-hit == 'true'
+        if: steps.apt-cache.outputs.cache-matched-key != ''
         run: bash .github/scripts/install-playwright-apt-cache.sh .apt-cache
 
       # The cold path, and the only step here that needs the network. Download
@@ -3384,19 +3387,16 @@ jobs:
           echo "::error::system dependency install failed after 2 attempts"
           exit 1
 
-      # After a network install, which is either a miss or an entry that was
-      # just deleted for not satisfying the check; on a working hit the cache
-      # action holds the entry already, and on the satisfied path there is
-      # nothing to save. continue-on-error because the debs are an optimisation:
-      # a failed save costs the next run its warm path and nothing else, and
-      # must not red a job whose suite has yet to run.
+      # Save only on a miss or after a restored package set failed verification.
+      # Cache entries are immutable; the run-scoped primary key makes a repaired
+      # package set available to later runs without changing the restored entry.
       - name: Save the Playwright apt dependencies
         continue-on-error: true
-        if: ${{ steps.playwright-deps.outputs.mode == 'packages' && (steps.apt-cache.outputs.cache-hit != 'true' || steps.apt-cached-install.outputs.installed == 'false') }}
+        if: ${{ steps.playwright-deps.outputs.mode == 'packages' && (steps.apt-cache.outputs.cache-matched-key == '' || steps.apt-cached-install.outputs.installed == 'false') }}
         uses: actions/cache/save@v6.1.0
         with:
           path: .apt-cache/*.deb
-          key: playwright-apt-${{ steps.playwright-deps.outputs.image }}-${{ hashFiles('apt-packages.txt') }}
+          key: ${{ steps.apt-cache.outputs.cache-primary-key }}
 
       # Whichever path ran, the browser has to be able to start. This is the
       # same simulation as above and costs a second; it is here so a missing
