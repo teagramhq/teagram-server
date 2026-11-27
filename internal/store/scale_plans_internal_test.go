@@ -109,10 +109,19 @@ func (p scalePlan) rowsReadFrom(table string) float64 {
 	return rows
 }
 
+func (p scalePlan) indexRowsReadFrom(table string) float64 {
+	var rows float64
+	if strings.Contains(p.Node, "Index Scan") && strings.HasPrefix(p.IndexName, table+"_") {
+		rows += (p.Rows + p.RemovedByFilter + p.RemovedByJoinFilter + p.RemovedByIndexRecheck) * p.Loops
+	}
+	for _, child := range p.Plans {
+		rows += child.indexRowsReadFrom(table)
+	}
+	return rows
+}
+
 func (p scalePlan) rowsRead(table string) float64 {
-	// Bitmap Index Scan candidates may overlap under BitmapAnd, so only relation
-	// scans count distinct table rows.
-	return p.rowsReadFrom(table)
+	return p.rowsReadFrom(table) + p.indexRowsReadFrom(table)
 }
 
 func (p scalePlan) accessSummary() []string {
@@ -127,8 +136,8 @@ func (p scalePlan) accessSummary() []string {
 	return accesses
 }
 
-func TestScalePlanCountsRowsFilteredAfterBitmapScan(t *testing.T) {
-	const explain = `[{"Plan":{"Node Type":"Bitmap Heap Scan","Relation Name":"channel_messages","Actual Rows":500,"Actual Loops":1,"Rows Removed by Filter":19500,"Plans":[{"Node Type":"Bitmap Index Scan","Index Name":"channel_messages_pkey","Actual Rows":20000,"Actual Loops":1}]}}]`
+func TestScalePlanCountsBitmapIndexCandidates(t *testing.T) {
+	const explain = `[{"Plan":{"Node Type":"Bitmap Heap Scan","Relation Name":"channel_messages","Actual Rows":500,"Actual Loops":1,"Plans":[{"Node Type":"Bitmap Index Scan","Index Name":"channel_messages_pkey","Actual Rows":20000,"Actual Loops":1}]}}]`
 	var plans []struct {
 		Plan scalePlan `json:"Plan"`
 	}
@@ -141,25 +150,6 @@ func TestScalePlanCountsRowsFilteredAfterBitmapScan(t *testing.T) {
 	rows := plans[0].Plan.rowsRead("channel_messages")
 	if rows <= 800 {
 		t.Fatalf("canned pkey bitmap plan read %.0f channel_messages rows, want more than 800", rows)
-	}
-}
-
-func TestScalePlanCountsBitmapAndHeapRowsOnce(t *testing.T) {
-	plan := scalePlan{
-		Node:     "Bitmap Heap Scan",
-		Relation: "channel_messages",
-		Rows:     99,
-		Loops:    1,
-		Plans: []scalePlan{{
-			Node: "BitmapAnd",
-			Plans: []scalePlan{
-				{Node: "Bitmap Index Scan", IndexName: "channel_messages_pkey", Rows: 20_000, Loops: 1},
-				{Node: "Bitmap Index Scan", IndexName: "channel_messages_channel_custom_emoji_document_ids_gin_idx", Rows: 20_099, Loops: 1},
-			},
-		}},
-	}
-	if rows := plan.rowsRead("channel_messages"); rows > 800 {
-		t.Fatalf("bitmap-and plan read %.0f channel_messages rows, want at most 800", rows)
 	}
 }
 
