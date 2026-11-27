@@ -137,6 +137,16 @@ install_key_file() {
   fi
 }
 
+reject_unmanaged_sudoers_rule() {
+  local file=$1 violation=$2 grep_status
+  if grep -Eq "^[[:space:]]*${LEGACY_DEPLOY_USER}[[:space:]]" "$file"; then
+    fail "$violation"
+  else
+    grep_status=$?
+  fi
+  [[ "$grep_status" -eq 1 ]] || fail "could not inspect sudoers file: $file"
+}
+
 verify_legacy_deploy_access() {
   local account_line account_uid account_home account_shell groups group path account_groups
   account_line=$(awk -F: -v name="$LEGACY_DEPLOY_USER" '$1 == name { print $3 ":" $6 ":" $7 }' /etc/passwd) ||
@@ -161,15 +171,15 @@ verify_legacy_deploy_access() {
     [[ "$(grep -Ev '^[[:space:]]*(#|$)' "$LEGACY_SUDOERS_FILE")" == 'teagram-deploy ALL=(root) NOPASSWD: /usr/local/sbin/teagram-demo-deploy' ]] ||
       fail 'legacy deploy sudoers file contains an unexpected rule'
   fi
-  if [[ -f /etc/sudoers ]] && grep -Eq "^[[:space:]]*${LEGACY_DEPLOY_USER}[[:space:]]" /etc/sudoers; then
-    fail 'an unmanaged sudoers rule still grants access to the legacy deploy account'
+  if [[ -f /etc/sudoers ]]; then
+    reject_unmanaged_sudoers_rule /etc/sudoers \
+      'an unmanaged sudoers rule still grants access to the legacy deploy account'
   fi
   if [[ -d /etc/sudoers.d ]]; then
     while IFS= read -r path; do
       [[ "$path" == "$LEGACY_SUDOERS_FILE" ]] && continue
-      if grep -Eq "^[[:space:]]*${LEGACY_DEPLOY_USER}[[:space:]]" "$path"; then
-        fail "an unmanaged sudoers file still grants access to the legacy deploy account: $path"
-      fi
+      reject_unmanaged_sudoers_rule "$path" \
+        "an unmanaged sudoers file still grants access to the legacy deploy account: $path"
     done < <(find /etc/sudoers.d -type f -print)
   fi
 

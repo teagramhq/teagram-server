@@ -175,6 +175,7 @@ ALPINE_FUNCTIONS="$TMP_DIR/alpine-functions.sh"
   sed -n '/^fail() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
   sed -n '/^require_root_owned() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
   sed -n '/^install_key_file() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
+  sed -n '/^reject_unmanaged_sudoers_rule() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
   sed -n '/^verify_checkout_ownership() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
   sed -n '/^migrate_legacy_runtime_path() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
   sed -n '/^migrate_legacy_runtime_paths() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
@@ -245,6 +246,101 @@ printf 'legacy authorized key\n' > "$LEGACY_AUTHORIZED_KEYS"
 chmod 0644 "$LEGACY_AUTHORIZED_KEYS"
 printf '#!/bin/sh\nexit 1\n' > "$LEGACY_ENTRY_PATH"
 chmod 0755 "$LEGACY_ENTRY_PATH"
+
+cp /etc/passwd /tmp/legacy-passwd.valid
+set_legacy_passwd_field() {
+  local field=$1 value=$2
+  awk -F: -v OFS=: -v name="$LEGACY_DEPLOY_USER" -v field="$field" -v value="$value" \
+    '$1 == name { $field = value; changed = 1 } { print } END { if (!changed) exit 1 }' \
+    /etc/passwd > /tmp/legacy-passwd.next
+  cat /tmp/legacy-passwd.next > /etc/passwd
+}
+restore_legacy_passwd() { cat /tmp/legacy-passwd.valid > /etc/passwd; }
+
+assert_legacy_files_survive() {
+  [[ -f "$LEGACY_SUDOERS_FILE" && -f "$LEGACY_AUTHORIZED_KEYS" && -f "$LEGACY_ENTRY_PATH" ]]
+  grep -Fqx 'teagram-deploy ALL=(root) NOPASSWD: /usr/local/sbin/teagram-demo-deploy' \
+    "$LEGACY_SUDOERS_FILE"
+  grep -Fqx 'legacy authorized key' "$LEGACY_AUTHORIZED_KEYS"
+  grep -Fqx '#!/bin/sh' "$LEGACY_ENTRY_PATH"
+  awk -F: -v name="$LEGACY_DEPLOY_USER" '$1 == name { found = 1 } END { exit !found }' /etc/passwd
+}
+
+expect_legacy_refusal() {
+  local label=$1 expected=$2
+  shift 2
+  if ( "$@" ) > /tmp/legacy-refusal.out 2>&1; then
+    printf 'legacy access cleanup accepted invalid %s\n' "$label" >&2
+    exit 1
+  fi
+  grep -Fq "$expected" /tmp/legacy-refusal.out || {
+    cat /tmp/legacy-refusal.out >&2
+    printf 'legacy access cleanup rejected %s for the wrong reason\n' "$label" >&2
+    exit 1
+  }
+  assert_legacy_files_survive
+  printf 'ok - legacy access cleanup refuses %s and preserves legacy files\n' "$label"
+}
+
+set_legacy_passwd_field 3 0
+expect_legacy_refusal 'uid 0' 'legacy deploy account has unexpected identity settings' \
+  remove_legacy_deploy_access
+restore_legacy_passwd
+set_legacy_passwd_field 6 /root
+expect_legacy_refusal 'unexpected home' 'legacy deploy account has unexpected identity settings' \
+  remove_legacy_deploy_access
+restore_legacy_passwd
+set_legacy_passwd_field 7 /bin/false
+expect_legacy_refusal 'unexpected shell' 'legacy deploy account has unexpected identity settings' \
+  remove_legacy_deploy_access
+restore_legacy_passwd
+
+reject_with_privileged_group() {
+  local fixture_group=$1
+  id() {
+    if [[ "${1:-}" == -nG && "${2:-}" == "$LEGACY_DEPLOY_USER" ]]; then
+      printf '%s %s\n' "$LEGACY_DEPLOY_USER" "$fixture_group"
+    else
+      command id "$@"
+    fi
+  }
+  remove_legacy_deploy_access
+}
+for group in docker wheel sudo; do
+  expect_legacy_refusal "$group membership" \
+    "legacy deploy account unexpectedly belongs to $group" \
+    reject_with_privileged_group "$group"
+done
+
+printf '%s\n' 'teagram-deploy ALL=(root) NOPASSWD: /bin/sh' > /etc/sudoers
+expect_legacy_refusal 'an unmanaged /etc/sudoers grant' \
+  'an unmanaged sudoers rule still grants access to the legacy deploy account' \
+  remove_legacy_deploy_access
+rm -f /etc/sudoers
+printf '%s\n' 'teagram-deploy ALL=(root) NOPASSWD: /bin/sh' > /etc/sudoers.d/unmanaged
+chmod 0440 /etc/sudoers.d/unmanaged
+expect_legacy_refusal 'an unmanaged sudoers.d grant' \
+  'an unmanaged sudoers file still grants access to the legacy deploy account: /etc/sudoers.d/unmanaged' \
+  remove_legacy_deploy_access
+rm -f /etc/sudoers.d/unmanaged
+
+printf '%s\n' '# force grep to report a read error' > /etc/sudoers.d/grep-read-error
+chmod 0440 /etc/sudoers.d/grep-read-error
+reject_with_sudoers_read_error() {
+  grep() {
+    local argument
+    for argument in "$@"; do
+      [[ "$argument" != /etc/sudoers.d/grep-read-error ]] || return 2
+    done
+    command grep "$@"
+  }
+  remove_legacy_deploy_access
+}
+expect_legacy_refusal 'a sudoers read error' \
+  'could not inspect sudoers file: /etc/sudoers.d/grep-read-error' \
+  reject_with_sudoers_read_error
+rm -f /etc/sudoers.d/grep-read-error
+
 remove_legacy_deploy_access
 ! id "$LEGACY_DEPLOY_USER" >/dev/null 2>&1
 [[ ! -e "$LEGACY_SUDOERS_FILE" && ! -e "$LEGACY_AUTHORIZED_KEYS" && ! -e "$LEGACY_ENTRY_PATH" ]]
@@ -265,9 +361,18 @@ install -m 0755 "$REPO/deploy/teagram-demo/lima/deploy-root-wrapper.sh" \
 ssh-keygen -q -t ed25519 -N '' -f /tmp/fixture-key
 ssh-keygen -q -t ed25519 -N '' -f /tmp/other-key
 KEY_LINE="restrict,command=\"$ROOT_WRAPPER\" $(cat /tmp/fixture-key.pub)"
+SECOND_KEY_LINE="restrict,command=\"$ROOT_WRAPPER\" $(cat /tmp/other-key.pub)"
 install_key_file "$KEY_LINE"
 install_key_file "$KEY_LINE"
 [[ $(stat -c '%u:%a' "$AUTHORIZED_KEYS") == '0:600' ]]
+if (install_key_file "$SECOND_KEY_LINE") > /tmp/key-rotation-refusal.out 2>&1; then
+  printf 'installer accepted a different key over the existing deploy key\n' >&2
+  exit 1
+fi
+grep -Fq 'deploy authorized keys file differs from the requested deploy key' \
+  /tmp/key-rotation-refusal.out
+[[ "$(<"$AUTHORIZED_KEYS")" == "$KEY_LINE" ]]
+printf 'ok - installer refuses a different deploy key without changing the installed key\n'
 ssh-keygen -A >/dev/null
 sed -e 's#^ListenAddress .*#ListenAddress 127.0.0.1:2223#' \
   -e 's#^PidFile .*#PidFile /tmp/sshd.pid#' \
