@@ -9,23 +9,31 @@ import (
 	"testing"
 )
 
-func TestLimaRuntimeMemoryDiagnosticsCapsAndRestoresGoMemoryLimit(t *testing.T) {
+func TestApplyLimaGoMemoryLimitCapsDefaultServerPathAndRestores(t *testing.T) {
 	previousLimit := debug.SetMemoryLimit(20 << 20)
 	t.Cleanup(func() { debug.SetMemoryLimit(previousLimit) })
-	t.Setenv("TG_LIMA_MEMORY_DIAGNOSTICS", "1")
+	t.Setenv("TG_LIMA_MEMORY_DIAGNOSTICS", "")
 
-	stop, err := startLimaRuntimeMemoryDiagnostics(slog.Default())
-	if err != nil {
-		t.Fatalf("start Lima runtime memory diagnostics: %v", err)
-	}
+	restore := applyLimaGoMemoryLimit()
 	effectiveLimit := currentLimaTestMemoryLimit()
-	stop()
+	restore()
 	if effectiveLimit != 16<<20 {
-		t.Fatalf("diagnostic Go memory limit = %d bytes, want %d", effectiveLimit, 16<<20)
+		t.Fatalf("default server Go memory limit = %d bytes, want %d", effectiveLimit, 16<<20)
 	}
 	if got := currentLimaTestMemoryLimit(); got != 20<<20 {
-		t.Fatalf("Go memory limit after diagnostics stop = %d bytes, want restored limit %d", got, 20<<20)
+		t.Fatalf("Go memory limit after restore = %d bytes, want previous limit %d", got, 20<<20)
 	}
+}
+
+func TestApplyLimaGoMemoryLimitPreservesStricterLimit(t *testing.T) {
+	previousLimit := debug.SetMemoryLimit(12 << 20)
+	t.Cleanup(func() { debug.SetMemoryLimit(previousLimit) })
+
+	restore := applyLimaGoMemoryLimit()
+	if got := currentLimaTestMemoryLimit(); got != 12<<20 {
+		t.Fatalf("default server Go memory limit = %d bytes, want preserved stricter limit %d", got, 12<<20)
+	}
+	restore()
 }
 
 func currentLimaTestMemoryLimit() int64 {

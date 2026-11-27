@@ -1086,6 +1086,8 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	restoreLimaGoMemoryLimit := applyLimaGoMemoryLimit()
+	defer restoreLimaGoMemoryLimit()
 	stopLimaMemoryDiagnostics, err := startLimaRuntimeMemoryDiagnostics(log)
 	if err != nil {
 		return err
