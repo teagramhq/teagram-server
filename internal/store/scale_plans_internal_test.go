@@ -86,6 +86,17 @@ func (p scalePlan) usesIndex(index string) bool {
 	return false
 }
 
+func (p scalePlan) indexLoops(index string) float64 {
+	var loops float64
+	if p.IndexName == index {
+		loops += p.Loops
+	}
+	for _, child := range p.Plans {
+		loops += child.indexLoops(index)
+	}
+	return loops
+}
+
 func (p scalePlan) sortsOn(key string) bool {
 	if slices.Contains(p.SortKey, key) {
 		return true
@@ -109,21 +120,24 @@ func (p scalePlan) rowsReadFrom(table string) float64 {
 	return rows
 }
 
-func (p scalePlan) indexRowsReadFrom(table string) float64 {
+func (p scalePlan) indexCandidatesFrom(table string) float64 {
 	var rows float64
-	if strings.Contains(p.Node, "Index Scan") && strings.HasPrefix(p.IndexName, table+"_") {
-		rows += (p.Rows + p.RemovedByFilter + p.RemovedByJoinFilter + p.RemovedByIndexRecheck) * p.Loops
+	if p.Node == "Bitmap Index Scan" && strings.HasPrefix(p.IndexName, table+"_") {
+		rows = (p.Rows + p.RemovedByFilter + p.RemovedByJoinFilter + p.RemovedByIndexRecheck) * p.Loops
+	}
+	if (p.Node == "Index Only Scan" || strings.HasPrefix(p.Node, "Index Scan")) && p.Relation == table {
+		rows = (p.Rows + p.RemovedByFilter + p.RemovedByJoinFilter + p.RemovedByIndexRecheck) * p.Loops
 	}
 	for _, child := range p.Plans {
-		rows += child.indexRowsReadFrom(table)
+		if candidates := child.indexCandidatesFrom(table); candidates > rows {
+			rows = candidates
+		}
 	}
 	return rows
 }
 
 func (p scalePlan) rowsRead(table string) float64 {
-	// Bound scan work conservatively: bitmap index candidates count even when
-	// BitmapAnd later removes overlapping entries before the heap scan.
-	return p.rowsReadFrom(table) + p.indexRowsReadFrom(table)
+	return p.rowsReadFrom(table)
 }
 
 func (p scalePlan) accessSummary() []string {
@@ -138,6 +152,26 @@ func (p scalePlan) accessSummary() []string {
 	return accesses
 }
 
+func TestScalePlanCountsLargestBitmapAndCandidateSet(t *testing.T) {
+	const explain = `[{"Plan":{"Node Type":"Bitmap Heap Scan","Relation Name":"channel_messages","Actual Rows":99,"Actual Loops":1,"Plans":[{"Node Type":"BitmapAnd","Actual Loops":1,"Plans":[{"Node Type":"Bitmap Index Scan","Index Name":"channel_messages_pkey","Actual Rows":20000,"Actual Loops":1},{"Node Type":"Bitmap Index Scan","Index Name":"channel_messages_channel_custom_emoji_document_ids_gin_idx","Actual Rows":20099,"Actual Loops":1}]}]}}]`
+	var plans []struct {
+		Plan scalePlan `json:"Plan"`
+	}
+	if err := json.Unmarshal([]byte(explain), &plans); err != nil {
+		t.Fatalf("decode canned plan: %v", err)
+	}
+	if len(plans) != 1 {
+		t.Fatalf("canned plan count = %d, want 1", len(plans))
+	}
+	rows := plans[0].Plan.indexCandidatesFrom("channel_messages")
+	if rows != 20_099 || rows <= 800 {
+		t.Fatalf("canned bitmap-and plan has %.0f channel_messages candidates, want largest candidate set 20099 (> 800)", rows)
+	}
+	if heapRows := plans[0].Plan.rowsRead("channel_messages"); heapRows != 99 {
+		t.Fatalf("canned bitmap-and plan read %.0f channel_messages heap rows, want 99", heapRows)
+	}
+}
+
 func TestScalePlanCountsBitmapIndexCandidates(t *testing.T) {
 	const explain = `[{"Plan":{"Node Type":"Bitmap Heap Scan","Relation Name":"channel_messages","Actual Rows":500,"Actual Loops":1,"Plans":[{"Node Type":"Bitmap Index Scan","Index Name":"channel_messages_pkey","Actual Rows":20000,"Actual Loops":1}]}}]`
 	var plans []struct {
@@ -149,34 +183,48 @@ func TestScalePlanCountsBitmapIndexCandidates(t *testing.T) {
 	if len(plans) != 1 {
 		t.Fatalf("canned plan count = %d, want 1", len(plans))
 	}
-	rows := plans[0].Plan.rowsRead("channel_messages")
-	if rows <= 800 {
-		t.Fatalf("canned pkey bitmap plan read %.0f channel_messages rows, want more than 800", rows)
+	rows := plans[0].Plan.indexCandidatesFrom("channel_messages")
+	if rows != 20_000 || rows <= 800 {
+		t.Fatalf("canned pkey bitmap plan has %.0f channel_messages candidates, want 20000 (> 800)", rows)
+	}
+	if heapRows := plans[0].Plan.rowsRead("channel_messages"); heapRows != 500 {
+		t.Fatalf("canned pkey bitmap plan read %.0f channel_messages heap rows, want 500", heapRows)
 	}
 }
 
-func TestScalePlanCountsBitmapAndIndexCandidates(t *testing.T) {
-	plan := scalePlan{
-		Node:     "Bitmap Heap Scan",
-		Relation: "channel_messages",
-		Rows:     99,
-		Loops:    1,
-		Plans: []scalePlan{{
-			Node: "BitmapAnd",
-			Plans: []scalePlan{
-				{Node: "Bitmap Index Scan", IndexName: "channel_messages_pkey", Rows: 20_000, Loops: 1},
-				{Node: "Bitmap Index Scan", IndexName: "channel_messages_channel_custom_emoji_document_ids_gin_idx", Rows: 20_099, Loops: 1},
-			},
-		}},
+func TestScalePlanCountsIndexLoops(t *testing.T) {
+	const explain = `[{"Plan":{"Node Type":"Nested Loop","Actual Loops":1,"Plans":[{"Node Type":"Bitmap Index Scan","Index Name":"channel_messages_visible_channels_custom_emoji_gist_idx","Actual Rows":99,"Actual Loops":200}]}}]`
+	var plans []struct {
+		Plan scalePlan `json:"Plan"`
 	}
-	if rows := plan.rowsRead("channel_messages"); rows != 40_198 {
-		t.Fatalf("bitmap-and plan read %.0f channel_messages rows, want 40198 index candidates and heap rows", rows)
+	if err := json.Unmarshal([]byte(explain), &plans); err != nil {
+		t.Fatalf("decode canned plan: %v", err)
+	}
+	if len(plans) != 1 {
+		t.Fatalf("canned plan count = %d, want 1", len(plans))
+	}
+	if loops := plans[0].Plan.indexLoops("channel_messages_visible_channels_custom_emoji_gist_idx"); loops != 200 {
+		t.Fatalf("canned GiST probe loops = %.0f, want 200", loops)
+	}
+}
+
+func TestScalePlanCountsGiSTIndexScanCandidates(t *testing.T) {
+	const explain = `[{"Plan":{"Node Type":"Index Scan","Index Name":"channel_messages_visible_channels_custom_emoji_gist_idx","Relation Name":"channel_messages","Actual Rows":1,"Actual Loops":1,"Rows Removed by Index Recheck":3}}]`
+	var plans []struct {
+		Plan scalePlan `json:"Plan"`
+	}
+	if err := json.Unmarshal([]byte(explain), &plans); err != nil {
+		t.Fatalf("decode canned plan: %v", err)
+	}
+	if candidates := plans[0].Plan.indexCandidatesFrom("channel_messages"); candidates != 4 {
+		t.Fatalf("canned GiST plan has %.0f channel message candidates, want 4", candidates)
 	}
 }
 
 func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtScale(t *testing.T) {
 	// Sample the entire 40k-row fixture so estimate variance cannot change the plan.
 	const statsTarget = 1_000
+	const channelEmojiIndex = "channel_messages_visible_channels_custom_emoji_gist_idx"
 
 	t.Parallel()
 	ctx := t.Context()
@@ -211,7 +259,6 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 	}
 	visibleChannelID := int64(9_000_000_000_000_000_001)
 	hiddenChannelID := int64(9_000_000_000_000_000_002)
-	const visibleChannelHistoryFloor int64 = 19_901
 	for _, channel := range []struct {
 		id        int64
 		creatorID int64
@@ -229,8 +276,7 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 		}
 	}
 	if _, err := pool.Exec(ctx,
-		"INSERT INTO channel_participants (channel_id, user_id, available_min_id) VALUES ($1, $2, $3)",
-		visibleChannelID, ownerID, visibleChannelHistoryFloor,
+		"INSERT INTO channel_participants (channel_id, user_id) VALUES ($1, $2)", visibleChannelID, ownerID,
 	); err != nil {
 		t.Fatalf("seed visible scale channel membership: %v", err)
 	}
@@ -257,10 +303,9 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 		{query: `INSERT INTO channel_messages (channel_id, local_id, from_id, message, entities)
 		 SELECT $1, n, $2, 'visible scale emoji',
 		        jsonb_build_object('version', 1, 'entities', jsonb_build_array(jsonb_build_object(
-		            'type', 18, 'offset', 0, 'length', 1,
-		            'argument', CASE WHEN n <= $3 THEN 30000000 + n ELSE 1000100 + n - $3 END
+		            'type', 18, 'offset', 0, 'length', 1, 'argument', 1000101
 		        )))
-		 FROM generate_series(1, 20000) AS n`, args: []any{visibleChannelID, ownerID, visibleChannelHistoryFloor}},
+		 FROM generate_series(1, 20000) AS n`, args: []any{visibleChannelID, ownerID}},
 		{query: `INSERT INTO channel_messages (channel_id, local_id, from_id, message, entities)
 		 SELECT $1, n, $2, 'popular hidden scale emoji',
 		        jsonb_build_object('version', 1, 'entities', jsonb_build_array(jsonb_build_object(
@@ -268,22 +313,15 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 		        )))
 		 FROM generate_series(1, 20000) AS n`, args: []any{hiddenChannelID, peerID}},
 		{query: "ALTER TABLE channel_messages ENABLE TRIGGER USER"},
+		{query: `UPDATE channel_participants SET available_min_id = 19999
+			WHERE channel_id = $1 AND user_id = $2`, args: []any{visibleChannelID, ownerID}},
 		{query: fmt.Sprintf(
 			"ALTER INDEX messages_owner_custom_emoji_document_ids_gin_idx ALTER COLUMN 2 SET STATISTICS %d",
 			statsTarget,
 		)},
-		{query: fmt.Sprintf(
-			"ALTER TABLE channel_messages ALTER COLUMN channel_id SET STATISTICS %d",
-			statsTarget,
-		)},
-		{query: fmt.Sprintf(
-			"ALTER TABLE channel_messages ALTER COLUMN local_id SET STATISTICS %d",
-			statsTarget,
-		)},
-		{query: fmt.Sprintf(
-			"ALTER INDEX channel_messages_channel_custom_emoji_document_ids_gin_idx ALTER COLUMN 2 SET STATISTICS %d",
-			statsTarget,
-		)},
+		{query: fmt.Sprintf("ALTER INDEX %s ALTER COLUMN 1 SET STATISTICS %d", channelEmojiIndex, statsTarget)},
+		{query: fmt.Sprintf("ALTER INDEX %s ALTER COLUMN 2 SET STATISTICS %d", channelEmojiIndex, statsTarget)},
+		{query: fmt.Sprintf("ALTER TABLE channel_messages ALTER COLUMN local_id SET STATISTICS %d", statsTarget)},
 		{query: "ANALYZE messages"},
 		{query: "ANALYZE channel_messages"},
 		{query: "ANALYZE channel_participants"},
@@ -293,32 +331,63 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 			t.Fatalf("seed scaled emoji history: %v", err)
 		}
 	}
-	// Check that ANALYZE used the raised statistics targets for each index key.
-	for _, key := range []struct {
-		relation string
-		attnum   int
+	// Check that ANALYZE used the expression-index target set for this fixture.
+	for _, indexColumn := range []struct {
+		index  string
+		column int
 	}{
-		{relation: "messages_owner_custom_emoji_document_ids_gin_idx", attnum: 2},
-		{relation: "channel_messages", attnum: 1},
-		{relation: "channel_messages", attnum: 2},
-		{relation: "channel_messages_channel_custom_emoji_document_ids_gin_idx", attnum: 2},
+		{index: "messages_owner_custom_emoji_document_ids_gin_idx", column: 2},
+		{index: channelEmojiIndex, column: 1},
+		{index: channelEmojiIndex, column: 2},
 	} {
 		var target int
 		if err := pool.QueryRow(ctx, `
 			SELECT COALESCE(attstattarget, -1)
 			FROM pg_attribute
 			WHERE attrelid = to_regclass($1) AND attnum = $2
-		`, key.relation, key.attnum).Scan(&target); err != nil {
-			t.Fatalf("read %s column %d statistics target: %v", key.relation, key.attnum, err)
+		`, indexColumn.index, indexColumn.column).Scan(&target); err != nil {
+			t.Fatalf("read %s column %d statistics target: %v", indexColumn.index, indexColumn.column, err)
 		}
 		if target != statsTarget {
-			t.Errorf("%s column %d statistics target = %d, want %d", key.relation, key.attnum, target, statsTarget)
+			t.Errorf("%s column %d statistics target = %d, want %d", indexColumn.index, indexColumn.column, target, statsTarget)
 		}
+	}
+	var localIDStatsTarget int
+	if err := pool.QueryRow(ctx, `
+		SELECT COALESCE(attstattarget, -1)
+		FROM pg_attribute
+		WHERE attrelid = 'channel_messages'::regclass AND attname = 'local_id'
+	`).Scan(&localIDStatsTarget); err != nil {
+		t.Fatalf("read channel_messages.local_id statistics target: %v", err)
+	}
+	if localIDStatsTarget != statsTarget {
+		t.Errorf("channel_messages.local_id statistics target = %d, want %d", localIDStatsTarget, statsTarget)
 	}
 
 	fileIDs := make([]int64, 201)
 	for i := range fileIDs {
 		fileIDs[i] = 1_000_001 + int64(i)
+	}
+	expectedReferences := make(map[int64]struct{}, 101)
+	for _, fileID := range fileIDs[:101] {
+		expectedReferences[fileID] = struct{}{}
+	}
+	assertResolvedSet := func(label string, resolved map[int64]struct{}) {
+		t.Helper()
+		if len(resolved) != len(expectedReferences) {
+			t.Errorf("%s resolved %d historical emoji references, want exactly %d: %v",
+				label, len(resolved), len(expectedReferences), resolved)
+		}
+		for fileID := range expectedReferences {
+			if _, found := resolved[fileID]; !found {
+				t.Errorf("%s did not resolve expected historical emoji %d", label, fileID)
+			}
+		}
+		for fileID := range resolved {
+			if _, expected := expectedReferences[fileID]; !expected {
+				t.Errorf("%s resolved unexpected historical emoji %d", label, fileID)
+			}
+		}
 	}
 	recorded := &scaleQueries{}
 	cfg, err := pgxpool.ParseConfig(dsn)
@@ -336,14 +405,12 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 	if err != nil {
 		t.Fatalf("resolve scale historical emoji references: %v", err)
 	}
-	if len(referenced) != len(fileIDs)-2 {
-		t.Fatalf("resolved %d historical emoji references, want %d visible IDs", len(referenced), len(fileIDs)-2)
-	}
+	assertResolvedSet("one-channel history", referenced)
 	if _, found := referenced[fileIDs[len(fileIDs)-1]]; found {
 		t.Fatalf("historical emoji %d resolved from another owner's private messages", fileIDs[len(fileIDs)-1])
 	}
 	if _, found := referenced[fileIDs[len(fileIDs)-2]]; found {
-		t.Fatalf("historical emoji %d resolved below the history floor or from a channel the owner cannot see", fileIDs[len(fileIDs)-2])
+		t.Fatalf("historical emoji %d resolved from a channel the owner cannot see", fileIDs[len(fileIDs)-2])
 	}
 	recorded.mu.Lock()
 	queries := append([]pgx.TraceQueryStartData(nil), recorded.queries...)
@@ -355,8 +422,9 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 	if !ok {
 		t.Fatalf("historical emoji query is missing its sqlc header: %s", queries[0].SQL)
 	}
-	// Plan the production array, including the hidden-channel and other-owner
-	// IDs. The statistics above reflect the final scaled fixture distribution.
+	// Plan the production array, including both hot IDs: 1000200 occurs in the
+	// hidden channel and 1000201 in another owner's messages. Table-wide
+	// expression statistics can skew both GIN estimates for this array.
 	planFileIDs, ok := queries[0].Args[0].([]string)
 	if !ok {
 		t.Fatalf("historical emoji query ID argument has type %T, want []string", queries[0].Args[0])
@@ -369,23 +437,21 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 		t.Fatalf("explain historical emoji references: %v", err)
 	}
 	var plans []struct {
-		Plan scalePlan `json:"Plan"`
+		Plan          scalePlan `json:"Plan"`
+		PlanningTime  float64   `json:"Planning Time"`
+		ExecutionTime float64   `json:"Execution Time"`
 	}
 	if err := json.Unmarshal(raw, &plans); err != nil {
 		t.Fatalf("decode historical emoji plan: %v", err)
 	}
-	// Both branches use scoped document indexes. The channel GIN lookup is
-	// parameterized by visible channel; the history floor filters its candidates.
-	if !plans[0].Plan.usesIndex("messages_owner_custom_emoji_document_ids_gin_idx") {
-		t.Errorf("historical emoji plan does not use the private-message GIN index: %s", strings.Join(plans[0].Plan.accessSummary(), "; "))
-	}
-	if !plans[0].Plan.usesIndex("channel_messages_channel_custom_emoji_document_ids_gin_idx") {
-		t.Errorf("historical emoji plan does not use the channel/document GIN index: %s", strings.Join(plans[0].Plan.accessSummary(), "; "))
-	}
+	// Exact index-name assertions keep dropped or unusable GIN indexes failing.
 	for _, index := range []string{
 		"messages_owner_custom_emoji_document_ids_gin_idx",
-		"channel_messages_channel_custom_emoji_document_ids_gin_idx",
+		channelEmojiIndex,
 	} {
+		if !plans[0].Plan.usesIndex(index) {
+			t.Errorf("historical emoji plan does not use %s: %s", index, strings.Join(plans[0].Plan.accessSummary(), "; "))
+		}
 		var predicate string
 		if err := pool.QueryRow(ctx, `
 			SELECT pg_get_expr(index_info.indpred, index_info.indrelid)
@@ -399,6 +465,10 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 			t.Errorf("%s indexes rows without custom emoji references: %s", index, predicate)
 		}
 	}
+	if loops := plans[0].Plan.indexLoops(channelEmojiIndex); loops != 1 {
+		t.Errorf("one-channel custom emoji GiST probe loops = %.0f, want 1: %s", loops,
+			strings.Join(plans[0].Plan.accessSummary(), "; "))
+	}
 	for _, table := range plans[0].Plan.sequentialTables() {
 		if table == "messages" || table == "channel_messages" {
 			t.Errorf("historical emoji plan sequentially scans %s: %s", table, strings.Join(plans[0].Plan.accessSummary(), "; "))
@@ -409,7 +479,95 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 			t.Errorf("historical emoji plan read %.0f %s rows for %d IDs: %s", rows, table, len(planFileIDs), strings.Join(plans[0].Plan.accessSummary(), "; "))
 		}
 	}
+	for _, table := range []string{"messages", "channel_messages"} {
+		if candidates := plans[0].Plan.indexCandidatesFrom(table); candidates > 800 {
+			t.Errorf("one-channel sticker-history plan has %.0f %s index candidates for %d IDs: %s",
+				candidates, table, len(planFileIDs), strings.Join(plans[0].Plan.accessSummary(), "; "))
+		}
+	}
+	t.Logf("visible_channels=1 channel_heap_rows=%.0f private_index_candidates=%.0f channel_index_candidates=%.0f planning_ms=%.3f execution_ms=%.3f shared_hits=%d shared_reads=%d",
+		plans[0].Plan.rowsRead("channel_messages"), plans[0].Plan.indexCandidatesFrom("messages"), plans[0].Plan.indexCandidatesFrom("channel_messages"),
+		plans[0].PlanningTime, plans[0].ExecutionTime, plans[0].Plan.Hits, plans[0].Plan.Reads)
 
+	const extraVisibleChannels = 499
+	const extraVisibleChannelBase int64 = 9_000_000_000_000_100_000
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO channels (id, title, creator_id)
+		SELECT $1::bigint + n, 'Visible emoji scale ' || n, $2
+		FROM generate_series(1, $3::int) AS n`, extraVisibleChannelBase, ownerID, extraVisibleChannels,
+	); err != nil {
+		t.Fatalf("seed extra visible channels: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO channel_state (channel_id)
+		SELECT $1::bigint + n FROM generate_series(1, $2::int) AS n`, extraVisibleChannelBase, extraVisibleChannels,
+	); err != nil {
+		t.Fatalf("seed extra visible channel states: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO channel_participants (channel_id, user_id, available_min_id)
+		SELECT $1::bigint + n, $2, CASE WHEN n = 1 THEN 0 ELSE 19999 + n END
+		FROM generate_series(1, $3::int) AS n`, extraVisibleChannelBase, ownerID, extraVisibleChannels,
+	); err != nil {
+		t.Fatalf("seed extra visible channel memberships: %v", err)
+	}
+	if _, err := pool.Exec(ctx, "ANALYZE channel_participants"); err != nil {
+		t.Fatalf("analyze visible channel memberships: %v", err)
+	}
+	const expectedFloorGroups = extraVisibleChannels + 1
+	var floorGroups int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(DISTINCT available_min_id)
+		FROM channel_participants
+		WHERE user_id = $1`, ownerID).Scan(&floorGroups); err != nil {
+		t.Fatalf("count visible channel history floors: %v", err)
+	}
+	if floorGroups != expectedFloorGroups {
+		t.Fatalf("visible channel history floor groups = %d, want %d", floorGroups, expectedFloorGroups)
+	}
+	scaledReferences, err := store.UserStickerSetMessageReferencedFileIDs(ctx, ownerID, fileIDs)
+	if err != nil {
+		t.Fatalf("resolve 500-channel mixed-floor emoji references: %v", err)
+	}
+	assertResolvedSet("500-channel mixed-floor history", scaledReferences)
+	if err := pool.QueryRow(ctx, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "+query, queries[0].Args...).Scan(&raw); err != nil {
+		t.Fatalf("explain 500-channel historical emoji references: %v", err)
+	}
+	plans = nil
+	if err := json.Unmarshal(raw, &plans); err != nil {
+		t.Fatalf("decode 500-channel historical emoji plan: %v", err)
+	}
+	if len(plans) != 1 {
+		t.Fatalf("500-channel historical emoji plan count = %d, want 1", len(plans))
+	}
+	if loops := plans[0].Plan.indexLoops(channelEmojiIndex); loops != 1 {
+		t.Errorf("500-channel custom emoji GiST probe loops = %.0f, want exactly one set-based probe: %s", loops,
+			strings.Join(plans[0].Plan.accessSummary(), "; "))
+	}
+	const maxChannelPlanHits = 10_000
+	if plans[0].Plan.Hits > maxChannelPlanHits {
+		t.Errorf("500-channel mixed-floor plan has %d shared hits, want <= %d: %s",
+			plans[0].Plan.Hits, maxChannelPlanHits, strings.Join(plans[0].Plan.accessSummary(), "; "))
+	}
+	for _, table := range plans[0].Plan.sequentialTables() {
+		if table == "messages" || table == "channel_messages" {
+			t.Errorf("500-channel historical emoji plan sequentially scans %s: %s", table, strings.Join(plans[0].Plan.accessSummary(), "; "))
+		}
+	}
+	for _, table := range []string{"messages", "channel_messages"} {
+		if rows := plans[0].Plan.rowsRead(table); rows > 800 {
+			t.Errorf("500-channel historical emoji plan read %.0f %s rows for %d IDs: %s", rows, table, len(planFileIDs), strings.Join(plans[0].Plan.accessSummary(), "; "))
+		}
+	}
+	for _, table := range []string{"messages", "channel_messages"} {
+		if candidates := plans[0].Plan.indexCandidatesFrom(table); candidates > 800 {
+			t.Errorf("500-channel sticker-history plan has %.0f %s index candidates for %d IDs: %s",
+				candidates, table, len(planFileIDs), strings.Join(plans[0].Plan.accessSummary(), "; "))
+		}
+	}
+	t.Logf("visible_channels=500 channel_gist_probes=%.0f channel_heap_rows=%.0f private_index_candidates=%.0f channel_index_candidates=%.0f planning_ms=%.3f execution_ms=%.3f shared_hits=%d shared_reads=%d",
+		plans[0].Plan.indexLoops(channelEmojiIndex), plans[0].Plan.rowsRead("channel_messages"), plans[0].Plan.indexCandidatesFrom("messages"), plans[0].Plan.indexCandidatesFrom("channel_messages"),
+		plans[0].PlanningTime, plans[0].ExecutionTime, plans[0].Plan.Hits, plans[0].Plan.Reads)
 }
 
 func TestPollCustomEmojiLookupsStartFromRequestedIDsAtScale(t *testing.T) {

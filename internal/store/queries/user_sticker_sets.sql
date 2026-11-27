@@ -278,7 +278,7 @@ WITH requested AS (
     SELECT DISTINCT unnest(sqlc.arg(file_ids)::text[]) AS file_id
 ), -- Only current participant rows for this owner enter the visible set:
    -- absent rows exclude nonmembers, active bans and deleted channels are
-   -- filtered, and the per-channel history floor is applied in the join below.
+   -- filtered. The range key below encodes each channel's own history floor.
 visible_channels AS MATERIALIZED (
     SELECT cp.channel_id, cp.available_min_id
     FROM channel_participants cp
@@ -286,22 +286,34 @@ visible_channels AS MATERIALIZED (
     WHERE cp.user_id = sqlc.arg(owner_id)
       AND (cp.banned_until IS NULL OR cp.banned_until <= now())
       AND c.deleted_at IS NULL
+), -- A disjoint numeric segment represents each channel's signed local-ID range.
+   -- A one-unit gap keeps range_agg from merging neighboring channel segments.
+visible_channel_locations AS MATERIALIZED (
+    SELECT COALESCE(
+        range_agg(numrange(
+            vc.channel_id::numeric * 18446744073709551617::numeric
+                + GREATEST(vc.available_min_id::numeric + 9223372036854775809::numeric, 0),
+            vc.channel_id::numeric * 18446744073709551617::numeric
+                + 18446744073709551616::numeric,
+            '[)'
+        )),
+        '{}'::nummultirange
+    ) AS locations
+    FROM visible_channels vc
+), requested_query AS MATERIALIZED (
+    SELECT to_tsquery('simple', string_agg(quote_literal(requested.file_id), ' | ')) AS file_query
+    FROM requested
 ), channel_candidates AS MATERIALIZED (
     SELECT cm.entities
-    FROM visible_channels vc
-    CROSS JOIN LATERAL (
-        SELECT cm.entities, cm.local_id
-        FROM channel_messages cm
-        WHERE cm.channel_id = vc.channel_id
-          AND cm.deleted = false
-          AND cm.entities IS NOT NULL
-          AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
-          AND cardinality(message_custom_emoji_document_ids(cm.entities)) > 0
-          AND message_custom_emoji_document_ids(cm.entities) && sqlc.arg(file_ids)::text[]
-        -- Keep the channel/document GIN lookup per visible channel.
-        OFFSET 0
-    ) AS cm
-    WHERE cm.local_id > vc.available_min_id
+    FROM channel_messages cm
+    CROSS JOIN visible_channel_locations vl
+    CROSS JOIN requested_query rq
+    WHERE cm.deleted = false
+      AND cm.entities IS NOT NULL
+      AND (cm.expires_at IS NULL OR cm.expires_at > statement_timestamp())
+      AND cardinality(message_custom_emoji_document_ids(cm.entities)) > 0
+      AND public.channel_message_custom_emoji_location(cm.channel_id, cm.local_id) && vl.locations
+      AND public.message_custom_emoji_document_vector(cm.entities) @@ rq.file_query
 ), visible_entities AS (
     SELECT m.entities
     FROM messages m
