@@ -166,9 +166,28 @@ elif operation == "-I":
     firewall[chain].insert(index, f"-A {chain} {' '.join(args[3:])}")
     save()
 elif operation == "-D":
-    chain, index = args[1], int(args[2]) - 1
+    chain = args[1]
     if chain not in firewall:
         missing_chain(chain)
+    if args[2].isdigit():
+        index = int(args[2]) - 1
+        expected = ""
+    else:
+        expected = f"-A {chain} {' '.join(args[2:])}"
+        try:
+            index = firewall[chain].index(expected)
+        except ValueError:
+            print(f"{tool}: Bad rule (does a matching rule exist in that chain?)", file=sys.stderr)
+            raise SystemExit(1)
+    interleave = os.environ.get("TEAGRAM_TEST_INTERLEAVE_RULE_CHANGE")
+    marker = state_path.with_name("interleaved-rule-change")
+    if interleave == "1" and not marker.exists():
+        foreign_rule = f"-A {chain} -m comment --comment injected-foreign -j ACCEPT"
+        firewall[chain].insert(index, foreign_rule)
+        marker.write_text("inserted", encoding="utf-8")
+        save()
+        if expected:
+            index = firewall[chain].index(expected)
     del firewall[chain][index]
     save()
 else:
@@ -242,6 +261,7 @@ class EgressIsolationRuleTests(unittest.TestCase):
         ipv6_networks: tuple[str, ...] = (),
         listing_failure: str = "",
         docker_ready_after: int = 1,
+        interleave_rule_change: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         path = os.pathsep.join((str(mock_bin), os.environ.get("PATH", "")))
         env = os.environ.copy()
@@ -252,6 +272,7 @@ class EgressIsolationRuleTests(unittest.TestCase):
                 "TEAGRAM_TEST_MISSING_NETWORKS": ",".join(missing_networks),
                 "TEAGRAM_TEST_IPV6_NETWORKS": ",".join(ipv6_networks),
                 "TEAGRAM_TEST_LISTING_FAILURE": listing_failure,
+                "TEAGRAM_TEST_INTERLEAVE_RULE_CHANGE": "1" if interleave_rule_change else "0",
                 "TEAGRAM_TEST_DOCKER_READY_AFTER": str(docker_ready_after),
                 "TEAGRAM_TEST_DOCKER_INFO_COUNT": str(
                     state_file.with_name("docker-info-count")
@@ -275,6 +296,7 @@ class EgressIsolationRuleTests(unittest.TestCase):
                 f"TEAGRAM_TEST_MISSING_NETWORKS={','.join(missing_networks)}",
                 f"TEAGRAM_TEST_IPV6_NETWORKS={','.join(ipv6_networks)}",
                 f"TEAGRAM_TEST_LISTING_FAILURE={listing_failure}",
+                f"TEAGRAM_TEST_INTERLEAVE_RULE_CHANGE={'1' if interleave_rule_change else '0'}",
                 f"TEAGRAM_TEST_DOCKER_READY_AFTER={docker_ready_after}",
                 f"TEAGRAM_TEST_DOCKER_INFO_COUNT={state_file.with_name('docker-info-count')}",
                 f"TEAGRAM_TEST_DOCKER_CALL_LOG={state_file.with_name('docker-calls.log')}",
@@ -288,6 +310,7 @@ class EgressIsolationRuleTests(unittest.TestCase):
         state_file: pathlib.Path,
         docker_ready_after: int,
         docker_info_mode: str = "ready",
+        interleave_rule_change: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env.update(
@@ -297,6 +320,7 @@ class EgressIsolationRuleTests(unittest.TestCase):
                 "TEAGRAM_TEST_MISSING_NETWORKS": "",
                 "TEAGRAM_TEST_IPV6_NETWORKS": "",
                 "TEAGRAM_TEST_LISTING_FAILURE": "",
+                "TEAGRAM_TEST_INTERLEAVE_RULE_CHANGE": "1" if interleave_rule_change else "0",
                 "TEAGRAM_TEST_DOCKER_READY_AFTER": str(docker_ready_after),
                 "TEAGRAM_TEST_DOCKER_INFO_MODE": docker_info_mode,
                 "TEAGRAM_TEST_DOCKER_INFO_COUNT": str(
@@ -832,6 +856,37 @@ stack_supervise
             for family in subnets_by_family:
                 for chain, expected_host_rules in host_rules[family].items():
                     self.assertEqual(state[family][chain], expected_host_rules)
+
+    def test_apply_preserves_foreign_rule_inserted_between_listing_and_delete(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            mock_bin, state_file = self._mock_firewall(directory)
+
+            result = self._run_apply_rules_function(
+                mock_bin,
+                state_file,
+                docker_ready_after=1,
+                interleave_rule_change=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            marker = state_file.with_name("interleaved-rule-change")
+            self.assertEqual(marker.read_text(encoding="utf-8"), "inserted")
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+            self.assertIn(
+                "-A DOCKER-USER -m comment --comment injected-foreign -j ACCEPT",
+                state["iptables"]["DOCKER-USER"],
+            )
+            self.assertEqual(
+                state["iptables"]["DOCKER-USER"][:3],
+                [
+                    f"-A DOCKER-USER -s {subnet} -j {IPTABLES_CHAIN}"
+                    for subnet in (
+                        "198.18.130.0/24",
+                        "198.18.132.0/24",
+                        "198.18.133.0/24",
+                    )
+                ],
+            )
 
     def test_stack_reconciler_recovers_missing_services_and_leaves_migrate_stopped(
         self,

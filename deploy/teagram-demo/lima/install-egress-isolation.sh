@@ -245,6 +245,67 @@ chain_listing_error() {
   esac
 }
 
+delete_listed_rule() {
+  local binary=$1 chain=$2 rule=$3
+
+  # Rule numbers from `-S` become stale when another firewall writer updates
+  # the chain. Delete the listed rule itself while xtables holds its lock.
+  python3 - "$binary" "$chain" "$rule" <<'PY'
+import shlex
+import subprocess
+import sys
+
+binary, chain, rule = sys.argv[1:]
+try:
+    fields = shlex.split(rule)
+except ValueError as error:
+    print(f"cannot parse listed firewall rule: {error}", file=sys.stderr)
+    raise SystemExit(1)
+if len(fields) < 3 or fields[:2] != ["-A", chain]:
+    print(f"unexpected listed firewall rule for {chain}: {rule}", file=sys.stderr)
+    raise SystemExit(1)
+raise SystemExit(
+    subprocess.run(
+        [binary, "-w", "10", "-D", chain, *fields[2:]],
+        check=False,
+    ).returncode
+)
+PY
+}
+
+move_listed_rule() {
+  local binary=$1 chain=$2 rule=$3 position=$4
+
+  python3 - "$binary" "$chain" "$rule" "$position" <<'PY'
+import shlex
+import subprocess
+import sys
+
+binary, chain, rule, position = sys.argv[1:]
+try:
+    fields = shlex.split(rule)
+except ValueError as error:
+    print(f"cannot parse listed firewall rule: {error}", file=sys.stderr)
+    raise SystemExit(1)
+if len(fields) < 3 or fields[:2] != ["-A", chain]:
+    print(f"unexpected listed firewall rule for {chain}: {rule}", file=sys.stderr)
+    raise SystemExit(1)
+specification = fields[2:]
+inserted = subprocess.run(
+    [binary, "-w", "10", "-I", chain, position, *specification],
+    check=False,
+)
+if inserted.returncode != 0:
+    raise SystemExit(inserted.returncode)
+raise SystemExit(
+    subprocess.run(
+        [binary, "-w", "10", "-D", chain, *specification],
+        check=False,
+    ).returncode
+)
+PY
+}
+
 apply_family() {
   local binary=$1 family=$2
   shift 2
@@ -303,7 +364,8 @@ apply_family() {
 
 ensure_source_hooks() {
   local binary=$1 parent_chain=$2 hook_chain=$3 stale_chain=$4 interface=$5
-  local subnet index prefix_matches=1 listing status
+  local subnet index hook_index line prefix_matches=1 listing status
+  local hook_count=0 stale_count=0 hook_start=-1 matches
   shift 5
   local -a subnets=("$@")
   local -a expected_hooks=() parent_rules=() interface_args=()
@@ -325,6 +387,20 @@ ensure_source_hooks() {
   fi
   mapfile -t parent_rules < <(sed -n "/^-A $parent_chain /p" <<<"$listing")
 
+  for ((index = 0; index <= ${#parent_rules[@]} - ${#expected_hooks[@]}; index++)); do
+    matches=1
+    for ((hook_index = 0; hook_index < ${#expected_hooks[@]}; hook_index++)); do
+      if [[ "${parent_rules[$((index + hook_index))]}" != "${expected_hooks[$hook_index]}" ]]; then
+        matches=0
+        break
+      fi
+    done
+    if (( matches == 1 )); then
+      hook_start=$index
+      break
+    fi
+  done
+
   for ((index = 0; index < ${#expected_hooks[@]}; index++)); do
     if [[ "${parent_rules[$index]:-}" != "${expected_hooks[$index]}" ]]; then
       prefix_matches=0
@@ -332,25 +408,41 @@ ensure_source_hooks() {
     fi
   done
 
-  if (( prefix_matches == 0 )); then
-    for ((index = ${#subnets[@]} - 1; index >= 0; index--)); do
-      "$binary" -w 10 -I "$parent_chain" 1 "${interface_args[@]}" \
-        -s "${subnets[$index]}" -j "$hook_chain"
-    done
+  for line in "${parent_rules[@]}"; do
+    if [[ "$line" == *" -j $hook_chain" ]]; then
+      ((hook_count += 1))
+    fi
+    if [[ -n $stale_chain && "$line" == *" -j $stale_chain" ]]; then
+      ((stale_count += 1))
+    fi
+  done
+
+  if (( prefix_matches == 1 && hook_count == ${#expected_hooks[@]} && stale_count == 0 )); then
+    return 0
   fi
 
-  if chain_listing "$binary" "$parent_chain"; then
-    listing=$CHAIN_LISTING
-  else
-    status=$?
-    chain_listing_error "$binary" "$parent_chain" "$status" "$binary is missing $parent_chain"
+  if (( hook_start > 0 && hook_count == ${#expected_hooks[@]} && stale_count == 0 )); then
+    # Keep the existing ordered hooks, moving only the rules ahead of them.
+    # This repairs Tailscale's FORWARD insertion without duplicating hooks.
+    for ((index = hook_start - 1; index >= 0; index--)); do
+      move_listed_rule "$binary" "$parent_chain" "${parent_rules[$index]}" \
+        "$(( index + ${#expected_hooks[@]} + 2 ))"
+    done
+    return 0
   fi
-  mapfile -t parent_rules < <(sed -n "/^-A $parent_chain /p" <<<"$listing")
-  for ((index = ${#parent_rules[@]} - 1; index >= ${#expected_hooks[@]}; index--)); do
+
+  # For missing, duplicated, or misordered hooks, remove exact listed rules
+  # before rebuilding the desired prefix. Concurrent host rules cannot be
+  # deleted by stale line numbers.
+  for ((index = ${#parent_rules[@]} - 1; index >= 0; index--)); do
     if [[ "${parent_rules[$index]}" == *" -j $hook_chain" ]] \
       || [[ -n $stale_chain && "${parent_rules[$index]}" == *" -j $stale_chain" ]]; then
-      "$binary" -w 10 -D "$parent_chain" "$((index + 1))"
+      delete_listed_rule "$binary" "$parent_chain" "${parent_rules[$index]}"
     fi
+  done
+  for ((index = ${#subnets[@]} - 1; index >= 0; index--)); do
+    "$binary" -w 10 -I "$parent_chain" 1 "${interface_args[@]}" \
+      -s "${subnets[$index]}" -j "$hook_chain"
   done
 }
 
@@ -396,7 +488,7 @@ remove_family() {
     for ((index = ${#parent_rules[@]} - 1; index >= 0; index--)); do
       for managed_chain in "${managed_chains[@]}"; do
         if [[ "${parent_rules[$index]}" == *" -j $managed_chain" ]]; then
-          "$binary" -w 10 -D "$parent_chain" "$((index + 1))"
+          delete_listed_rule "$binary" "$parent_chain" "${parent_rules[$index]}"
           break
         fi
       done

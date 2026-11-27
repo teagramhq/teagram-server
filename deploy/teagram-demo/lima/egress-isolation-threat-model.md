@@ -41,6 +41,9 @@ these rules and is outside this policy's protection.
   OpenRC orders firewall installation after Tailscale, and the stack supervisor
   checks hook order on each Docker-ready cycle and reapplies drift under the
   shared deployment lock.
+- Firewall apply and removal delete listed hooks by exact rule specification.
+  If Docker or Tailscale changes another rule between inspection and deletion,
+  the update cannot remove that unrelated rule by a stale line number.
 
 ## Verification and residual risk
 
