@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	osexec "os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -98,7 +99,7 @@ func testSmokeUsernamePasswordReset(t *testing.T) {
 		t.Fatalf("bound auth key before reset = %+v ok=%v err=%v", boundKey, ok, err)
 	}
 
-	stdout, stderr, err := runPasswordResetCLI(f.ctx, f.dsn, username, newPassword)
+	stdout, stderr, err := runPasswordResetCLI(t, f.ctx, f.dsn, username, newPassword)
 	if err != nil {
 		t.Fatalf("password reset CLI: %v; stdout=%q stderr=%q", err, stdout, stderr)
 	}
@@ -325,14 +326,24 @@ func passwordResetAuthKeyID(ctx context.Context, sess *session.StorageMemory) (i
 	return mtproto.AuthKeyIDInt64(authKeyID), nil
 }
 
-func runPasswordResetCLI(ctx context.Context, dsn, username, password string) (string, string, error) {
-	cmd := osexec.CommandContext(ctx, "go", "run", "../../cmd/teagramd", "admin", "set-password", "--username", username) // #nosec G204 -- fixed Go test invocation against local fixture; username is test data.
-	cmd.Env = passwordResetCommandEnvironment(dsn)
+func runPasswordResetCLI(t *testing.T, ctx context.Context, dsn, username, password string) (string, string, error) {
+	t.Helper()
+	commandEnv := passwordResetCommandEnvironment(dsn)
+	binary := filepath.Join(t.TempDir(), "teagramd")
+	build := osexec.CommandContext(ctx, "go", "build", "-o", binary, "../../cmd/teagramd") // #nosec G204 -- fixed local Go build target.
+	build.Env = commandEnv
+	buildOutput, err := build.CombinedOutput()
+	if err != nil {
+		return "", string(buildOutput), fmt.Errorf("build teagramd: %w", err)
+	}
+
+	cmd := osexec.CommandContext(ctx, binary, "admin", "set-password", "--username", username) // #nosec G204 -- fixed local binary and synthetic test username.
+	cmd.Env = commandEnv
 	cmd.Stdin = strings.NewReader(password + "\n")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	err := cmd.Run()
+	err = cmd.Run()
 	return stdout.String(), stderr.String(), err
 }
 
