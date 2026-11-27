@@ -1489,6 +1489,7 @@ jobs:
           sh -n deploy/teagram-demo/lima/teagram-demo-deploy-sshd.initd
           bash -n deploy/teagram-demo/test-tailnet-source-address.sh
           bash -n deploy/teagram-demo/test-identity-import.sh
+          bash -n deploy/teagram-demo/lima/install-egress-isolation.sh
           bash -n deploy/teagram-demo/ops/weekly-wipe.sh
           bash -n deploy/teagram-demo/test-turnstile-signin-rollout.sh
           bash -n deploy/teagram-demo/test-image-release.sh
@@ -1574,6 +1575,7 @@ jobs:
             deploy/teagram-demo/lima/install-deploy-entry.sh \
             deploy/teagram-demo/lima/teagram-demo-deploy-sshd.initd \
             deploy/teagram-demo/lima/test-deploy-contract.sh \
+            deploy/teagram-demo/lima/install-egress-isolation.sh \
             deploy/teagram-demo/lima/prepare-blobs.sh \
             deploy/teagram-demo/lima/test-lima-compose.sh \
             deploy/teagram-demo/ops/weekly-wipe.sh \
@@ -1655,6 +1657,9 @@ jobs:
 
       - name: Check public demo Compose policy
         run: deploy/teagram-demo/test-demo-compose.sh
+
+      - name: Check Lima demo egress isolation
+        run: python3 -B deploy/teagram-demo/lima/test-egress-isolation-rules.py
 
       - name: Check demo ops command menu
         run: deploy/teagram-demo/test-ops-menu.sh

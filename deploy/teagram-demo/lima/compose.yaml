@@ -14,11 +14,16 @@
 # Images are pinned by digest and never built here. Memory limits (mem_limit,
 # MiB) of all long-running services add up to 157 MiB; migrate is one-shot.
 # Fixed subnets: backend 198.18.130.0/24, egress 198.18.132.0/24, edge
-# 198.18.133.0/24. The egress-isolation rules in DOCKER-USER name these.
+# 198.18.133.0/24. The source-scoped FORWARD and DOCKER-USER isolation hooks
+# name these.
 
 name: teagram-demo
 
 x-dsn: &dsn "postgres://postgres:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in the lima env file}@postgres:5432/teagram?sslmode=disable"
+
+x-public-dns: &public-dns
+  - 1.1.1.1
+  - 1.0.0.1
 
 x-logging: &logging
   driver: json-file
@@ -65,9 +70,9 @@ x-server-environment: &server-environment
   TG_TURNSTILE_QA_BYPASS_TOKEN_FILE: /run/secrets/teagram_demo_turnstile_qa_bypass
   TG_BLOB_DIR: /var/lib/teagramd-blobs
   GOMAXPROCS: "1"
-  # Soft limit below the 46 MiB container limit, so the collector runs before
-  # the kernel OOM-kills the server.
-  GOMEMLIMIT: 20MiB
+  # Soft limit leaves extra room below the 46 MiB container limit for
+  # non-heap memory and concurrent uploads.
+  GOMEMLIMIT: 18MiB
 
 x-server: &server
   image: ${TEAGRAM_DEMO_IMAGE_REF:?set TEAGRAM_DEMO_IMAGE_REF to the digest-pinned teagramd image in the lima env file}
@@ -97,7 +102,7 @@ x-server: &server
       condition: service_completed_successfully
     turnstile-egress:
       condition: service_healthy
-  restart: unless-stopped
+  restart: "no"
   logging: *logging
 
 services:
@@ -128,7 +133,7 @@ services:
     networks:
       backend:
         ipv4_address: 198.18.130.3
-    restart: unless-stopped
+    restart: "no"
     logging: *logging
 
   migrate:
@@ -154,6 +159,7 @@ services:
       postgres:
         condition: service_healthy
     networks: [backend]
+    restart: "no"
     logging: *logging
 
   teagramd:
@@ -165,6 +171,7 @@ services:
   turnstile-egress:
     image: mirror.gcr.io/ubuntu/squid:7.2-26.04_edge@sha256:f6843088c0eab9e63ecb8a1c215d939cd97d0370611bb2bdb65c4a8e48b3c3eb
     platform: linux/amd64
+    dns: *public-dns
     user: "584792:584792"
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
@@ -202,7 +209,7 @@ services:
         gw_priority: 1
       backend:
         ipv4_address: 198.18.130.252
-    restart: unless-stopped
+    restart: "no"
     logging: *logging
 
   haproxy:
@@ -245,12 +252,13 @@ services:
     networks:
       backend:
         ipv4_address: 198.18.130.2
-    restart: unless-stopped
+    restart: "no"
     logging: *logging
 
   edge:
     image: mirror.gcr.io/library/nginx:1.28.0-alpine@sha256:09ab424a8c788f8d0fe3a64429f6d19dfa526885c8609b748d0943a75dcb9f8c
     platform: linux/amd64
+    dns: *public-dns
     entrypoint: ["nginx", "-c", "/etc/nginx/demo/nginx.conf", "-g", "daemon off;"]
     user: "101:101"
     ports:
@@ -281,7 +289,7 @@ services:
       haproxy:
         condition: service_healthy
     networks: [backend, edge]
-    restart: unless-stopped
+    restart: "no"
     logging: *logging
 
   # Tunnel connector for demo.teagram.io. It reaches the origin as edge:8080
@@ -291,6 +299,7 @@ services:
   # cloudflared.env file, which carries nothing else.
   cloudflared:
     image: cloudflare/cloudflared:2026.10.5@sha256:85b1ec2fdc5b311d309abd268f70eef071a595f011a38bf878938af25d084d17
+    dns: *public-dns
     command: ["tunnel", "--no-autoupdate", "--loglevel", "info", "run"]
     env_file:
       - ${TEAGRAM_DEMO_SECRETS_DIR:-/var/lib/teagram-demo/secrets}/cloudflared.env
@@ -307,7 +316,7 @@ services:
       edge:
         condition: service_started
     networks: [edge]
-    restart: unless-stopped
+    restart: "no"
     logging: *logging
 
 volumes:
