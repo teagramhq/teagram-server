@@ -1517,6 +1517,44 @@ func TestAddChannelMembersPreservesExistingMembershipState(t *testing.T) {
 	}
 }
 
+func TestAddChannelMembersRateLimitDeniesBeforeMembershipWrites(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	creator := mustUser(t, s, "+15551299965")
+	first := mustUser(t, s, "+15551299966")
+	second := mustUser(t, s, "+15551299967")
+	ch := mustChannel(t, s, creator.ID, "Rate-limited add")
+	budget := store.RateLimitConfig{Limit: 2, Window: time.Hour}
+	if err := s.ChargeRateLimit(ctx, creator.ID, "add_chat_user", budget); err != nil {
+		t.Fatalf("seed rate-limit usage: %v", err)
+	}
+
+	if _, err := store.StorePool(s).Exec(ctx, `
+CREATE FUNCTION reject_channel_participant_insert_for_test() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+	RAISE EXCEPTION 'membership insert reached before rate-limit denial';
+END;
+$$
+`); err != nil {
+		t.Fatalf("create insert guard: %v", err)
+	}
+	if _, err := store.StorePool(s).Exec(ctx, `
+CREATE TRIGGER reject_channel_participant_insert_for_test
+BEFORE INSERT ON channel_participants
+FOR EACH ROW EXECUTE FUNCTION reject_channel_participant_insert_for_test()
+`); err != nil {
+		t.Fatalf("install insert guard: %v", err)
+	}
+
+	_, err := s.AddChannelMembersWithRateLimit(ctx, ch.ID, creator.ID, []int64{first.ID, second.ID}, budget)
+	limited, ok := errors.AsType[*store.RateLimitedError](err)
+	if !ok || limited == nil {
+		t.Fatalf("add over-budget batch error = %v, want RateLimitedError before any insert", err)
+	}
+}
+
 func TestAddChannelMembersEnforcesAccountCapAtAdmission(t *testing.T) {
 	t.Parallel()
 	s := open(t)

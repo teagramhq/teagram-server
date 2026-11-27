@@ -843,9 +843,9 @@ func (s *Store) JoinChannelByInvite(ctx context.Context, hash string, userID int
 // is read again after LockChannel, so a demotion that commits first denies this
 // operation. channel_state serializes this channel's participant count and
 // supplies the same pts all new rows use; account locks serialize quota checks
-// across channels. The add_chat_user counter is acquired after those locks and
-// the membership writes, immediately before commit, so no channel lock is
-// acquired while it is held.
+// across channels. An advisory add_chat_user budget read follows those locks
+// before membership writes; its final charge stays atomic with the mutation and
+// follows the writes, so no channel lock is acquired while the counter is held.
 func (s *Store) AddChannelMembers(ctx context.Context, channelID, callerID int64, targetIDs []int64) ([]int64, error) {
 	return s.addChannelMembers(ctx, channelID, callerID, targetIDs, RateLimitConfig{})
 }
@@ -948,6 +948,16 @@ func (s *Store) addChannelMembers(
 		}
 		eligible = append(eligible, targetID)
 		seats++
+	}
+
+	if len(eligible) > 0 {
+		budgetResult, err := s.checkRateLimitBudgetCost(ctx, qtx, callerID, "add_chat_user", budget, len(eligible))
+		if err != nil {
+			return nil, fmt.Errorf("check add_chat_user budget: %w", err)
+		}
+		if budgetResult != nil {
+			return nil, &RateLimitedError{Surface: "add_chat_user", Wait: budgetResult.Wait}
+		}
 	}
 
 	added := make([]int64, 0, len(eligible))
