@@ -3203,7 +3203,8 @@ jobs:
         uses: actions/cache/restore@v6.1.0
         with:
           path: ~/.cache/go-build
-          key: go-build-v2-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-
+          key: go-build-v2-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: go-build-v2-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-
 
       # Before setup-node, whose pnpm cache mode shells out to pnpm to find the
       # store path. Version pinned here because package.json carries no
