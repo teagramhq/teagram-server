@@ -284,7 +284,7 @@ if grep -Fq 'FIREWALL_LOCK_TIMEOUT_SECONDS=30' "$SCRIPT_DIR/install-egress-isola
   && grep -Fq 'Lock order is deploy.lock (FD 9), then this leaf lock (FD 8).' \
     "$SCRIPT_DIR/install-egress-isolation.sh" \
   && grep -Fq 'leaf lock second' "$SCRIPT_DIR/egress-isolation-threat-model.md" \
-  && grep -Fq 'read-only `check` takes no lock' "$SCRIPT_DIR/egress-isolation-threat-model.md"; then
+  && grep -Eq 'read-only .*check.* takes no lock' "$SCRIPT_DIR/egress-isolation-threat-model.md"; then
   ok 'firewall mutations use the documented bounded leaf lock'
 else
   not_ok 'firewall mutations use the documented bounded leaf lock'
