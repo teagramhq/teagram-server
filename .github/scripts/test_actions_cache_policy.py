@@ -129,6 +129,51 @@ class ActionsCachePolicyTests(unittest.TestCase):
         self.assertIsNotNone(publisher, "missing k8s image publisher job")
         self.assertNotIn("ops-go-build-cache", publisher.group("body"))
 
+    def test_e2e_admin_go_module_cache_save_is_best_effort_and_uses_resolved_key(
+        self,
+    ) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        job = re.search(
+            r"(?ms)^  test-e2e-admin:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+            workflow,
+        )
+        self.assertIsNotNone(job, "missing e2e-admin job")
+        body = job.group("body")
+
+        key_step = re.search(
+            r"(?ms)^      - name: Resolve Go module cache key\n"
+            r"(?P<body>.*?)(?=^      - name:|\Z)",
+            body,
+        )
+        self.assertIsNotNone(key_step, "Go module cache key is not captured before tests")
+        self.assertIn("hashFiles('**/go.sum')", key_step.group("body"))
+        self.assertIn('echo "key=$GO_MODULE_CACHE_KEY" >>"$GITHUB_OUTPUT"', key_step.group("body"))
+
+        restore = re.search(
+            r"(?ms)^      - name: Restore Go modules\n"
+            r"(?P<body>.*?)(?=^      - name:|\Z)",
+            body,
+        )
+        self.assertIsNotNone(restore, "Go module restore step is missing")
+        self.assertIn("id: go-modules-cache", restore.group("body"))
+        self.assertIn("uses: actions/cache/restore@v6.1.0", restore.group("body"))
+        self.assertIn("continue-on-error: true", restore.group("body"))
+        self.assertIn("key: ${{ steps.go-modules-key.outputs.key }}", restore.group("body"))
+
+        save = re.search(
+            r"(?ms)^      - name: Save Go modules cache\n"
+            r"(?P<body>.*?)(?=^      - name:|\Z)",
+            body,
+        )
+        self.assertIsNotNone(save, "Go module cache save step is missing")
+        save_body = save.group("body")
+        self.assertIn("continue-on-error: true", save_body)
+        self.assertIn("uses: actions/cache/save@v6.1.0", save_body)
+        self.assertIn("key: ${{ steps.go-modules-key.outputs.key }}", save_body)
+        self.assertIn("steps.go-modules-cache.outputs.cache-hit != 'true'", save_body)
+        self.assertLess(body.index("- name: Run Playwright tests"), body.index("- name: Save Go modules cache"))
+        self.assertNotIn("hashFiles('**/go.sum')", save_body)
+
     def test_repeated_main_saves_keep_one_go_build_snapshot(self) -> None:
         caches = [
             {"id": 10, "key": "go-build-Linux-old-hash-1-1", "ref": "refs/heads/main"},

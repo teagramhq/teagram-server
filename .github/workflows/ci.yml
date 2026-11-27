@@ -1376,6 +1376,8 @@ jobs:
 
       - name: Check workflow contract script syntax
         run: |
+          bash -n .github/scripts/install-playwright-apt-cache.sh
+          shellcheck .github/scripts/install-playwright-apt-cache.sh
           bash -n .github/scripts/perf-run.sh .github/scripts/test-perf-workflow-contract.sh .github/scripts/test-ci-main-priority.sh
           shellcheck .github/scripts/test-perf-workflow-contract.sh .github/scripts/test-ci-main-priority.sh
           bash -n .github/scripts/publish-k8s-image-digests.sh .github/scripts/test-k8s-image-digests.sh
@@ -3134,11 +3136,22 @@ jobs:
           go-version-file: go.mod
           cache: false
 
-      - name: Cache Go modules
-        uses: actions/cache@v6.1.0
+      # Resolve the key before the test steps run and carry that exact string
+      # into the explicit save. The cache action's post-job save re-evaluated
+      # hashFiles after the test job and failed even though the tests passed.
+      - name: Resolve Go module cache key
+        id: go-modules-key
+        env:
+          GO_MODULE_CACHE_KEY: go-mod-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
+        run: echo "key=$GO_MODULE_CACHE_KEY" >>"$GITHUB_OUTPUT"
+
+      - name: Restore Go modules
+        id: go-modules-cache
+        continue-on-error: true
+        uses: actions/cache/restore@v6.1.0
         with:
           path: ~/go/pkg/mod
-          key: go-mod-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
+          key: ${{ steps.go-modules-key.outputs.key }}
           restore-keys: go-mod-${{ runner.os }}-
 
       # Read-only on purpose, unlike the ci job: that job's key is built to
@@ -3281,24 +3294,17 @@ jobs:
           path: .apt-cache/*.deb
           key: playwright-apt-${{ steps.playwright-deps.outputs.image }}-${{ hashFiles('apt-packages.txt') }}
 
-      # The warm path: dpkg installs the whole cached set in one call, which is
-      # what lets it resolve the ordering among them, and touches no mirror. The
-      # dry-run afterwards is the check that it actually worked — if anything is
-      # still missing, or dpkg refused, the step falls through to the network
-      # path rather than leaving a half-installed runner to fail in the browser.
+      # The warm path installs the cached set together, deconfigures conflicting
+      # package versions, and completes pending configuration without touching a
+      # mirror. Its dry-run checks the result; anything incomplete falls through
+      # to the repair and network path rather than failing in the browser.
       #
       # A bad entry falls back to the network. PR jobs do not get an Actions
       # write token to delete cache entries; the trusted main run can refresh it.
       - name: Install the system dependencies from cache
         id: apt-cached-install
         if: steps.apt-cache.outputs.cache-hit == 'true'
-        run: |
-          if sudo dpkg -i .apt-cache/*.deb && pnpm exec playwright install-deps --dry-run chromium; then
-            echo "installed=true" >>"$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo "::warning::cached debs did not satisfy the dependencies; falling back to the network install"
-          echo "installed=false" >>"$GITHUB_OUTPUT"
+        run: bash .github/scripts/install-playwright-apt-cache.sh .apt-cache
 
       # The cold path, and the only step here that needs the network. Download
       # and install are separate so the debs land in a directory the cache can
@@ -3357,6 +3363,10 @@ jobs:
             if [ "$MODE" = "packages" ]; then
               bash .github/scripts/prepare-playwright-apt-cache.sh .apt-cache
               sudo apt-get update
+              # The cached dpkg install may have deconfigured a conflicting
+              # preinstalled version. Let apt repair that state before deriving
+              # and installing the current dependency set.
+              sudo apt-get -f install -y --no-install-recommends
               # The first dry-run used the apt indexes baked into the runner
               # image. Refreshing those indexes can change the package names
               # Playwright needs, so derive the install list again before
@@ -3449,6 +3459,17 @@ jobs:
         env:
           PLAYWRIGHT_HTML_OPEN: never
         run: pnpm exec playwright test --reporter=list,html
+
+      # Module caching is an optimization; a failed or racing cache save must
+      # not turn a passing browser suite into a failed CI job. Saving after the
+      # tests also avoids persisting modules from an unsuccessful run.
+      - name: Save Go modules cache
+        if: ${{ success() && steps.go-modules-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ steps.go-modules-key.outputs.key }}
 
       # Both directories, because they answer different questions: the report is
       # the readable summary, and test-results/ holds the traces the config
