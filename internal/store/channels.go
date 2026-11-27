@@ -843,8 +843,25 @@ func (s *Store) JoinChannelByInvite(ctx context.Context, hash string, userID int
 // is read again after LockChannel, so a demotion that commits first denies this
 // operation. channel_state serializes this channel's participant count and
 // supplies the same pts all new rows use; account locks serialize quota checks
-// across channels.
+// across channels. The add_chat_user counter is acquired after those locks and
+// the membership writes, immediately before commit, so no channel lock is
+// acquired while it is held.
 func (s *Store) AddChannelMembers(ctx context.Context, channelID, callerID int64, targetIDs []int64) ([]int64, error) {
+	return s.addChannelMembers(ctx, channelID, callerID, targetIDs, RateLimitConfig{})
+}
+
+// AddChannelMembersWithRateLimit admits targets and consumes the caller's
+// add_chat_user budget only for rows this operation can insert. The budget and
+// membership rows commit or roll back together.
+func (s *Store) AddChannelMembersWithRateLimit(
+	ctx context.Context, channelID, callerID int64, targetIDs []int64, budget RateLimitConfig,
+) ([]int64, error) {
+	return s.addChannelMembers(ctx, channelID, callerID, targetIDs, budget)
+}
+
+func (s *Store) addChannelMembers(
+	ctx context.Context, channelID, callerID int64, targetIDs []int64, budget RateLimitConfig,
+) ([]int64, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin: %w", err)
@@ -901,7 +918,7 @@ func (s *Store) AddChannelMembers(ctx context.Context, channelID, callerID int64
 		return nil, fmt.Errorf("count participants: %w", err)
 	}
 
-	added := make([]int64, 0, len(targetIDs))
+	eligible := make([]int64, 0, len(targetIDs))
 	seen := make(map[int64]bool, len(targetIDs))
 	for _, targetID := range targetIDs {
 		if seen[targetID] {
@@ -929,7 +946,12 @@ func (s *Store) AddChannelMembers(ctx context.Context, channelID, callerID int64
 		if joined >= int64(s.maxChannelsPerUser) {
 			continue
 		}
+		eligible = append(eligible, targetID)
+		seats++
+	}
 
+	added := make([]int64, 0, len(eligible))
+	for _, targetID := range eligible {
 		n, err := qtx.InsertChannelParticipantIfAbsent(ctx, db.InsertChannelParticipantIfAbsentParams{
 			ChannelID: channelID, UserID: targetID, Role: channelRoleMember, JoinPts: state.Pts,
 			AvailableMinID: channelParticipantHistoryFloor(channel.PreHistoryHidden, state.NextLocalID),
@@ -944,7 +966,11 @@ func (s *Store) AddChannelMembers(ctx context.Context, channelID, callerID int64
 			return nil, fmt.Errorf("insert initial channel read state for target %d: %w", targetID, err)
 		}
 		added = append(added, targetID)
-		seats++
+	}
+	if len(added) > 0 {
+		if err := s.consumeRateLimitTx(ctx, qtx, callerID, "add_chat_user", budget, len(added)); err != nil {
+			return nil, err
+		}
 	}
 
 	if err = tx.Commit(ctx); err != nil {
