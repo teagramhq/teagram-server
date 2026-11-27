@@ -272,6 +272,7 @@ if grep -Fq 'supervisor=supervise-daemon' "$SCRIPT_DIR/install-egress-isolation.
   && grep -Fq 'command_args_foreground="stack-supervise"' "$SCRIPT_DIR/install-egress-isolation.sh" \
   && grep -Fq 'respawn_max=0' "$SCRIPT_DIR/install-egress-isolation.sh" \
   && grep -Fq 'need teagram-demo-egress' "$SCRIPT_DIR/install-egress-isolation.sh" \
+  && grep -Fq 'after tailscale' "$SCRIPT_DIR/install-egress-isolation.sh" \
   && grep -Fq 'stack_reconcile_locked' "$SCRIPT_DIR/install-egress-isolation.sh" \
   && grep -Fq 'shared lima deploy lock' "$SCRIPT_DIR/install-egress-isolation.sh"; then
   ok 'OpenRC supervises service recovery after firewall-first startup'

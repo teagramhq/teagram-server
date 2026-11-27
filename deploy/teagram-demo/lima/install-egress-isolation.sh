@@ -657,6 +657,7 @@ stack_supervise() {
       docker_state=available
       stack_lock_try
       if (( STACK_LOCK_SKIPPED == 0 )); then
+        ensure_firewall_rules_current
         stack_reconcile_locked
       fi
     else
@@ -685,6 +686,7 @@ description="Install the teagram demo's Docker egress isolation rules"
 
 depend() {
   need docker
+  after tailscale
 }
 
 start() {
@@ -781,6 +783,14 @@ check_rules() {
     done
   fi
   printf '%s\n' 'demo egress isolation rules are current'
+}
+
+ensure_firewall_rules_current() {
+  if (check_rules >/dev/null 2>&1); then
+    return 0
+  fi
+  printf '%s\n' 'Firewall hook order drifted; reapplying Lima demo egress rules'
+  apply_rules
 }
 
 remove_rules() {

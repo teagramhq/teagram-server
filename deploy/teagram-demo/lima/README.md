@@ -199,24 +199,26 @@ IPv6 updates without removing an existing IPv6 chain; `check` rejects until all
 three networks exist. The stack service creates the networks without starting
 containers, reapplies IPv4 and IPv6 rules, then starts the stack.
 
-OpenRC enables `teagram-demo-egress` after Docker and a supervised
-`teagram-demo-stack` service after the firewall service. Every Compose service
-has `restart: "no"`, so dockerd cannot start demo containers before OpenRC has
-installed isolation. The stack supervisor creates the networks, applies the
-rules, and then starts Compose; every ten seconds it checks the six long-running
-services and restarts only missing services one at a time in dependency order,
-waiting up to 120 seconds for each service to become healthy or start. Recovery
-starts `teagramd` before waiting for HAProxy's health check, and disables
-dependency startup so the one-shot `migrate` service stays stopped. A first boot
-without an active release uses project Compose startup to run the bootstrap
-migration; respawns with an active release use migration-free recovery. It
-reapplies the rules before recovery. It retries
-while dockerd is unavailable and shares the deploy lock, so it does not start an
-old release during a rollout. OpenRC respawns the supervisor if it exits. Its
-output is sent to syslog with the `teagram-demo-stack` tag. Start and stop the
-stack with `rc-service teagram-demo-stack start|stop`; invoking Compose directly
-bypasses the ordering guarantee. The read-only `check` mode reports missing,
-duplicate, misordered or drifted hooks and chain rules without changing them.
+OpenRC enables `teagram-demo-egress` after Docker and Tailscale, then a
+supervised `teagram-demo-stack` service after the firewall service. Every
+Compose service has `restart: "no"`, so dockerd cannot start demo containers
+before OpenRC has installed isolation. The stack supervisor creates the
+networks, applies the rules, and then starts Compose. On each Docker-ready
+cycle, it checks firewall hook order and reapplies rules if they drift. Every
+ten seconds it checks the six long-running services and restarts only missing
+services one at a time in dependency order, waiting up to 120 seconds for each
+service to become healthy or start. Recovery starts `teagramd` before waiting
+for HAProxy's health check, and disables dependency startup so the one-shot
+`migrate` service stays stopped. A first boot without an active release uses
+project Compose startup to run the bootstrap migration; respawns with an active
+release use migration-free recovery. It reapplies the rules before recovery. It
+retries while dockerd is unavailable and shares the deploy lock, so it does not
+start an old release during a rollout. OpenRC respawns the supervisor if it
+exits. Its output is sent to syslog with the `teagram-demo-stack` tag. Start and
+stop the stack with `rc-service teagram-demo-stack start|stop`; invoking Compose
+directly bypasses the ordering guarantee. The read-only `check` mode reports
+missing, duplicate, misordered or drifted hooks and chain rules without
+changing them.
 
 On Lima, run the probe as root after the Compose stack is up:
 

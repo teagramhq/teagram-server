@@ -563,6 +563,89 @@ stack_supervise
             )
             self.assertEqual(calls, "1")
 
+    def test_supervisor_reapplies_rules_after_tailscale_forward_hook(self) -> None:
+        shell = r'''
+source "$1"
+require_root() { :; }
+require_repo_path() { :; }
+stack_lock_try() { STACK_LOCK_SKIPPED=0; STACK_LOCK_ACQUIRED=0; }
+stack_start_locked() { :; }
+stack_reconcile_locked() { :; }
+stack_stop() { :; }
+sleep() { kill -TERM "$BASHPID"; }
+stack_supervise
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            mock_bin, state_file = self._mock_firewall(directory)
+            apply = self._run_apply_rules_function(
+                mock_bin, state_file, docker_ready_after=1
+            )
+            self.assertEqual(apply.returncode, 0, apply.stderr)
+
+            env = os.environ.copy()
+            env.update(
+                {
+                    "PATH": os.pathsep.join((str(mock_bin), env.get("PATH", ""))),
+                    "TEAGRAM_TEST_FIREWALL_STATE": str(state_file),
+                    "TEAGRAM_TEST_DOCKER_READY_AFTER": "1",
+                    "TEAGRAM_TEST_DOCKER_INFO_MODE": "ready",
+                    "TEAGRAM_TEST_DOCKER_INFO_COUNT": str(
+                        state_file.with_name("docker-info-count")
+                    ),
+                    "TEAGRAM_TEST_DOCKER_CALL_LOG": str(
+                        state_file.with_name("docker-calls.log")
+                    ),
+                }
+            )
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+            state["iptables"]["ts-forward"] = [
+                "-A ts-forward -o tailscale0 -j ACCEPT"
+            ]
+            state_file.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+            tailscale_hook = subprocess.run(
+                [
+                    str(mock_bin / "iptables"),
+                    "-w",
+                    "10",
+                    "-I",
+                    "FORWARD",
+                    "1",
+                    "-j",
+                    "ts-forward",
+                ],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            self.assertEqual(tailscale_hook.returncode, 0, tailscale_hook.stderr)
+
+            result = subprocess.run(
+                ["bash", "-c", shell, "test-stack-supervisor", str(SCRIPT)],
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=8,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+            expected_hooks = [
+                f"-A FORWARD -s {subnet} -j {IPTABLES_CHAIN}"
+                for subnet in (
+                    "198.18.130.0/24",
+                    "198.18.132.0/24",
+                    "198.18.133.0/24",
+                )
+            ]
+            self.assertEqual(state["iptables"]["FORWARD"][:3], expected_hooks)
+            self.assertGreater(
+                state["iptables"]["FORWARD"].index("-A FORWARD -j ts-forward"), 2
+            )
+            self.assertEqual(
+                state["iptables"]["ts-forward"],
+                ["-A ts-forward -o tailscale0 -j ACCEPT"],
+            )
+
     @unittest.skipUnless(
         os.geteuid() == 0 or shutil.which("sudo"),
         "fake firewall integration requires root or passwordless sudo",

@@ -37,6 +37,10 @@ these rules and is outside this policy's protection.
   disabled so dockerd cannot start containers ahead of the firewall. A
   supervised OpenRC process reapplies the rules before recovering stopped
   services and takes a shared deployment lock to avoid racing a release.
+- Tailscale can insert a forwarding jump ahead of host hooks when it starts.
+  OpenRC orders firewall installation after Tailscale, and the stack supervisor
+  checks hook order on each Docker-ready cycle and reapplies drift under the
+  shared deployment lock.
 
 ## Verification and residual risk
 
