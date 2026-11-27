@@ -14,6 +14,7 @@ MIN_HEADROOM=$((2 * 1024 * 1024))
 MEMORY_SAMPLE_INTERVAL_MS=10
 RUNTIME_SAMPLE_INTERVAL_BYTES=$((512 * 1024))
 LIMA_GOMEMLIMIT=20MiB
+LIMA_GOMEMLIMIT_BYTES=$(( ${LIMA_GOMEMLIMIT%MiB} * 1024 * 1024 ))
 LIMA_MEMORY_PROBE_ATTEMPTS=${LIMA_MEMORY_PROBE_ATTEMPTS:-3}
 MEMORY_CGROUP_DIR=
 MEMORY_CURRENT_FILE=
@@ -320,9 +321,10 @@ if [[ -z $memory_cap_log ]]; then
   exit 1
 fi
 case "$memory_cap_log" in
-  *"cgroup_memory_max_bytes=$EXPECTED_LIMIT"*"go_memory_limit_bytes=$((28 * 1024 * 1024))"*) ;;
+  *"cgroup_memory_max_bytes=$EXPECTED_LIMIT go_memory_limit_bytes=$LIMA_GOMEMLIMIT_BYTES") ;;
   *)
-    printf 'Lima Go memory cap log does not match the probe cgroup and 28 MiB minimum target: %s\n' "$memory_cap_log" >&2
+    printf 'Lima Go memory cap log does not match the probe cgroup and GOMEMLIMIT=%s target (%s bytes): %s\n' \
+      "$LIMA_GOMEMLIMIT" "$LIMA_GOMEMLIMIT_BYTES" "$memory_cap_log" >&2
     exit 1
     ;;
 esac
