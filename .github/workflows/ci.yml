@@ -580,9 +580,8 @@ jobs:
     permissions:
       contents: read
       actions: write
-    # Preparation took 17m in the latest CI run. Leave room for the full 20m
-    # E2E limit, eight minutes for diagnostics and cleanup, and five minutes
-    # of variance.
+    # Preparation took 17m in the latest CI run. Leave room for the 25m
+    # non-E2E package deadline, diagnostics and cleanup, and variance.
     timeout-minutes: 50
 
     env:
@@ -593,7 +592,7 @@ jobs:
       # the same docker-proxy that drops connections under load, which is why
       # pgtest talks to Postgres on the bridge IP instead (MAIN-154, MAIN-156).
       # Ryuk has no such escape hatch: drop its last connection and it SIGKILLs
-      # the shared tg-test-pg container out from under the test binaries still
+      # the selected Postgres container out from under the test binaries still
       # using it, which surfaces as "terminating connection due to unexpected
       # postmaster exit" (57P01) and then "no route to host" for the rest of the
       # e2e suite (MAIN-160).
@@ -603,6 +602,7 @@ jobs:
       # container does outlive the run.
       TESTCONTAINERS_RYUK_DISABLED: "true"
       COMPOSE_PROFILES: local
+      TG_PGTEST_CONTAINER_NAME: tg-test-pg-unit
 
     steps:
       - uses: actions/checkout@v7.0.1
@@ -810,16 +810,13 @@ jobs:
       # bounded retries so transient mirror misses are caught before package tests.
       #
       # Keep the cached non-E2E command in the Makefile unchanged. The remaining
-      # E2E invocation runs once with the same race/count/timeout/package
-      # settings, excluding fixtures and adding JSON output for diagnostics.
+      # non-E2E package pool runs in this job; the independent E2E suite uses a
+      # sibling job and a distinct reusable Postgres container.
       - name: Pre-pull the shared PostgreSQL test image with retry
         run: bash .github/scripts/pull-base-images.sh --image mirror.gcr.io/postgres:18-alpine
 
       - name: Test non-E2E packages
-        run: make test-unit
-
-      - name: Test end-to-end suite with diagnostics
-        run: bash .github/scripts/run-e2e-diagnostics.sh
+        run: make test-unit-packages
 
       # The suite talks to one shared Postgres container, so when that container
       # dies mid-run every remaining test fails with a connection error and the
@@ -829,8 +826,8 @@ jobs:
       - name: Postgres container state on failure
         if: failure()
         run: |
-          docker inspect -f '{{.State.Status}} exit={{.State.ExitCode}} oomkilled={{.State.OOMKilled}} error={{.State.Error}}' tg-test-pg || echo "container gone"
-          docker logs --tail 50 tg-test-pg 2>&1 || true
+          docker inspect -f '{{.State.Status}} exit={{.State.ExitCode}} oomkilled={{.State.OOMKilled}} error={{.State.Error}}' "$TG_PGTEST_CONTAINER_NAME" || echo "container gone"
+          docker logs --tail 50 "$TG_PGTEST_CONTAINER_NAME" 2>&1 || true
           free -m
 
       # This job already restored and used the previous snapshot. Remove older
@@ -849,6 +846,116 @@ jobs:
         with:
           path: ~/.cache/go-build
           key: go-build-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+  test-go-e2e:
+    name: 'test: go-e2e'
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 40
+    env:
+      TESTCONTAINERS_RYUK_DISABLED: "true"
+      TG_PGTEST_CONTAINER_NAME: tg-test-pg-e2e
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Pin migration timestamps for the test cache
+        run: touch -d @0 migrations/* migrations
+
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Restore Go modules
+        uses: actions/cache/restore@v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: go-mod-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: go-mod-${{ runner.os }}-
+
+      - name: Download Go modules
+        run: go mod download
+
+      - name: Restore Go build and test results
+        uses: actions/cache/restore@v6.1.0
+        with:
+          path: ~/.cache/go-build
+          key: go-build-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: go-build-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-
+
+      - name: Pre-pull the shared PostgreSQL test image with retry
+        run: bash .github/scripts/pull-base-images.sh --image mirror.gcr.io/postgres:18-alpine
+
+      - name: Test end-to-end suite with diagnostics
+        run: bash .github/scripts/run-e2e-diagnostics.sh
+
+      - name: Postgres container state on failure
+        if: failure()
+        run: |
+          docker inspect -f '{{.State.Status}} exit={{.State.ExitCode}} oomkilled={{.State.OOMKilled}} error={{.State.Error}}' "$TG_PGTEST_CONTAINER_NAME" || echo "container gone"
+          docker logs --tail 50 "$TG_PGTEST_CONTAINER_NAME" 2>&1 || true
+          free -m
+
+  test-go-fleet-cap:
+    name: 'test: go-fleet-cap'
+    needs:
+      - test-go
+      - test-go-e2e
+    if: >-
+      ${{
+        !cancelled() &&
+        always() &&
+        needs.test-go.result == 'success' &&
+        (needs.test-go-e2e.result == 'success' || needs.test-go-e2e.result == 'failure')
+      }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    env:
+      TESTCONTAINERS_RYUK_DISABLED: "true"
+      TG_PGTEST_CONTAINER_NAME: tg-test-pg-fleet-cap
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Restore Go modules
+        uses: actions/cache/restore@v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: go-mod-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: go-mod-${{ runner.os }}-
+
+      - name: Download Go modules
+        run: go mod download
+
+      - name: Restore Go build and test results
+        uses: actions/cache/restore@v6.1.0
+        with:
+          path: ~/.cache/go-build
+          key: go-build-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: go-build-${{ runner.os }}-${{ hashFiles('**/go.sum') }}-
+
+      - name: Pre-pull the shared PostgreSQL test image with retry
+        run: bash .github/scripts/pull-base-images.sh --image mirror.gcr.io/postgres:18-alpine
+
+      - name: Test exact-cap fleet writer
+        run: make test-fleet-cap
+
+      - name: Postgres container state on failure
+        if: failure()
+        run: |
+          docker inspect -f '{{.State.Status}} exit={{.State.ExitCode}} oomkilled={{.State.OOMKilled}} error={{.State.Error}}' "$TG_PGTEST_CONTAINER_NAME" || echo "container gone"
+          docker logs --tail 50 "$TG_PGTEST_CONTAINER_NAME" 2>&1 || true
+          free -m
 
   test-real-server-fixtures:
     name: 'test: real-server-fixtures'
@@ -2468,6 +2575,8 @@ jobs:
       - test-k8s-deploy
       - publish-k8s-images
       - build-darwin
+      - test-go-e2e
+      - test-go-fleet-cap
     runs-on: ubuntu-26.04
     timeout-minutes: 5
 
@@ -2498,6 +2607,8 @@ jobs:
           K8S_DEPLOY_RESULT: ${{ needs.test-k8s-deploy.result }}
           PUBLISH_K8S_IMAGES_RESULT: ${{ needs.publish-k8s-images.result }}
           BUILD_DARWIN_RESULT: ${{ needs.build-darwin.result }}
+          TEST_GO_E2E_RESULT: ${{ needs.test-go-e2e.result }}
+          TEST_GO_FLEET_CAP_RESULT: ${{ needs.test-go-fleet-cap.result }}
           PULL_REQUEST_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name || '' }}
         run: |
           expected_publish_result=success
@@ -2532,6 +2643,8 @@ jobs:
             "test-k8s-deploy=$K8S_DEPLOY_RESULT"
             "publish-k8s-images=$PUBLISH_K8S_IMAGES_RESULT"
             "build-darwin=$BUILD_DARWIN_RESULT"
+            "test-go-e2e=$TEST_GO_E2E_RESULT"
+            "test-go-fleet-cap=$TEST_GO_FLEET_CAP_RESULT"
           )
           if [[ "$CHECK_SECURITY_RESULT" != "success" ||
                 "$TEST_GO_RESULT" != "success" ||
@@ -2556,7 +2669,9 @@ jobs:
                 "$K8S_MANIFESTS_RESULT" != "success" ||
                 "$K8S_DEPLOY_RESULT" != "success" ||
                 "$PUBLISH_K8S_IMAGES_RESULT" != "$expected_publish_result" ||
-                "$BUILD_DARWIN_RESULT" != "success" ]]; then
+                "$BUILD_DARWIN_RESULT" != "success" ||
+                "$TEST_GO_E2E_RESULT" != "success" ||
+                "$TEST_GO_FLEET_CAP_RESULT" != "success" ]]; then
             echo "::error::Required CI lanes did not pass"
             printf '%s\n' "${lane_results[@]}"
             exit 1
@@ -2577,6 +2692,8 @@ jobs:
     needs:
       - check-security
       - test-go
+      - test-go-e2e
+      - test-go-fleet-cap
       - check-sticker-license
       - test-photo-worker
       - test-real-server-fixtures
@@ -2702,6 +2819,8 @@ jobs:
       - build-browser-acceptance-image
       - ci
       - test-go
+      - test-go-e2e
+      - test-go-fleet-cap
       - test-compose
       - lint-css
       - check-deploy-workflow

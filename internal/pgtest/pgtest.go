@@ -43,10 +43,11 @@ type migration struct {
 var migrations []migration
 
 const (
-	containerName   = "tg-test-pg"
-	templatePrefix  = "tg_template_"
-	advisoryLockKey = 0x7467 // "tg"
-	replayAppName   = "pgtest-migration-replay"
+	containerNameEnv     = "TG_PGTEST_CONTAINER_NAME"
+	defaultContainerName = "tg-test-pg"
+	templatePrefix       = "tg_template_"
+	advisoryLockKey      = 0x7467 // "tg"
+	replayAppName        = "pgtest-migration-replay"
 
 	// readyTimeout bounds the wait for Postgres to accept connections, matching
 	// testcontainers' own 60s startup deadline: long enough for a fresh
@@ -139,8 +140,13 @@ func setup() {
 // ones. waitAccepting asks Postgres itself instead, which nothing can rotate
 // away, and asks over the same DSN the tests use.
 func containerOptions() []testcontainers.ContainerCustomizer {
+	name := os.Getenv(containerNameEnv)
+	if name == "" {
+		name = defaultContainerName
+	}
+
 	return []testcontainers.ContainerCustomizer{
-		testcontainers.WithReuseByName(containerName),
+		testcontainers.WithReuseByName(name),
 		tcnet.WithBridgeNetwork(),
 		postgres.WithDatabase("postgres"),
 		postgres.WithUsername("postgres"),

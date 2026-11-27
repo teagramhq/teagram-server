@@ -179,6 +179,55 @@ def run_gate(
 
 
 class RealServerFixtureGateTests(unittest.TestCase):
+    def test_go_test_suites_run_concurrently_with_isolated_postgres(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+        jobs: dict[str, str] = {}
+        for job_name in ("test-go", "test-go-e2e", "test-go-fleet-cap"):
+            job = re.search(
+                rf"(?ms)^  {re.escape(job_name)}:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+                workflow,
+            )
+            self.assertIsNotNone(job, f"CI workflow has no {job_name} job")
+            jobs[job_name] = job.group("body")
+
+        self.assertRegex(jobs["test-go"], r"(?m)^    name: 'test: go'$")
+        self.assertRegex(jobs["test-go"], r"(?m)^      TG_PGTEST_CONTAINER_NAME: tg-test-pg-unit$")
+        self.assertIn("run: make test-unit-packages", jobs["test-go"])
+        self.assertNotIn("run-e2e-diagnostics.sh", jobs["test-go"])
+
+        e2e = jobs["test-go-e2e"]
+        self.assertRegex(e2e, r"(?m)^    name: 'test: go-e2e'$")
+        self.assertNotRegex(e2e, r"(?m)^    needs:")
+        self.assertRegex(e2e, r"(?m)^      TG_PGTEST_CONTAINER_NAME: tg-test-pg-e2e$")
+        self.assertIn("run: bash .github/scripts/run-e2e-diagnostics.sh", e2e)
+        self.assertIn("name: Postgres container state on failure", e2e)
+
+        fleet_cap = jobs["test-go-fleet-cap"]
+        self.assertRegex(fleet_cap, r"(?m)^    name: 'test: go-fleet-cap'$")
+        self.assertRegex(
+            fleet_cap,
+            r"(?ms)^    needs:\n      - test-go\n      - test-go-e2e\n",
+        )
+        self.assertIn("needs.test-go-e2e.result == 'failure'", fleet_cap)
+        self.assertRegex(fleet_cap, r"(?m)^      TG_PGTEST_CONTAINER_NAME: tg-test-pg-fleet-cap$")
+        self.assertIn("run: make test-fleet-cap", fleet_cap)
+        self.assertIn("name: Postgres container state on failure", fleet_cap)
+
+        for gate_name in ("ci", "publish-k8s-images", "publish-demo-image"):
+            gate = re.search(
+                rf"(?ms)^  {re.escape(gate_name)}:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+                workflow,
+            )
+            self.assertIsNotNone(gate, f"CI workflow has no {gate_name} gate")
+            for job_name in ("test-go-e2e", "test-go-fleet-cap"):
+                self.assertRegex(
+                    gate.group("body"),
+                    rf"(?m)^      - {re.escape(job_name)}$",
+                    f"{gate_name} must wait for {job_name}",
+                )
+
     def test_qa_invite_verification_token_is_process_scoped(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         workflow = (repo_root / ".github/workflows/real-client-browser-flow.yml").read_text(encoding="utf-8")
@@ -360,6 +409,8 @@ class RealServerFixtureGateTests(unittest.TestCase):
         for job_name in (
             "check-sticker-license",
             "test-go",
+            "test-go-e2e",
+            "test-go-fleet-cap",
             "test-e2e-admin",
             "test-real-server-fixtures",
             "build-server-image",
