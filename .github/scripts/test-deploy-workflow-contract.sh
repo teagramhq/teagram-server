@@ -76,22 +76,24 @@ ci_query() {
 check_ci_contract() {
   [[ "$(ci_query '.on | keys | sort | join(",")')" == 'merge_group,pull_request,push' ]] ||
     ci_fail 'triggers must be exactly merge_group, pull_request, and push'
-  [[ "$(ci_query '.jobs."check-deploy-workflow".steps[] | select(.name == "Run independent deploy workflow checks in a fixed 4-worker pool") | .run')" == 'bash .github/scripts/run-deploy-workflow-checks.sh' ]] ||
+  [[ "$(ci_query '.jobs."check-deploy-workflow".steps[] | select(.name == "Run independent deploy workflow checks in a fixed 3-worker pool") | .run')" == 'bash .github/scripts/run-deploy-workflow-checks.sh' ]] ||
     ci_fail 'the deploy workflow contracts must use the bounded check runner'
-  grep -Fq 'readonly WORKER_COUNT=4' .github/scripts/run-deploy-workflow-checks.sh ||
-    ci_fail 'the deploy workflow contract worker count must remain fixed at four'
+  grep -Fq 'readonly WORKER_COUNT=3' .github/scripts/run-deploy-workflow-checks.sh ||
+    ci_fail 'the deploy workflow contract worker count must remain fixed at three'
   grep -Fq 'sudo -n unshare --mount --propagation private' .github/scripts/run-deploy-workflow-checks.sh ||
     ci_fail 'the alpha bootstrap fixture must receive a private root filesystem in the worker pool'
   grep -Fq "GOPROXY='https://proxy.golang.org|direct' .github/scripts/test-perf-workflow-contract.sh" .github/scripts/run-deploy-workflow-checks.sh ||
     ci_fail 'the RPC performance contract must fall back to direct downloads when the module proxy fails'
-  grep -Fq "'Check Lima demo egress isolation'" .github/scripts/run-deploy-workflow-checks.sh &&
-    grep -Fq 'python3 -B deploy/teagram-demo/lima/test-egress-isolation-rules.py' .github/scripts/run-deploy-workflow-checks.sh ||
+  if ! grep -Fq "'Check Lima demo egress isolation'" .github/scripts/run-deploy-workflow-checks.sh ||
+    ! grep -Fq 'python3 -B deploy/teagram-demo/lima/test-egress-isolation-rules.py' .github/scripts/run-deploy-workflow-checks.sh; then
     ci_fail 'the Lima demo egress isolation contract must stay in the deploy workflow worker pool'
-  grep -Fq 'deploy/teagram-demo/test-tailnet-source-address.sh' .github/scripts/run-deploy-workflow-checks.sh &&
-    grep -Fq 'deploy/teagram-demo/lima/install-egress-isolation.sh' .github/scripts/run-deploy-workflow-checks.sh &&
-    grep -Fq '.github/scripts/lima-memory-process-snapshot.sh' .github/scripts/run-deploy-workflow-checks.sh &&
-    grep -Fq '.github/scripts/test-lima-memory-process-snapshot.sh' .github/scripts/run-deploy-workflow-checks.sh ||
+  fi
+  if ! grep -Fq 'deploy/teagram-demo/test-tailnet-source-address.sh' .github/scripts/run-deploy-workflow-checks.sh ||
+    ! grep -Fq 'deploy/teagram-demo/lima/install-egress-isolation.sh' .github/scripts/run-deploy-workflow-checks.sh ||
+    ! grep -Fq '.github/scripts/lima-memory-process-snapshot.sh' .github/scripts/run-deploy-workflow-checks.sh ||
+    ! grep -Fq '.github/scripts/test-lima-memory-process-snapshot.sh' .github/scripts/run-deploy-workflow-checks.sh; then
     ci_fail 'the deploy workflow pool must retain the new main-branch syntax and snapshot checks'
+  fi
   [[ "$(ci_query '.on.merge_group.types | join(",")')" == 'checks_requested' ]] ||
     ci_fail 'merge-group CI must run when checks are requested'
   [[ "$(ci_query '.on.push.branches | join(",")')" == 'main' ]] ||
@@ -169,7 +171,7 @@ check_ci_contract() {
     ci_fail 'the git-hooks lane must run the pre-push regression fixture'
   local qa_password_step_names qa_password_pull
   qa_password_step_names="$(ci_query '.jobs."check-deploy-workflow".steps | map(.name) | join("|")')"
-  [[ "$qa_password_step_names" == *'Pull PostgreSQL image for QA password timestamp check|Pull PostgreSQL 18 image for media dump validation|Run independent deploy workflow checks in a fixed 4-worker pool'* ]] ||
+  [[ "$qa_password_step_names" == *'Pull PostgreSQL image for QA password timestamp check|Pull PostgreSQL 18 image for media dump validation|Run independent deploy workflow checks in a fixed 3-worker pool'* ]] ||
     ci_fail 'the QA password timestamp check must preload PostgreSQL through the retry/fallback helper'
   qa_password_pull="$(ci_query '.jobs."check-deploy-workflow".steps[] | select(.name == "Pull PostgreSQL image for QA password timestamp check") | .run')"
   [[ "$qa_password_pull" == 'bash .github/scripts/pull-base-images.sh --image mirror.gcr.io/library/postgres:18-alpine' ]] ||

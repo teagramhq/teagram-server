@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Keep this pool bounded for the ubuntu-26.04 runner; never size it from nproc.
-readonly WORKER_COUNT=4
+# Keep this pool below the ubuntu-26.04 runner's core count; never size it from nproc.
+readonly WORKER_COUNT=3
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -P "$SCRIPT_DIR/../.." && pwd)
 readonly SCRIPT_DIR REPO_ROOT
@@ -408,6 +408,7 @@ if [[ "${1:-}" == '--task' ]]; then
   task_name=${CHECKS[$task_index]:?unknown task index: $task_index}
   pool_dir=${DEPLOY_CHECK_POOL_DIR:?worker pool directory is required}
   started_ns=$(date +%s%N)
+  # shellcheck disable=SC2329 # EXIT traps invoke this worker finalizer.
   finish_task() {
     local status=$? finished_ns
     trap - EXIT
@@ -427,6 +428,7 @@ fi
 [[ $# -eq 0 ]] || { printf 'usage: %s\n' "${BASH_SOURCE[0]}" >&2; exit 64; }
 
 pool_dir=$(mktemp -d)
+# shellcheck disable=SC2329 # EXIT trap removes the worker artifacts after reporting.
 cleanup() { rm -rf -- "$pool_dir"; }
 trap cleanup EXIT
 export DEPLOY_CHECK_POOL_DIR=$pool_dir
