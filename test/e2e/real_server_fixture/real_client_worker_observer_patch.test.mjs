@@ -168,6 +168,18 @@ function peerSelectionHarness(t, states, {
   };
 }
 
+test('observer patch replaces the current stable peer selection', async (t) => {
+  const sourceRoot = process.env.REAL_CLIENT_WEB_ROOT;
+  assert.ok(sourceRoot, 'REAL_CLIENT_WEB_ROOT must name the pinned companion checkout');
+  const sourceBrowser = readFileSync(join(sourceRoot, 'scripts/real-client/browser.cjs'), 'utf8');
+  assert.ok(sourceBrowser.includes('const SEARCH_RESULT_STABILITY_MS = 250;'));
+
+  const {browserPath} = patchBrowserForTest(t, {document: {querySelectorAll: () => []}}, {exposePeerSelection: true});
+  const patchedBrowser = readFileSync(browserPath, 'utf8');
+  assert.match(patchedBrowser, /const \{selectedRow, peerId\} = await waitForUniquePeerSearchResult/);
+  assert.doesNotMatch(patchedBrowser, /Search results can be replaced while the query is still settling/);
+});
+
 test('peer selection waits for one visible matching row after stale and duplicate results', async (t) => {
   assert.equal(typeof patchRealClientObserver, 'function');
   const states = [
