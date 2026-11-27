@@ -279,7 +279,15 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 			statsTarget,
 		)},
 		{query: fmt.Sprintf(
-			"ALTER INDEX channel_messages_channel_custom_emoji_document_ids_gin_idx ALTER COLUMN 2 SET STATISTICS %d",
+			"ALTER TABLE channel_messages ALTER COLUMN channel_id SET STATISTICS %d",
+			statsTarget,
+		)},
+		{query: fmt.Sprintf(
+			"ALTER TABLE channel_messages ALTER COLUMN local_id SET STATISTICS %d",
+			statsTarget,
+		)},
+		{query: fmt.Sprintf(
+			"ALTER INDEX channel_messages_floor_custom_emoji_document_ids_gin_idx ALTER COLUMN 3 SET STATISTICS %d",
 			statsTarget,
 		)},
 		{query: "ANALYZE messages"},
@@ -291,21 +299,26 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 			t.Fatalf("seed scaled emoji history: %v", err)
 		}
 	}
-	// Check that ANALYZE used the expression-index target set for this fixture.
-	for _, index := range []string{
-		"messages_owner_custom_emoji_document_ids_gin_idx",
-		"channel_messages_channel_custom_emoji_document_ids_gin_idx",
+	// Check that ANALYZE used the raised statistics targets for each index key.
+	for _, key := range []struct {
+		relation string
+		attnum   int
+	}{
+		{relation: "messages_owner_custom_emoji_document_ids_gin_idx", attnum: 2},
+		{relation: "channel_messages", attnum: 1},
+		{relation: "channel_messages", attnum: 2},
+		{relation: "channel_messages_floor_custom_emoji_document_ids_gin_idx", attnum: 3},
 	} {
 		var target int
 		if err := pool.QueryRow(ctx, `
 			SELECT COALESCE(attstattarget, -1)
 			FROM pg_attribute
-			WHERE attrelid = to_regclass($1) AND attnum = 2
-		`, index).Scan(&target); err != nil {
-			t.Fatalf("read %s statistics target: %v", index, err)
+			WHERE attrelid = to_regclass($1) AND attnum = $2
+		`, key.relation, key.attnum).Scan(&target); err != nil {
+			t.Fatalf("read %s column %d statistics target: %v", key.relation, key.attnum, err)
 		}
 		if target != statsTarget {
-			t.Errorf("%s expression statistics target = %d, want %d", index, target, statsTarget)
+			t.Errorf("%s column %d statistics target = %d, want %d", key.relation, key.attnum, target, statsTarget)
 		}
 	}
 
@@ -367,17 +380,17 @@ func TestUserStickerSetMessageReferencedFileIDsScopesPrivateAndChannelHistoryAtS
 	if err := json.Unmarshal(raw, &plans); err != nil {
 		t.Fatalf("decode historical emoji plan: %v", err)
 	}
-	// The private-message branch uses the document GIN index. The channel branch
-	// starts from its channel-local history floor using the primary key.
+	// Both branches use scoped document indexes. The channel index also applies
+	// the member's history floor while generating candidates.
 	if !plans[0].Plan.usesIndex("messages_owner_custom_emoji_document_ids_gin_idx") {
 		t.Errorf("historical emoji plan does not use the private-message GIN index: %s", strings.Join(plans[0].Plan.accessSummary(), "; "))
 	}
-	if !plans[0].Plan.usesIndex("channel_messages_pkey") {
-		t.Errorf("historical emoji plan does not use the channel history primary key: %s", strings.Join(plans[0].Plan.accessSummary(), "; "))
+	if !plans[0].Plan.usesIndex("channel_messages_floor_custom_emoji_document_ids_gin_idx") {
+		t.Errorf("historical emoji plan does not use the channel history GIN index: %s", strings.Join(plans[0].Plan.accessSummary(), "; "))
 	}
 	for _, index := range []string{
 		"messages_owner_custom_emoji_document_ids_gin_idx",
-		"channel_messages_channel_custom_emoji_document_ids_gin_idx",
+		"channel_messages_floor_custom_emoji_document_ids_gin_idx",
 	} {
 		var predicate string
 		if err := pool.QueryRow(ctx, `
