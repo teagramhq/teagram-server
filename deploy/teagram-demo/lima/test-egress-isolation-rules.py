@@ -40,6 +40,7 @@ import json
 import os
 import pathlib
 import sys
+import time
 
 state_path = pathlib.Path(os.environ["TEAGRAM_TEST_FIREWALL_STATE"])
 state = json.loads(state_path.read_text(encoding="utf-8"))
@@ -58,6 +59,12 @@ if tool == "docker":
             count = 0
         count += 1
         count_path.write_text(str(count), encoding="utf-8")
+        info_mode = os.environ.get("TEAGRAM_TEST_DOCKER_INFO_MODE", "ready")
+        if info_mode == "stall":
+            time.sleep(30)
+        if info_mode == "fail":
+            print("fake Docker daemon is not ready", file=sys.stderr)
+            raise SystemExit(1)
         ready_after = int(os.environ.get("TEAGRAM_TEST_DOCKER_READY_AFTER", "1"))
         if count < ready_after:
             print("fake Docker daemon is not ready", file=sys.stderr)
@@ -280,6 +287,7 @@ class EgressIsolationRuleTests(unittest.TestCase):
         mock_bin: pathlib.Path,
         state_file: pathlib.Path,
         docker_ready_after: int,
+        docker_info_mode: str = "ready",
     ) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env.update(
@@ -290,6 +298,7 @@ class EgressIsolationRuleTests(unittest.TestCase):
                 "TEAGRAM_TEST_IPV6_NETWORKS": "",
                 "TEAGRAM_TEST_LISTING_FAILURE": "",
                 "TEAGRAM_TEST_DOCKER_READY_AFTER": str(docker_ready_after),
+                "TEAGRAM_TEST_DOCKER_INFO_MODE": docker_info_mode,
                 "TEAGRAM_TEST_DOCKER_INFO_COUNT": str(
                     state_file.with_name("docker-info-count")
                 ),
@@ -309,6 +318,47 @@ class EgressIsolationRuleTests(unittest.TestCase):
             capture_output=True,
             text=True,
             env=env,
+        )
+
+    def _run_wait_for_docker_function(
+        self,
+        mock_bin: pathlib.Path,
+        state_file: pathlib.Path,
+        *,
+        docker_info_mode: str,
+        ready_timeout_seconds: int,
+        probe_timeout_seconds: int,
+        wall_timeout_seconds: int,
+    ) -> subprocess.CompletedProcess[str]:
+        env = os.environ.copy()
+        env.update(
+            {
+                "PATH": os.pathsep.join((str(mock_bin), env.get("PATH", ""))),
+                "TEAGRAM_TEST_FIREWALL_STATE": str(state_file),
+                "TEAGRAM_TEST_DOCKER_READY_AFTER": "1",
+                "TEAGRAM_TEST_DOCKER_INFO_MODE": docker_info_mode,
+                "TEAGRAM_TEST_DOCKER_INFO_COUNT": str(
+                    state_file.with_name("docker-info-count")
+                ),
+                "TEAGRAM_TEST_DOCKER_CALL_LOG": str(
+                    state_file.with_name("docker-calls.log")
+                ),
+            }
+        )
+        return subprocess.run(
+            [
+                "bash",
+                "-c",
+                'source "$1"; wait_for_docker "$2" "$3"',
+                "test-wait-for-docker",
+                str(SCRIPT),
+                str(ready_timeout_seconds),
+                str(probe_timeout_seconds),
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=wall_timeout_seconds,
         )
 
     def _firewall_listings(
@@ -422,6 +472,96 @@ class EgressIsolationRuleTests(unittest.TestCase):
             ).splitlines()
             self.assertEqual(calls, ["info"] * 60)
             self.assertEqual(state_file.read_bytes(), before)
+
+    def test_wait_for_docker_bounds_immediate_failures_by_deadline(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            mock_bin, state_file = self._mock_firewall(directory)
+
+            result = self._run_wait_for_docker_function(
+                mock_bin,
+                state_file,
+                docker_info_mode="fail",
+                ready_timeout_seconds=2,
+                probe_timeout_seconds=1,
+                wall_timeout_seconds=4,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(
+                "Docker daemon did not become ready within 2 seconds", result.stderr
+            )
+            calls = state_file.with_name("docker-info-count").read_text(
+                encoding="utf-8"
+            )
+            self.assertGreater(int(calls), 0)
+
+    def test_wait_for_docker_bounds_stalled_docker_info(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            mock_bin, state_file = self._mock_firewall(directory)
+
+            result = self._run_wait_for_docker_function(
+                mock_bin,
+                state_file,
+                docker_info_mode="stall",
+                ready_timeout_seconds=2,
+                probe_timeout_seconds=5,
+                wall_timeout_seconds=4,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(
+                "Docker daemon did not become ready within 2 seconds", result.stderr
+            )
+            calls = state_file.with_name("docker-info-count").read_text(
+                encoding="utf-8"
+            )
+            self.assertEqual(calls, "1")
+
+    def test_supervisor_bounds_stalled_docker_info_probe(self) -> None:
+        shell = r'''
+source "$1"
+require_root() { :; }
+require_repo_path() { :; }
+stack_lock_try() { STACK_LOCK_SKIPPED=0; STACK_LOCK_ACQUIRED=0; }
+stack_start_locked() { :; }
+stack_reconcile_locked() { :; }
+stack_stop() { :; }
+sleep() { kill -TERM "$BASHPID"; }
+stack_supervise
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            mock_bin, state_file = self._mock_firewall(directory)
+            env = os.environ.copy()
+            env.update(
+                {
+                    "PATH": os.pathsep.join((str(mock_bin), env.get("PATH", ""))),
+                    "TEAGRAM_TEST_FIREWALL_STATE": str(state_file),
+                    "TEAGRAM_TEST_DOCKER_INFO_MODE": "stall",
+                    "TEAGRAM_TEST_DOCKER_INFO_COUNT": str(
+                        state_file.with_name("docker-info-count")
+                    ),
+                    "TEAGRAM_TEST_DOCKER_CALL_LOG": str(
+                        state_file.with_name("docker-calls.log")
+                    ),
+                }
+            )
+            try:
+                result = subprocess.run(
+                    ["bash", "-c", shell, "test-stack-supervisor", str(SCRIPT)],
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    timeout=8,
+                )
+            except subprocess.TimeoutExpired:
+                self.fail("stack supervisor blocked indefinitely in docker info")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Docker daemon is unavailable", result.stdout)
+            calls = state_file.with_name("docker-info-count").read_text(
+                encoding="utf-8"
+            )
+            self.assertEqual(calls, "1")
 
     @unittest.skipUnless(
         os.geteuid() == 0 or shutil.which("sudo"),

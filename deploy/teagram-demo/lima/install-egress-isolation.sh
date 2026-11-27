@@ -6,6 +6,8 @@ readonly IPTABLES_INPUT_CHAIN=TEAGRAM_DEMO_INPUT
 readonly INPUT_BRIDGE_INTERFACE=br+
 readonly OPENRC_SERVICE=teagram-demo-egress
 readonly OPENRC_STACK_SERVICE=teagram-demo-stack
+readonly DOCKER_READY_TIMEOUT_SECONDS=60
+readonly DOCKER_INFO_PROBE_TIMEOUT_SECONDS=5
 readonly DOCKER_READY_ATTEMPTS=60
 readonly REPO_ROOT=/opt/teagram-demo
 readonly COMPOSE_FILE=/opt/teagram-demo/deploy/teagram-demo/lima/compose.yaml
@@ -50,19 +52,37 @@ require_root() {
   [[ "$EUID" -eq 0 ]] || fail 'must run as root'
 }
 
+docker_info_ready() {
+  local probe_timeout_seconds=${1:-$DOCKER_INFO_PROBE_TIMEOUT_SECONDS}
+
+  command -v timeout >/dev/null 2>&1 || fail 'timeout is required on lima'
+  timeout "$probe_timeout_seconds" docker info >/dev/null 2>&1
+}
+
 wait_for_docker() {
-  local attempt
+  local ready_timeout_seconds=${1:-$DOCKER_READY_TIMEOUT_SECONDS}
+  local max_probe_timeout_seconds=${2:-$DOCKER_INFO_PROBE_TIMEOUT_SECONDS}
+  local attempt remaining probe_timeout_seconds
+  local deadline=$((SECONDS + ready_timeout_seconds))
 
   command -v docker >/dev/null 2>&1 || fail 'docker is required on lima'
-  for ((attempt = 1; attempt <= DOCKER_READY_ATTEMPTS; attempt++)); do
-    if docker info >/dev/null 2>&1; then
+  for ((attempt = 1; attempt <= DOCKER_READY_ATTEMPTS && SECONDS < deadline; attempt++)); do
+    remaining=$((deadline - SECONDS))
+    probe_timeout_seconds=$max_probe_timeout_seconds
+    if (( probe_timeout_seconds > remaining )); then
+      probe_timeout_seconds=$remaining
+    fi
+    if (( probe_timeout_seconds < 1 )); then
+      break
+    fi
+    if docker_info_ready "$probe_timeout_seconds"; then
       return 0
     fi
-    if (( attempt < DOCKER_READY_ATTEMPTS )); then
+    if (( attempt < DOCKER_READY_ATTEMPTS && SECONDS < deadline )); then
       sleep 1
     fi
   done
-  fail "Docker daemon did not become ready within ${DOCKER_READY_ATTEMPTS} seconds"
+  fail "Docker daemon did not become ready within ${ready_timeout_seconds} seconds"
 }
 
 render_rules() {
@@ -630,7 +650,7 @@ stack_supervise() {
   done
 
   while true; do
-    if docker info >/dev/null 2>&1; then
+    if docker_info_ready "$DOCKER_INFO_PROBE_TIMEOUT_SECONDS"; then
       if [[ $docker_state == unavailable ]]; then
         printf '%s\n' 'Docker daemon recovered; checking Lima demo services'
       fi

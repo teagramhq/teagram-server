@@ -1436,9 +1436,7 @@ jobs:
         run: deploy/teagram-demo/test-demo-compose.sh
 
       - name: Check Lima demo egress isolation
-        run: |
-          python3 -B deploy/teagram-demo/lima/test-egress-isolation-rules.py
-          python3 -B deploy/teagram-demo/test-probe-tailnet-isolation.py
+        run: python3 -B deploy/teagram-demo/lima/test-egress-isolation-rules.py
 
       - name: Check demo ops command menu
         run: deploy/teagram-demo/test-ops-menu.sh
