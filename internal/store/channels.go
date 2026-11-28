@@ -838,15 +838,15 @@ func (s *Store) JoinChannelByInvite(ctx context.Context, hash string, userID int
 // that are already present or at either admission cap are silently skipped; the
 // returned ids name only rows this call inserted.
 //
-// Lock order is the existing rights-mutation channel row first, then the
-// channel_state row used by joins, then sorted account advisory locks. The role
-// is read again after LockChannel, so a demotion that commits first denies this
-// operation. channel_state serializes this channel's participant count and
-// supplies the same pts all new rows use; account locks serialize quota checks
-// across channels. An advisory add_chat_user budget read for distinct absent
-// targets follows those locks before membership writes; its final charge stays
-// atomic with the mutation and follows the writes, so no channel lock is
-// acquired while the counter is held.
+// Lock order starts with the existing rights-mutation channel row. While holding
+// it, the caller role and distinct absent targets are read, and the add_chat_user
+// budget is checked before taking the channel_state row or sorted account
+// advisory locks. The role is read again after LockChannel, so a demotion that
+// commits first denies this operation. channel_state serializes this channel's
+// participant count and supplies the same pts all new rows use; account locks
+// serialize quota checks across channels. The final charge stays atomic with the
+// mutation and follows the writes, so no channel lock is acquired while the
+// counter is held.
 func (s *Store) AddChannelMembers(ctx context.Context, channelID, callerID int64, targetIDs []int64) ([]int64, error) {
 	return s.addChannelMembers(ctx, channelID, callerID, targetIDs, RateLimitConfig{})
 }
