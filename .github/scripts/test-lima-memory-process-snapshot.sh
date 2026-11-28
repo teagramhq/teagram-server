@@ -14,6 +14,11 @@ runtime_stop=
 sample_peak_writer_pid=
 runtime_sampler_pid=
 cgroup_sampler_pid=
+mapping_cgroup_stop=
+mapping_worker_stop=
+mapping_worker_release=
+mapping_worker_pid=
+mapping_cgroup_sampler_pid=
 cleanup_fixture() {
   local status=$?
   trap - EXIT
@@ -21,7 +26,11 @@ cleanup_fixture() {
   [[ -n ${runtime_final_request_release:-} ]] && : >"$runtime_final_request_release" 2>/dev/null || true
   [[ -n ${runtime_cgroup_stop:-} ]] && : >"$runtime_cgroup_stop" 2>/dev/null || true
   [[ -n ${runtime_stop:-} ]] && : >"$runtime_stop" 2>/dev/null || true
-  for pid in "${sample_peak_writer_pid:-}" "${runtime_sampler_pid:-}" "${cgroup_sampler_pid:-}"; do
+  [[ -n ${mapping_worker_release:-} ]] && : >"$mapping_worker_release" 2>/dev/null || true
+  [[ -n ${mapping_worker_stop:-} ]] && : >"$mapping_worker_stop" 2>/dev/null || true
+  [[ -n ${mapping_cgroup_stop:-} ]] && : >"$mapping_cgroup_stop" 2>/dev/null || true
+  for pid in "${sample_peak_writer_pid:-}" "${runtime_sampler_pid:-}" "${cgroup_sampler_pid:-}" \
+    "${mapping_worker_pid:-}" "${mapping_cgroup_sampler_pid:-}"; do
     if [[ -n $pid ]]; then
       wait "$pid" 2>/dev/null || true
     fi
@@ -69,18 +78,20 @@ Rss:                   4 kB
 Anonymous:             0 kB
 EOF
 
-mapping_snapshot=$(lima_memory_process_mapping_snapshot "$proc_root" 101 | cut -d'|' -f1,2)
+mapping_snapshot=$(lima_memory_process_mapping_snapshot "$proc_root" 101)
 expected=$'8192|4096\n4096|0'
-if [[ "$mapping_snapshot" != "$expected" ]]; then
+if [[ $(sed -n '1p' <<<"$mapping_snapshot") != mapping_sample_unix_nano=* ||
+  $(sed -n '2p' <<<"$mapping_snapshot") != mapping_anon_bytes=4096 ||
+  $(sed -n '3,4p' <<<"$mapping_snapshot" | cut -d'|' -f1,2) != "$expected" ]]; then
   printf 'mapping RSS snapshot = %s, want %s\n' "$mapping_snapshot" "$expected" >&2
   exit 1
 fi
 curl() {
-  printf '%s\n' '{"sample_unix_nano":123,"mappings":[{"rss_bytes":8192,"anonymous_bytes":4096,"mapping":"10000000-10002000 rw-p 00000000 00:00 0 [heap]"},{"rss_bytes":4096,"anonymous_bytes":0,"mapping":"20000000-20001000 r--p 00000000 00:00 0 /fixture/map.dat"}]}'
+  printf '%s\n' '{"sample_unix_nano":123,"total_anonymous_bytes":16384,"mappings":[{"rss_bytes":8192,"anonymous_bytes":4096,"mapping":"10000000-10002000 rw-p 00000000 00:00 0 [heap]"},{"rss_bytes":4096,"anonymous_bytes":0,"mapping":"20000000-20001000 r--p 00000000 00:00 0 /fixture/map.dat"}]}'
 }
 mapping_snapshot=$(LIMA_MEMORY_MAPPING_ENDPOINT=http://127.0.0.1:2447/debug/runtime-memory-mappings \
   lima_memory_process_mapping_snapshot "$proc_root" 101)
-if [[ "$mapping_snapshot" != $'mapping_sample_unix_nano=123\n8192|4096|10000000-10002000 rw-p 00000000 00:00 0 [heap]\n4096|0|20000000-20001000 r--p 00000000 00:00 0 /fixture/map.dat' ]]; then
+if [[ "$mapping_snapshot" != $'mapping_sample_unix_nano=123\nmapping_anon_bytes=16384\n8192|4096|10000000-10002000 rw-p 00000000 00:00 0 [heap]\n4096|0|20000000-20001000 r--p 00000000 00:00 0 /fixture/map.dat' ]]; then
   printf 'endpoint mapping snapshot = %s, want fixture mappings in RSS order\n' "$mapping_snapshot" >&2
   exit 1
 fi
@@ -96,7 +107,7 @@ fi
 export -f lima_memory_process_mapping_snapshot
 export -f curl
 mapping_snapshot_in_child=$(bash -c 'lima_memory_process_mapping_snapshot "$1" 101' _ "$proc_root")
-if [[ "$mapping_snapshot_in_child" != $'mapping_sample_unix_nano=123\n8192|4096|10000000-10002000 rw-p 00000000 00:00 0 [heap]\n4096|0|20000000-20001000 r--p 00000000 00:00 0 /fixture/map.dat' ]]; then
+if [[ "$mapping_snapshot_in_child" != $'mapping_sample_unix_nano=123\nmapping_anon_bytes=16384\n8192|4096|10000000-10002000 rw-p 00000000 00:00 0 [heap]\n4096|0|20000000-20001000 r--p 00000000 00:00 0 /fixture/map.dat' ]]; then
   printf 'mapping snapshot in sampler child = %s, want timestamped mapping rows\n' \
     "$mapping_snapshot_in_child" >&2
   exit 1
@@ -169,69 +180,192 @@ if [[ $(<"$sample_prefix-stat-peak") != 2500000 || $(<"$sample_prefix-current") 
   exit 1
 fi
 
+peak_history="$fixture/peak-history"
+cat >"$peak_history" <<'EOF'
+100|34578432|19959808|0|6918144|34578432|101|45355008|20041728|0|-|incomplete|102|39825408
+200|27119616|19959808|0|6918144|27119616|101|45355008|20041728|0|-|complete|-|39825408
+EOF
+if ! declare -F lima_memory_best_cgroup_sample >/dev/null; then
+  printf 'independent best cgroup sample selector is missing\n' >&2
+  exit 1
+fi
+best_process_sample=$(lima_memory_best_cgroup_sample "$peak_history")
+expected='100|34578432|19959808|0|6918144|34578432|101|45355008|20041728|0|-|incomplete|102|39825408'
+if [[ "$best_process_sample" != "$expected" ]]; then
+  printf 'independent process peak sample = %s, want %s\n' "$best_process_sample" "$expected" >&2
+  exit 1
+fi
+IFS='|' read -r _ best_process_peak _ _ _ _ _ _ _ _ _ best_process_attribution best_process_incomplete_pids _ \
+  <<<"$best_process_sample"
+if [[ $best_process_attribution != incomplete || $best_process_peak != 34578432 ]]; then
+  printf 'best process sample did not preserve the incomplete high-current row\n' >&2
+  exit 1
+fi
+if lima_memory_process_attribution_check 10 "$best_process_peak" "$best_process_attribution" \
+  "$best_process_incomplete_pids" >/dev/null 2>&1; then
+  printf 'diagnostic gate accepted incomplete attribution from the independent peak sample\n' >&2
+  exit 1
+fi
+
 mapping_cgroup="$fixture/mapping-cgroup"
 mapping_prefix="$fixture/mapping-sample"
+mapping_ready="$mapping_prefix-mappings-ready"
+mapping_worker_stop="$fixture/mapping-worker-stop"
+mapping_worker_error="$fixture/mapping-worker-error"
+mapping_worker_request_started="$fixture/mapping-worker-request-started"
+mapping_worker_release="$fixture/mapping-worker-release"
+mapping_worker_calls_file="$fixture/mapping-worker-calls"
+mapping_cgroup_stop="$fixture/mapping-cgroup-stop"
 mkdir -p "$mapping_cgroup"
 printf '101\n102\n' >"$mapping_cgroup/cgroup.procs"
 printf '3145728\n' >"$mapping_cgroup/memory.peak"
 printf '2000000\n' >"$mapping_cgroup/memory.current"
 printf 'low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\n' >"$mapping_cgroup/memory.events"
 printf 'anon 1500000\nfile 100000\nkernel 500000\n' >"$mapping_cgroup/memory.stat"
-mapping_curl_calls_file="$fixture/mapping-curl-calls"
-printf '0\n' >"$mapping_curl_calls_file"
-export mapping_curl_calls_file
+printf '0\n' >"$mapping_worker_calls_file"
+mkdir -p "$proc_root/105"
+cat >"$proc_root/105/status" <<'EOF'
+Name:   photothumb
+VmRSS:  95 kB
+RssAnon: 90 kB
+EOF
+export mapping_worker_calls_file mapping_worker_request_started mapping_worker_release
 curl() {
-  local mapping_curl_calls
-  mapping_curl_calls=$(<"$mapping_curl_calls_file")
-  mapping_curl_calls=$((mapping_curl_calls + 1))
-  printf '%s\n' "$mapping_curl_calls" >"$mapping_curl_calls_file"
-  if (( mapping_curl_calls == 1 )); then
-    return 7
+  local mapping_worker_calls sample_unix_nano mapping_anon_bytes
+  mapping_worker_calls=$(<"$mapping_worker_calls_file")
+  mapping_worker_calls=$((mapping_worker_calls + 1))
+  printf '%s\n' "$mapping_worker_calls" >"$mapping_worker_calls_file"
+  if (( mapping_worker_calls == 2 )); then
+    : >"$mapping_worker_request_started"
+    while [[ ! -e "$mapping_worker_release" ]]; do
+      sleep 0.01
+    done
   fi
-  printf '%s\n' '{"sample_unix_nano":123,"mappings":[{"rss_bytes":8192,"anonymous_bytes":4096,"mapping":"10000000-10002000 rw-p 00000000 00:00 0 [heap]"}]}'
+  sample_unix_nano=$(date +%s%N)
+  if (( mapping_worker_calls == 1 )); then
+    mapping_anon_bytes=81920
+  else
+    mapping_anon_bytes=819200
+  fi
+  printf '{"sample_unix_nano":%s,"total_anonymous_bytes":%s,"mappings":[{"rss_bytes":%s,"anonymous_bytes":%s,"mapping":"10000000-10002000 rw-p 00000000 00:00 0 [anon: Go: heap]"}]}\n' \
+    "$sample_unix_nano" "$mapping_anon_bytes" "$mapping_anon_bytes" "$mapping_anon_bytes"
 }
-LIMA_MEMORY_CAPTURE_MAPS=1 LIMA_MEMORY_MAPPING_TYPICAL_BYTES=1000000 \
-  LIMA_MEMORY_MAPPING_SPIKE_DELTA_BYTES=500000 \
-  LIMA_MEMORY_MAPPING_ENDPOINT=http://127.0.0.1:2447/debug/runtime-memory-mappings \
-  lima_memory_record_cgroup_sample "$mapping_cgroup" "$proc_root" 101 "$mapping_prefix"
-if [[ -e "$mapping_prefix-mappings-typical" ]]; then
-  printf 'typical mapping sample was persisted after a transient endpoint failure\n' >&2
+export -f curl
+export LIMA_MEMORY_CAPTURE_MAPS=1
+export LIMA_MEMORY_MAPPING_TYPICAL_BYTES=2000000
+export LIMA_MEMORY_MAPPING_SPIKE_DELTA_BYTES=524288
+export LIMA_MEMORY_MAPPING_ENDPOINT=http://127.0.0.1:2447/debug/runtime-memory-mappings
+: >"$mapping_ready"
+lima_memory_sample_mapping_loop "$proc_root" 101 "$mapping_prefix" \
+  "$mapping_prefix-history" "$mapping_ready" "$mapping_worker_stop" \
+  "$mapping_worker_error" 0.01 &
+mapping_worker_pid=$!
+lima_memory_sample_cgroup_loop "$mapping_cgroup" "$proc_root" 101 "$mapping_prefix" \
+  "$mapping_cgroup_stop" "$mapping_worker_error" 0.01 &
+mapping_cgroup_sampler_pid=$!
+for _ in $(seq 500); do
+  if [[ -r "$mapping_prefix-mappings-typical" ]]; then
+    break
+  fi
+  sleep 0.01
+done
+if [[ ! -r "$mapping_prefix-mappings-typical" ]]; then
+  printf 'mapping worker did not capture the typical baseline\n' >&2
+  [[ ! -r $mapping_worker_error ]] || cat "$mapping_worker_error" >&2
+  [[ ! -r $mapping_prefix-history ]] || cat "$mapping_prefix-history" >&2
   exit 1
 fi
-if [[ -e "$mapping_prefix-mappings-spike" ]]; then
-  printf 'spike mapping sample was captured without a successful typical baseline\n' >&2
+cat >"$proc_root/101/status" <<'EOF'
+Name:   teagramd
+VmRSS:  900 kB
+RssAnon: 800 kB
+EOF
+printf '101\n102\n103\n105\n' >"$mapping_cgroup/cgroup.procs"
+printf '3100000\n' >"$mapping_cgroup/memory.current"
+printf 'anon 2500000\nfile 100000\nkernel 500000\n' >"$mapping_cgroup/memory.stat"
+for _ in $(seq 500); do
+  if [[ -e "$mapping_worker_request_started" ]]; then
+    break
+  fi
+  sleep 0.01
+done
+if [[ ! -e "$mapping_worker_request_started" ]]; then
+  printf 'mapping worker did not begin its spike mapping request\n' >&2
   exit 1
 fi
-LIMA_MEMORY_CAPTURE_MAPS=1 LIMA_MEMORY_MAPPING_TYPICAL_BYTES=1000000 \
-  LIMA_MEMORY_MAPPING_SPIKE_DELTA_BYTES=500000 \
-  LIMA_MEMORY_MAPPING_ENDPOINT=http://127.0.0.1:2447/debug/runtime-memory-mappings \
-  lima_memory_record_cgroup_sample "$mapping_cgroup" "$proc_root" 101 "$mapping_prefix"
-if [[ ! -r "$mapping_prefix-mappings-typical" || -e "$mapping_prefix-mappings-spike" ]]; then
-  printf 'mapping spike sample was not deferred until after the typical baseline\n' >&2
+printf '3200000\n' >"$mapping_cgroup/memory.current"
+printf '3200000\n' >"$mapping_cgroup/memory.peak"
+printf 'anon 2600000\nfile 100000\nkernel 500000\n' >"$mapping_cgroup/memory.stat"
+for _ in $(seq 500); do
+  if grep -Eq '^([0-9]+)[|]3200000[|]' "$mapping_prefix-history"; then
+    break
+  fi
+  sleep 0.01
+done
+if ! grep -Eq '^([0-9]+)[|]3200000[|]' "$mapping_prefix-history"; then
+  printf '10 ms cgroup sampler paused while mapping request was blocked\n' >&2
   exit 1
 fi
-LIMA_MEMORY_CAPTURE_MAPS=1 LIMA_MEMORY_MAPPING_TYPICAL_BYTES=1000000 \
-  LIMA_MEMORY_MAPPING_SPIKE_DELTA_BYTES=500000 \
-  LIMA_MEMORY_MAPPING_ENDPOINT=http://127.0.0.1:2447/debug/runtime-memory-mappings \
-  lima_memory_record_cgroup_sample "$mapping_cgroup" "$proc_root" 101 "$mapping_prefix"
-mapping_curl_calls=$(<"$mapping_curl_calls_file")
-if [[ $mapping_curl_calls != 3 ]]; then
-  printf 'mapping endpoint retries = %s requests, want 3 after one transient failure\n' "$mapping_curl_calls" >&2
+: >"$mapping_worker_release"
+for _ in $(seq 500); do
+  if [[ -r "$mapping_prefix-mappings-spike" ]]; then
+    break
+  fi
+  sleep 0.01
+done
+if [[ ! -r "$mapping_prefix-mappings-spike" ]]; then
+  printf 'mapping worker did not persist the spike sample after the blocked request completed\n' >&2
+  exit 1
+fi
+: >"$mapping_cgroup_stop"
+wait "$mapping_cgroup_sampler_pid"
+mapping_cgroup_sampler_pid=
+: >"$mapping_worker_stop"
+wait "$mapping_worker_pid"
+mapping_worker_pid=
+if [[ -e "$mapping_worker_error" ]]; then
+  cat "$mapping_worker_error" >&2
+  exit 1
+fi
+mapping_curl_calls=$(<"$mapping_worker_calls_file")
+if [[ $mapping_curl_calls != 2 ]]; then
+  printf 'mapping worker requests = %s, want typical and one measured spike\n' "$mapping_curl_calls" >&2
   exit 1
 fi
 unset -f curl
-for label in typical spike; do
-  if [[ ! -r "$mapping_prefix-mappings-$label" ]] ||
-    ! grep -Fq '8192|4096|10000000-' "$mapping_prefix-mappings-$label"; then
-    printf 'mapping sample %s is missing the expected heap RSS row\n' "$label" >&2
+unset LIMA_MEMORY_CAPTURE_MAPS LIMA_MEMORY_MAPPING_TYPICAL_BYTES LIMA_MEMORY_MAPPING_SPIKE_DELTA_BYTES \
+  LIMA_MEMORY_MAPPING_ENDPOINT
+if ! grep -Fq 'server_process_anon_bytes=81920' "$mapping_prefix-mappings-typical" ||
+  ! grep -Fq 'mapping_anon_bytes=81920' "$mapping_prefix-mappings-typical" ||
+  ! grep -Fq 'server_process_anon_bytes=819200' "$mapping_prefix-mappings-spike" ||
+  ! grep -Fq 'mapping_anon_bytes=819200' "$mapping_prefix-mappings-spike" ||
+  ! grep -Fq 'cgroup_memory_peak_bytes=3200000' "$mapping_prefix-mappings-spike" ||
+  ! grep -Fq '[anon: Go: heap]' "$mapping_prefix-mappings-spike"; then
+  printf 'mapping samples did not pair server anon with the Go heap mapping totals:\ntypical:\n%s\nspike:\n%s\n' \
+    "$(<"$mapping_prefix-mappings-typical")" "$(<"$mapping_prefix-mappings-spike")" >&2
+  exit 1
+fi
+for mapping_file in "$mapping_prefix-mappings-typical" "$mapping_prefix-mappings-spike"; do
+  mapping_alignment=$(awk -F= '$1 == "mapping_cgroup_alignment_delta_ns" { print $2; exit }' "$mapping_file")
+  if [[ ! $mapping_alignment =~ ^[0-9]+$ ]] || (( mapping_alignment > 100000000 )); then
+    printf 'mapping sample did not align with a cgroup row within 100 ms: %s\n' "$mapping_file" >&2
     exit 1
   fi
 done
+cat >"$proc_root/101/status" <<'EOF'
+Name:   teagramd
+VmRSS:  100 kB
+RssAnon: 80 kB
+EOF
 
 mapping_guard_typical="$fixture/guard-typical"
 mapping_guard_spike="$fixture/guard-spike"
-printf 'typical sample\n' >"$mapping_guard_typical"
-if mapping_guard_report=$(lima_memory_mapping_capture_check 2500000 1000000 500000 \
+cat >"$mapping_guard_typical" <<'EOF'
+mapping_cgroup_alignment_delta_ns=25000000
+server_process_anon_bytes=1000000
+mapping_anon_bytes=900000
+EOF
+if mapping_guard_report=$(lima_memory_mapping_capture_check 2500000 1000000 500000 100000 \
   "$mapping_guard_typical" "$mapping_guard_spike" 2>&1); then
   printf 'mapping capture guard accepted a high-water spike without spike evidence\n' >&2
   exit 1
@@ -241,15 +375,61 @@ if [[ "$mapping_guard_report" != "$expected" ]]; then
   printf 'mapping capture guard report = %s, want %s\n' "$mapping_guard_report" "$expected" >&2
   exit 1
 fi
-if ! lima_memory_mapping_capture_check 1400000 1000000 500000 \
+if ! lima_memory_mapping_capture_check 1400000 1000000 500000 100000 \
   "$mapping_guard_typical" "$mapping_guard_spike"; then
   printf 'mapping capture guard rejected a high-water value below the spike threshold\n' >&2
   exit 1
 fi
-printf 'spike mapping sample\n' >"$mapping_guard_spike"
-if ! lima_memory_mapping_capture_check 2500000 1000000 500000 \
+cat >"$mapping_guard_spike" <<'EOF'
+mapping_cgroup_alignment_delta_ns=50000000
+server_process_anon_bytes=1100000
+mapping_anon_bytes=1000000
+EOF
+if mapping_guard_report=$(lima_memory_mapping_capture_check 2500000 1000000 500000 100000 \
+  "$mapping_guard_typical" "$mapping_guard_spike" 2>&1); then
+  printf 'mapping capture guard accepted a nonempty spike row without the required anon increase\n' >&2
+  exit 1
+fi
+if [[ $mapping_guard_report != *'server anon increase was 100000 bytes, want at least 500000'* ]]; then
+  printf 'mapping capture guard anon report = %s, want the measured server anon delta\n' \
+    "$mapping_guard_report" >&2
+  exit 1
+fi
+cat >"$mapping_guard_spike" <<'EOF'
+mapping_cgroup_alignment_delta_ns=50000000
+server_process_anon_bytes=1600000
+mapping_anon_bytes=1040000
+EOF
+if mapping_guard_report=$(lima_memory_mapping_capture_check 2500000 1000000 500000 100000 \
+  "$mapping_guard_typical" "$mapping_guard_spike" 2>&1); then
+  printf 'mapping capture guard accepted a server anon spike not accounted for by map anon RSS\n' >&2
+  exit 1
+fi
+if [[ $mapping_guard_report != *'mapping anon delta was 140000 bytes for a 600000-byte server anon increase'* ]]; then
+  printf 'mapping capture guard map report = %s, want measured mapping delta mismatch\n' \
+    "$mapping_guard_report" >&2
+  exit 1
+fi
+cat >"$mapping_guard_spike" <<'EOF'
+mapping_cgroup_alignment_delta_ns=50000000
+server_process_anon_bytes=1600000
+mapping_anon_bytes=1450000
+EOF
+if ! lima_memory_mapping_capture_check 2500000 1000000 500000 100000 \
   "$mapping_guard_typical" "$mapping_guard_spike"; then
-  printf 'mapping capture guard rejected complete high-water mapping evidence\n' >&2
+  printf 'mapping capture guard rejected a measured map delta matching the server anon increase\n' >&2
+  exit 1
+fi
+sed -i 's/mapping_cgroup_alignment_delta_ns=50000000/mapping_cgroup_alignment_delta_ns=100000001/' \
+  "$mapping_guard_spike"
+if mapping_guard_report=$(lima_memory_mapping_capture_check 2500000 1000000 500000 100000 \
+  "$mapping_guard_typical" "$mapping_guard_spike" 2>&1); then
+  printf 'mapping capture guard accepted a spike sample outside the 100 ms pairing window\n' >&2
+  exit 1
+fi
+if [[ $mapping_guard_report != 'spike mapping sample is missing a cgroup pair within 100 ms' ]]; then
+  printf 'mapping capture guard alignment report = %s, want a 100 ms pairing failure\n' \
+    "$mapping_guard_report" >&2
   exit 1
 fi
 

@@ -53,8 +53,9 @@ type limaRuntimeMemoryMapping struct {
 }
 
 type limaRuntimeMemoryMappingsSample struct {
-	SampleUnixNano int64                      `json:"sample_unix_nano"`
-	Mappings       []limaRuntimeMemoryMapping `json:"mappings"`
+	SampleUnixNano      int64                      `json:"sample_unix_nano"`
+	TotalAnonymousBytes uint64                     `json:"total_anonymous_bytes"`
+	Mappings            []limaRuntimeMemoryMapping `json:"mappings"`
 }
 
 var limaRuntimeMemoryMetricNames = [...]string{
@@ -166,13 +167,24 @@ func readLimaRuntimeMemoryMappings(path string) (result limaRuntimeMemoryMapping
 		return limaRuntimeMemoryMappingsSample{}, fmt.Errorf("read process memory mappings: %w", err)
 	}
 	flush()
+	var totalAnonymousBytes uint64
+	for _, mapping := range mappings {
+		if mapping.AnonymousBytes > math.MaxUint64-totalAnonymousBytes {
+			return limaRuntimeMemoryMappingsSample{}, errors.New("total anonymous mapping bytes overflow")
+		}
+		totalAnonymousBytes += mapping.AnonymousBytes
+	}
 	sort.SliceStable(mappings, func(left, right int) bool {
 		return mappings[left].RSSBytes > mappings[right].RSSBytes
 	})
 	if len(mappings) > 20 {
 		mappings = mappings[:20]
 	}
-	return limaRuntimeMemoryMappingsSample{SampleUnixNano: time.Now().UnixNano(), Mappings: mappings}, nil
+	return limaRuntimeMemoryMappingsSample{
+		SampleUnixNano:      time.Now().UnixNano(),
+		TotalAnonymousBytes: totalAnonymousBytes,
+		Mappings:            mappings,
+	}, nil
 }
 
 func isLimaRuntimeMemoryMappingHeader(line string) bool {

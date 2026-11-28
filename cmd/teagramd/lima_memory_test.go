@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"math"
 	"net/http"
@@ -171,12 +172,44 @@ func TestReadLimaRuntimeMemoryMappingsRanksRSSAndAnonymousBytes(t *testing.T) {
 	if sample.SampleUnixNano <= 0 || len(sample.Mappings) != 2 {
 		t.Fatalf("runtime memory mappings = %+v, want timestamped two-mapping sample", sample)
 	}
+	if sample.TotalAnonymousBytes != 16*1024 {
+		t.Fatalf("total anonymous mapping bytes = %d, want 16 KiB", sample.TotalAnonymousBytes)
+	}
 	if got := sample.Mappings[0]; got.Mapping != "20000000-20001000 r--p 00000000 00:00 0 /fixture/map.dat" ||
 		got.RSSBytes != 20*1024 || got.AnonymousBytes != 12*1024 {
 		t.Fatalf("largest runtime memory mapping = %+v, want 20 KiB RSS and 12 KiB anonymous", got)
 	}
 	if got := sample.Mappings[1]; got.RSSBytes != 8*1024 || got.AnonymousBytes != 4*1024 {
 		t.Fatalf("second runtime memory mapping = %+v, want 8 KiB RSS and 4 KiB anonymous", got)
+	}
+}
+
+func TestReadLimaRuntimeMemoryMappingsTotalsAnonymousBytesBeforeTruncating(t *testing.T) {
+	smapsPath := filepath.Join(t.TempDir(), "smaps")
+	var smaps strings.Builder
+	for index := range 21 {
+		address := 0x10000000 + index*0x2000
+		if _, err := fmt.Fprintf(&smaps, "%08x-%08x rw-p 00000000 00:00 0 /fixture/%d\nRss: %d kB\nAnonymous: 2 kB\n",
+			address, address+0x1000, index, index+1); err != nil {
+			t.Fatalf("write smaps fixture: %v", err)
+		}
+	}
+	if err := os.WriteFile(smapsPath, []byte(smaps.String()), 0o600); err != nil {
+		t.Fatalf("write smaps fixture: %v", err)
+	}
+
+	sample, err := readLimaRuntimeMemoryMappings(smapsPath)
+	if err != nil {
+		t.Fatalf("read runtime memory mappings: %v", err)
+	}
+	if len(sample.Mappings) != 20 {
+		t.Fatalf("runtime memory mapping rows = %d, want top 20", len(sample.Mappings))
+	}
+	if sample.TotalAnonymousBytes != 42*1024 {
+		t.Fatalf("total anonymous mapping bytes = %d, want 42 KiB across all 21 mappings", sample.TotalAnonymousBytes)
+	}
+	if got := sample.Mappings[len(sample.Mappings)-1].RSSBytes; got != 2*1024 {
+		t.Fatalf("smallest returned mapping RSS = %d, want second-smallest 2 KiB after truncation", got)
 	}
 }
 
@@ -204,8 +237,9 @@ func TestLimaRuntimeMemoryMappingsEndpointReportsProcessMappings(t *testing.T) {
 	}
 
 	var got struct {
-		SampleUnixNano int64 `json:"sample_unix_nano"`
-		Mappings       []struct {
+		SampleUnixNano      int64  `json:"sample_unix_nano"`
+		TotalAnonymousBytes uint64 `json:"total_anonymous_bytes"`
+		Mappings            []struct {
 			RSSBytes       uint64 `json:"rss_bytes"`
 			AnonymousBytes uint64 `json:"anonymous_bytes"`
 			Mapping        string `json:"mapping"`
@@ -214,7 +248,7 @@ func TestLimaRuntimeMemoryMappingsEndpointReportsProcessMappings(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&got); err != nil {
 		t.Fatalf("decode runtime memory mappings: %v", err)
 	}
-	if got.SampleUnixNano <= 0 || len(got.Mappings) == 0 {
+	if got.SampleUnixNano <= 0 || got.TotalAnonymousBytes == 0 || len(got.Mappings) == 0 {
 		t.Fatalf("runtime memory mappings = %+v, want a timestamped non-empty sample", got)
 	}
 	for _, mapping := range got.Mappings {

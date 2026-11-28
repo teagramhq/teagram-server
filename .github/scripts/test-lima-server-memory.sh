@@ -53,10 +53,13 @@ MEMORY_SAMPLE_STAT_PEAK_FILE=
 MEMORY_SAMPLE_RUNTIME_FILE=
 MEMORY_SAMPLE_RUNTIME_READY_FILE=
 MEMORY_SAMPLE_RUNTIME_STOP_FILE=
+MEMORY_SAMPLE_MAPPING_READY_FILE=
+MEMORY_SAMPLE_MAPPING_STOP_FILE=
 MEMORY_SAMPLE_ERROR_FILE=
 MEMORY_SAMPLE_STOP_FILE=
 MEMORY_SAMPLER_PID=
 MEMORY_RUNTIME_SAMPLER_PID=
+MEMORY_MAPPING_SAMPLER_PID=
 IMAGE_REVISION=
 IMAGE_ID=
 MEMORY_MAX_BYTES=unknown
@@ -75,6 +78,11 @@ stop_memory_sampler() {
     wait "$MEMORY_SAMPLER_PID" 2>/dev/null || true
     MEMORY_SAMPLER_PID=
   fi
+  if [[ -n $MEMORY_MAPPING_SAMPLER_PID ]]; then
+    : >"$MEMORY_SAMPLE_MAPPING_STOP_FILE" 2>/dev/null || true
+    wait "$MEMORY_MAPPING_SAMPLER_PID" 2>/dev/null || true
+    MEMORY_MAPPING_SAMPLER_PID=
+  fi
 }
 
 finish() {
@@ -87,18 +95,23 @@ finish() {
   local runtime_sample=unavailable runtime_sample_current=unknown runtime_gc_cpu_fraction=unknown
   local runtime_cgroup_sample_unix_nano=unknown runtime_sample_alignment_delta_ns=unknown runtime_cgroup_sample='' runtime_bundle=''
   local runtime_cgroup_anon_bytes=unknown runtime_cgroup_file_bytes=unknown runtime_cgroup_kernel_bytes=unknown
-  local runtime_process_sample_peak_bytes=unknown runtime_server_pid=unknown runtime_server_rss_bytes=unknown
-  local runtime_server_anon_bytes=unknown runtime_photo_worker_count=unknown runtime_photo_worker_processes=unknown
-  local runtime_process_attribution=unmatched runtime_process_incomplete_pids=unknown runtime_timestamp
+  local runtime_cgroup_peak_bytes=unknown runtime_timestamp
+  local runtime_process_attribution=unmatched runtime_process_incomplete_pids=unknown
+  local process_sample_unix_nano=unknown process_sample_peak_bytes=unknown process_sample_memory_peak_bytes=unknown
+  local process_sample_anon_bytes=unknown process_sample_file_bytes=unknown process_sample_kernel_bytes=unknown
+  local server_process_pid=unknown server_process_rss_bytes=unknown server_process_anon_bytes=unknown
+  local photo_worker_process_count=unknown photo_worker_processes=unknown
+  local process_attribution=unmatched process_incomplete_pids=unknown best_process_sample=''
   local mapping_label mapping_file
   if [[ -r $MEMORY_SAMPLE_RUNTIME_FILE ]]; then
     runtime_bundle=$(<"$MEMORY_SAMPLE_RUNTIME_FILE")
     if runtime_sample=$(jq -ec '.runtime | select(type == "object")' <<<"$runtime_bundle") &&
       runtime_cgroup_sample=$(jq -er '.cgroup_sample | select(type == "string")' <<<"$runtime_bundle"); then
     IFS='|' read -r runtime_cgroup_sample_unix_nano runtime_sample_current runtime_cgroup_anon_bytes \
-      runtime_cgroup_file_bytes runtime_cgroup_kernel_bytes runtime_process_sample_peak_bytes runtime_server_pid \
-      runtime_server_rss_bytes runtime_server_anon_bytes runtime_photo_worker_count runtime_photo_worker_processes \
-      runtime_process_attribution runtime_process_incomplete_pids <<<"$runtime_cgroup_sample"
+      runtime_cgroup_file_bytes runtime_cgroup_kernel_bytes _ _ _ _ _ _ \
+      runtime_process_attribution \
+      runtime_process_incomplete_pids runtime_cgroup_peak_bytes \
+      <<<"$runtime_cgroup_sample"
     if runtime_timestamp=$(jq -er '.sample_unix_nano | select(type == "number" and . > 0)' <<<"$runtime_sample") &&
       [[ $runtime_timestamp =~ ^[0-9]+$ && $runtime_cgroup_sample_unix_nano =~ ^[0-9]+$ ]]; then
       runtime_sample_alignment_delta_ns=$((runtime_cgroup_sample_unix_nano - runtime_timestamp))
@@ -134,11 +147,11 @@ finish() {
   fi
 
   if [[ -n $peak_bytes && -n $events ]]; then
-    local peak_mib memory_peak_unattributed_bytes oom oom_kill max_events stat_sample_peak_bytes sample_current_bytes stat_anon_bytes stat_file_bytes stat_kernel_bytes
-    local process_sample_peak_bytes server_process_pid server_process_rss_bytes server_process_anon_bytes photo_worker_process_count photo_worker_processes
-    local process_attribution process_incomplete_pids
+    local peak_mib memory_peak_unattributed_bytes memory_peak_above_go_sample_bytes oom oom_kill max_events
+    local stat_sample_peak_bytes sample_current_bytes stat_anon_bytes stat_file_bytes stat_kernel_bytes
     peak_mib=$(awk -v bytes="$peak_bytes" 'BEGIN { printf "%.2f", bytes / 1048576 }')
     memory_peak_unattributed_bytes=unknown
+    memory_peak_above_go_sample_bytes=unknown
     oom=$(awk '$1 == "oom" { print $2 }' <<<"$events")
     oom_kill=$(awk '$1 == "oom_kill" { print $2 }' <<<"$events")
     max_events=$(awk '$1 == "max" { print $2 }' <<<"$events")
@@ -147,41 +160,35 @@ finish() {
     stat_anon_bytes=unknown
     stat_file_bytes=unknown
     stat_kernel_bytes=unknown
-    process_sample_peak_bytes=unknown
-    server_process_pid=unknown
-    server_process_rss_bytes=unknown
-    server_process_anon_bytes=unknown
-    photo_worker_process_count=unknown
-    photo_worker_processes=unknown
-    process_attribution=unknown
-    process_incomplete_pids=unknown
-    if [[ $runtime_sample_current =~ ^[0-9]+$ && $runtime_process_sample_peak_bytes == "$runtime_sample_current" ]]; then
-      stat_sample_peak_bytes=$runtime_sample_current
+    if [[ $runtime_sample_current =~ ^[0-9]+$ && $runtime_cgroup_peak_bytes =~ ^[0-9]+$ ]]; then
+      stat_sample_peak_bytes=$runtime_cgroup_peak_bytes
       sample_current_bytes=$runtime_sample_current
       stat_anon_bytes=$runtime_cgroup_anon_bytes
       stat_file_bytes=$runtime_cgroup_file_bytes
       stat_kernel_bytes=$runtime_cgroup_kernel_bytes
     fi
     if [[ $peak_bytes =~ ^[0-9]+$ && $sample_current_bytes =~ ^[0-9]+$ ]]; then
-      memory_peak_unattributed_bytes=$(lima_memory_peak_unattributed_bytes \
-        "$peak_bytes" "$sample_current_bytes") || memory_peak_unattributed_bytes=unknown
+      memory_peak_above_go_sample_bytes=$(lima_memory_peak_unattributed_bytes \
+        "$peak_bytes" "$sample_current_bytes") || memory_peak_above_go_sample_bytes=unknown
     fi
-    if [[ $runtime_sample_current =~ ^[0-9]+$ && $runtime_process_sample_peak_bytes == "$runtime_sample_current" ]]; then
-      process_sample_peak_bytes=$runtime_process_sample_peak_bytes
-      server_process_pid=$runtime_server_pid
-      server_process_rss_bytes=$runtime_server_rss_bytes
-      server_process_anon_bytes=$runtime_server_anon_bytes
-      photo_worker_process_count=$runtime_photo_worker_count
-      photo_worker_processes=$runtime_photo_worker_processes
-      process_attribution=$runtime_process_attribution
-      process_incomplete_pids=$runtime_process_incomplete_pids
+    if best_process_sample=$(lima_memory_best_cgroup_sample "$RUNNER_TEMP/lima-memory-sampled-history") &&
+      [[ -n $best_process_sample ]]; then
+      IFS='|' read -r process_sample_unix_nano process_sample_peak_bytes process_sample_anon_bytes \
+        process_sample_file_bytes process_sample_kernel_bytes _ server_process_pid server_process_rss_bytes \
+        server_process_anon_bytes photo_worker_process_count photo_worker_processes process_attribution \
+        process_incomplete_pids process_sample_memory_peak_bytes <<<"$best_process_sample"
+      if [[ $peak_bytes =~ ^[0-9]+$ && $process_sample_peak_bytes =~ ^[0-9]+$ ]]; then
+        memory_peak_unattributed_bytes=$(lima_memory_peak_unattributed_bytes \
+          "$peak_bytes" "$process_sample_peak_bytes") || memory_peak_unattributed_bytes=unknown
+      fi
     fi
-    printf 'LIMA_MEMORY_PROBE result=%s attempt=%s/%s phase=%s uploads=%s image=%s image_id=%s revision=%s gomemlimit=%s websocket_listener=127.0.0.1:2446 websocket_origin=https://web.teagram.io websocket_browser_only=false peak_mib=%s peak_bytes=%s memory_peak_unattributed_bytes=%s memory_stat_sample_interval_ms=%s memory_stat_sample_unix_nano=%s memory_runtime_sample_alignment_delta_ns=%s memory_stat_sample_peak_bytes=%s memory_stat_sample_current_bytes=%s memory_stat_anon_bytes=%s memory_stat_file_bytes=%s memory_stat_kernel_bytes=%s memory_max_bytes=%s metrics_source=%s max_events=%s oom=%s oom_kill=%s memory_process_sample_peak_bytes=%s memory_process_attribution=%s memory_process_incomplete_pids=%s server_process_pid=%s server_process_rss_bytes=%s server_process_anon_bytes=%s photo_worker_process_count=%s photo_worker_processes=%s\n' \
+    printf 'LIMA_MEMORY_PROBE result=%s attempt=%s/%s phase=%s uploads=%s image=%s image_id=%s revision=%s gomemlimit=%s websocket_listener=127.0.0.1:2446 websocket_origin=https://web.teagram.io websocket_browser_only=false peak_mib=%s peak_bytes=%s memory_peak_unattributed_bytes=%s memory_peak_above_go_sample_bytes=%s memory_stat_sample_interval_ms=%s memory_stat_sample_unix_nano=%s memory_runtime_sample_alignment_delta_ns=%s memory_stat_sample_peak_bytes=%s memory_stat_sample_current_bytes=%s memory_stat_anon_bytes=%s memory_stat_file_bytes=%s memory_stat_kernel_bytes=%s memory_max_bytes=%s metrics_source=%s max_events=%s oom=%s oom_kill=%s memory_process_sample_unix_nano=%s memory_process_sample_peak_bytes=%s memory_process_sample_memory_peak_bytes=%s memory_process_stat_anon_bytes=%s memory_process_stat_file_bytes=%s memory_process_stat_kernel_bytes=%s memory_process_attribution=%s memory_process_incomplete_pids=%s server_process_pid=%s server_process_rss_bytes=%s server_process_anon_bytes=%s photo_worker_process_count=%s photo_worker_processes=%s go_paired_process_attribution=%s go_paired_process_incomplete_pids=%s\n' \
       "$([[ $status -eq 0 ]] && printf passed || printf failed)" "${LIMA_MEMORY_PROBE_ATTEMPT:-1}" "$LIMA_MEMORY_PROBE_ATTEMPTS" "$PROBE_PHASE" "$UPLOAD_OUTCOME" \
-      "$LIMA_SERVICE_IMAGE" "${IMAGE_ID:-unknown}" "$IMAGE_REVISION" "$LIMA_GOMEMLIMIT" "$peak_mib" "$peak_bytes" "$memory_peak_unattributed_bytes" "$MEMORY_SAMPLE_INTERVAL_MS" "$runtime_cgroup_sample_unix_nano" "$runtime_sample_alignment_delta_ns" "$stat_sample_peak_bytes" "$sample_current_bytes" "$stat_anon_bytes" "$stat_file_bytes" "$stat_kernel_bytes" "$MEMORY_MAX_BYTES" "$MEMORY_METRICS_SOURCE" \
-      "${max_events:-unknown}" "${oom:-unknown}" "${oom_kill:-unknown}" "$process_sample_peak_bytes" "$process_attribution" "$process_incomplete_pids" "$server_process_pid" "$server_process_rss_bytes" "$server_process_anon_bytes" "$photo_worker_process_count" "$photo_worker_processes"
-    printf 'LIMA_GO_RUNTIME_MEMORY gc_cpu_fraction=%s cgroup_sample_unix_nano=%s alignment_delta_ns=%s sample_current_bytes=%s metrics=%s\n' \
-      "$runtime_gc_cpu_fraction" "$runtime_cgroup_sample_unix_nano" "$runtime_sample_alignment_delta_ns" "$runtime_sample_current" "$runtime_sample"
+      "$LIMA_SERVICE_IMAGE" "${IMAGE_ID:-unknown}" "$IMAGE_REVISION" "$LIMA_GOMEMLIMIT" "$peak_mib" "$peak_bytes" "$memory_peak_unattributed_bytes" "$memory_peak_above_go_sample_bytes" "$MEMORY_SAMPLE_INTERVAL_MS" "$runtime_cgroup_sample_unix_nano" "$runtime_sample_alignment_delta_ns" "$stat_sample_peak_bytes" "$sample_current_bytes" "$stat_anon_bytes" "$stat_file_bytes" "$stat_kernel_bytes" "$MEMORY_MAX_BYTES" "$MEMORY_METRICS_SOURCE" \
+      "${max_events:-unknown}" "${oom:-unknown}" "${oom_kill:-unknown}" "$process_sample_unix_nano" "$process_sample_peak_bytes" "$process_sample_memory_peak_bytes" "$process_sample_anon_bytes" "$process_sample_file_bytes" "$process_sample_kernel_bytes" "$process_attribution" "$process_incomplete_pids" "$server_process_pid" "$server_process_rss_bytes" "$server_process_anon_bytes" "$photo_worker_process_count" "$photo_worker_processes" \
+      "${runtime_process_attribution:-unknown}" "${runtime_process_incomplete_pids:-unknown}"
+    printf 'LIMA_GO_RUNTIME_MEMORY gc_cpu_fraction=%s cgroup_sample_unix_nano=%s alignment_delta_ns=%s sample_current_bytes=%s cgroup_memory_peak_bytes=%s metrics=%s\n' \
+      "$runtime_gc_cpu_fraction" "$runtime_cgroup_sample_unix_nano" "$runtime_sample_alignment_delta_ns" "$runtime_sample_current" "$runtime_cgroup_peak_bytes" "$runtime_sample"
     if [[ ${LIMA_MEMORY_CAPTURE_MAPS:-0} == 1 ]]; then
       for mapping_label in typical spike; do
         mapping_file="$RUNNER_TEMP/lima-memory-sampled-mappings-$mapping_label"
@@ -195,12 +202,12 @@ finish() {
     if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then
       {
         printf '\n### Lima service memory probe\n\n'
-        printf '| Attempt | Result | Phase | Uploads | Image | Image ID | Revision | GOMEMLIMIT | WebSocket settings | Peak cgroup memory | Peak gap above paired sample (unattributed) | Stat sample interval | Paired sample timestamp (ns) | Go/cgroup alignment delta (ns) | Paired sampled current | memory.stat anon | memory.stat file | memory.stat kernel | memory.max | Metrics source | max events | OOM events | OOM kills | Process sample current | Process attribution | Incomplete process PIDs | Server PID | Server RSS | Server anon | Photo worker count | Photo worker processes (PID:RSS:anon bytes) |\n'
-        printf '| ---: | --- | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | --- | --- | ---: | --- | ---: | --- | --- |\n'
-        printf '| %s/%s | %s | %s | %s | %s | %s | %s | %s | 127.0.0.1:2446, https://web.teagram.io, browser_only=false | %s MiB (%s bytes) | %s bytes | %s ms | %s | %s | %s bytes | %s bytes | %s bytes | %s bytes | %s bytes | %s | %s | %s | %s | %s bytes | %s | %s | %s | %s bytes | %s bytes | %s | %s |\n' \
+        printf '| Attempt | Result | Phase | Uploads | Image | Image ID | Revision | GOMEMLIMIT | WebSocket settings | Peak cgroup memory | Peak gap above independent max-current sample | Peak gap above Go-paired current | Stat sample interval | Go-paired sample timestamp (ns) | Go/cgroup alignment delta (ns) | Go-paired current | Go-paired memory.stat anon/file/kernel | memory.max | Metrics source | max events | OOM events | OOM kills | Independent process sample timestamp (ns) | Independent max-current sample | Its memory.stat anon/file/kernel | Process attribution | Incomplete process PIDs | Server PID | Server RSS | Server anon | Photo worker count | Photo worker processes (PID:RSS:anon bytes) | Go-paired process attribution |\n'
+        printf '| ---: | --- | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | ---: | --- | ---: | --- | --- | --- |\n'
+        printf '| %s/%s | %s | %s | %s | %s | %s | %s | %s | 127.0.0.1:2446, https://web.teagram.io, browser_only=false | %s MiB (%s bytes) | %s bytes | %s bytes | %s ms | %s | %s | %s bytes | %s/%s/%s bytes | %s bytes | %s | %s | %s | %s | %s | %s bytes (memory.peak=%s) | %s/%s/%s bytes | %s | %s | %s | %s bytes | %s bytes | %s | %s | %s |\n' \
           "${LIMA_MEMORY_PROBE_ATTEMPT:-1}" "$LIMA_MEMORY_PROBE_ATTEMPTS" "$([[ $status -eq 0 ]] && printf passed || printf failed)" "$PROBE_PHASE" "$UPLOAD_OUTCOME" \
-          "$LIMA_SERVICE_IMAGE" "${IMAGE_ID:-unknown}" "$IMAGE_REVISION" "$LIMA_GOMEMLIMIT" "$peak_mib" "$peak_bytes" "$memory_peak_unattributed_bytes" "$MEMORY_SAMPLE_INTERVAL_MS" "$runtime_cgroup_sample_unix_nano" "$runtime_sample_alignment_delta_ns" "$sample_current_bytes" "$stat_anon_bytes" "$stat_file_bytes" "$stat_kernel_bytes" "$MEMORY_MAX_BYTES" \
-          "$MEMORY_METRICS_SOURCE" "${max_events:-unknown}" "${oom:-unknown}" "${oom_kill:-unknown}" "$process_sample_peak_bytes" "$process_attribution" "$process_incomplete_pids" "$server_process_pid" "$server_process_rss_bytes" "$server_process_anon_bytes" "$photo_worker_process_count" "$photo_worker_processes"
+          "$LIMA_SERVICE_IMAGE" "${IMAGE_ID:-unknown}" "$IMAGE_REVISION" "$LIMA_GOMEMLIMIT" "$peak_mib" "$peak_bytes" "$memory_peak_unattributed_bytes" "$memory_peak_above_go_sample_bytes" "$MEMORY_SAMPLE_INTERVAL_MS" "$runtime_cgroup_sample_unix_nano" "$runtime_sample_alignment_delta_ns" "$sample_current_bytes" "$stat_anon_bytes" "$stat_file_bytes" "$stat_kernel_bytes" "$MEMORY_MAX_BYTES" \
+          "$MEMORY_METRICS_SOURCE" "${max_events:-unknown}" "${oom:-unknown}" "${oom_kill:-unknown}" "$process_sample_unix_nano" "$process_sample_peak_bytes" "$process_sample_memory_peak_bytes" "$process_sample_anon_bytes" "$process_sample_file_bytes" "$process_sample_kernel_bytes" "$process_attribution" "$process_incomplete_pids" "$server_process_pid" "$server_process_rss_bytes" "$server_process_anon_bytes" "$photo_worker_process_count" "$photo_worker_processes" "${runtime_process_attribution:-unknown}"
         printf '\nGo runtime memory sample paired with cgroup/process sample %s (alignment delta %s ns):\n\n%s\n' \
           "$runtime_cgroup_sample_unix_nano" "$runtime_sample_alignment_delta_ns" "$runtime_sample"
       } >>"$GITHUB_STEP_SUMMARY"
@@ -325,8 +332,11 @@ if [[ $container_pid =~ ^[1-9][0-9]*$ ]]; then
     MEMORY_SAMPLE_RUNTIME_FILE="$RUNNER_TEMP/lima-memory-sampled-runtime"
     MEMORY_SAMPLE_RUNTIME_READY_FILE="$RUNNER_TEMP/lima-memory-sampled-runtime-ready"
     MEMORY_SAMPLE_RUNTIME_STOP_FILE="$RUNNER_TEMP/lima-memory-sampled-runtime-stop"
+    MEMORY_SAMPLE_MAPPING_READY_FILE="$RUNNER_TEMP/lima-memory-sampled-mappings-ready"
+    MEMORY_SAMPLE_MAPPING_STOP_FILE="$RUNNER_TEMP/lima-memory-sampled-mappings-stop"
     MEMORY_SAMPLE_ERROR_FILE="$RUNNER_TEMP/lima-memory-sampled-error"
     MEMORY_SAMPLE_STOP_FILE="$RUNNER_TEMP/lima-memory-sampled-stop"
+    rm -f -- "$RUNNER_TEMP"/lima-memory-sampled-*
     if [[ -r $MEMORY_PEAK_FILE && -r $MEMORY_EVENTS_FILE && -r $MEMORY_CURRENT_FILE && -r $MEMORY_STAT_FILE && -r $MEMORY_CGROUP_DIR/memory.max && -r $MEMORY_CGROUP_DIR/cgroup.procs ]]; then
       MEMORY_MAX_BYTES=$(<"$MEMORY_CGROUP_DIR/memory.max")
     else
@@ -344,6 +354,12 @@ if [[ $container_pid =~ ^[1-9][0-9]*$ ]]; then
       "$MEMORY_SAMPLE_ERROR_FILE" "$MEMORY_SAMPLE_RUNTIME_STOP_FILE" \
       0.01 &
     MEMORY_RUNTIME_SAMPLER_PID=$!
+    if [[ ${LIMA_MEMORY_CAPTURE_MAPS:-0} == 1 ]]; then
+      lima_memory_sample_mapping_loop /proc "$container_pid" "$RUNNER_TEMP/lima-memory-sampled" \
+        "$RUNNER_TEMP/lima-memory-sampled-history" "$MEMORY_SAMPLE_MAPPING_READY_FILE" \
+        "$MEMORY_SAMPLE_MAPPING_STOP_FILE" "$MEMORY_SAMPLE_ERROR_FILE" 0.01 &
+      MEMORY_MAPPING_SAMPLER_PID=$!
+    fi
   else
     echo 'runner does not expose the service container cgroup v2 path' >&2
     exit 1
@@ -422,6 +438,9 @@ if ! curl --noproxy '*' --fail --connect-timeout 1 --max-time 2 --silent --show-
   exit 1
 fi
 touch "$MEMORY_SAMPLE_RUNTIME_READY_FILE"
+if [[ ${LIMA_MEMORY_CAPTURE_MAPS:-0} == 1 ]]; then
+  touch "$MEMORY_SAMPLE_MAPPING_READY_FILE"
+fi
 
 run_setup_command client-config >"$RUNNER_TEMP/lima-memory-client.json"
 chmod 600 "$RUNNER_TEMP/lima-memory-client.json"
@@ -508,8 +527,10 @@ if [[ ${LIMA_MEMORY_CAPTURE_MAPS:-0} == 1 ]]; then
   mapping_cgroup_peak=$(<"$MEMORY_PEAK_FILE")
   mapping_typical_bytes=${LIMA_MEMORY_MAPPING_TYPICAL_BYTES:-31457280}
   mapping_spike_delta_bytes=${LIMA_MEMORY_MAPPING_SPIKE_DELTA_BYTES:-524288}
+  mapping_anon_tolerance_bytes=${LIMA_MEMORY_MAPPING_ANON_TOLERANCE_BYTES:-1048576}
   if ! lima_memory_mapping_capture_check "$mapping_cgroup_peak" "$mapping_typical_bytes" \
-    "$mapping_spike_delta_bytes" "$RUNNER_TEMP/lima-memory-sampled-mappings-typical" \
+    "$mapping_spike_delta_bytes" "$mapping_anon_tolerance_bytes" \
+    "$RUNNER_TEMP/lima-memory-sampled-mappings-typical" \
     "$RUNNER_TEMP/lima-memory-sampled-mappings-spike"; then
     exit 1
   fi
@@ -520,14 +541,33 @@ if [[ ! -r $MEMORY_SAMPLE_RUNTIME_FILE ]]; then
 fi
 runtime_cgroup_sample=$(jq -er '.cgroup_sample | select(type == "string")' "$MEMORY_SAMPLE_RUNTIME_FILE")
 IFS='|' read -r runtime_cgroup_sample_unix_nano sample_current_bytes stat_anon_bytes stat_file_bytes stat_kernel_bytes \
-  process_sample_peak_bytes server_process_pid server_process_rss_bytes server_process_anon_bytes \
-  photo_worker_process_count photo_worker_processes process_attribution process_incomplete_pids \
+  runtime_paired_process_current _ _ _ _ _ runtime_paired_process_attribution runtime_paired_incomplete_pids \
+  runtime_cgroup_peak_at_go_sample \
   <<<"$runtime_cgroup_sample"
-stat_sample_peak_bytes=$sample_current_bytes
 if [[ ! $runtime_cgroup_sample_unix_nano =~ ^[0-9]+$ ||
-  ! $process_sample_peak_bytes =~ ^[0-9]+$ ||
-  ! $stat_sample_peak_bytes =~ ^[0-9]+$ ||
-  $process_sample_peak_bytes != "$stat_sample_peak_bytes" ||
+  ! $sample_current_bytes =~ ^[0-9]+$ ||
+  ! $runtime_paired_process_current =~ ^[0-9]+$ ||
+  $runtime_paired_process_current != "$sample_current_bytes" ||
+  ! $runtime_cgroup_peak_at_go_sample =~ ^[0-9]+$ ||
+  ( $runtime_paired_process_attribution != complete && $runtime_paired_process_attribution != incomplete ) ||
+  ( $runtime_paired_process_attribution == complete && $runtime_paired_incomplete_pids != - ) ||
+  ( $runtime_paired_process_attribution == incomplete &&
+    ( $runtime_paired_incomplete_pids == - || $runtime_paired_incomplete_pids == unknown ) ) ]]; then
+  printf 'Go-paired cgroup sample is missing its timestamp, current, high-water, or process-attribution fields\n' >&2
+  exit 1
+fi
+stat_sample_peak_bytes=$runtime_cgroup_peak_at_go_sample
+best_process_sample=$(lima_memory_best_cgroup_sample "$RUNNER_TEMP/lima-memory-sampled-history")
+if [[ -z $best_process_sample ]]; then
+  echo 'memory probe did not record an independent cgroup-current/process sample' >&2
+  exit 1
+fi
+IFS='|' read -r process_sample_unix_nano process_sample_peak_bytes process_sample_anon_bytes \
+  process_sample_file_bytes process_sample_kernel_bytes _ server_process_pid server_process_rss_bytes \
+  server_process_anon_bytes photo_worker_process_count photo_worker_processes process_attribution \
+  process_incomplete_pids process_sample_memory_peak_bytes <<<"$best_process_sample"
+if [[ ! $process_sample_unix_nano =~ ^[0-9]+$ || ! $process_sample_peak_bytes =~ ^[0-9]+$ ||
+  ! $process_sample_memory_peak_bytes =~ ^[0-9]+$ ||
   ( $process_attribution != complete && $process_attribution != incomplete ) ||
   ( $process_attribution == complete && $process_incomplete_pids != - ) ||
   ( $process_attribution == incomplete && ( $process_incomplete_pids == - || $process_incomplete_pids == unknown ) ) ||
@@ -536,7 +576,7 @@ if [[ ! $runtime_cgroup_sample_unix_nano =~ ^[0-9]+$ ||
   ! $server_process_anon_bytes =~ ^[0-9]+$ ||
   ! $photo_worker_process_count =~ ^[0-9]+$ ||
   $photo_worker_processes == unknown ]]; then
-  printf 'memory probe process attribution is incomplete or does not match the sampled peak: status=%s pids=%s\n' \
+  printf 'independent maximum-current process sample is malformed: status=%s pids=%s\n' \
     "${process_attribution:-unknown}" "${process_incomplete_pids:-unknown}" >&2
   exit 1
 fi

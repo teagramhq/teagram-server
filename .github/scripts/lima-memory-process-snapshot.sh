@@ -140,6 +140,22 @@ lima_memory_process_attribution_check() {
   [[ "$attempts" == 3 ]]
 }
 
+lima_memory_best_cgroup_sample() {
+  local history_file="$1"
+  awk -F'|' '
+    NF == 14 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ {
+      if (!found || $2 >= best_current) {
+        found = 1
+        best_current = $2
+        best_row = $0
+      }
+    }
+    END {
+      if (found) print best_row
+    }
+  ' "$history_file"
+}
+
 lima_memory_write_sample_file() {
   local sample_file="$1" sample_value="$2" sample_tmp="$1.tmp"
   printf '%s\n' "$sample_value" >"$sample_tmp" || return 1
@@ -155,15 +171,21 @@ lima_memory_configure_mapping_endpoint() {
 }
 
 lima_memory_process_mapping_snapshot() {
-  local proc_root="$1" server_pid="$2" mapping_json
+  local proc_root="$1" server_pid="$2" mapping_json mapping_rows mapping_anon_bytes sampled_at_unix_nano
   if [[ -n ${LIMA_MEMORY_MAPPING_ENDPOINT:-} ]]; then
     mapping_json=$(curl --noproxy '*' --fail --connect-timeout 1 --max-time 2 --silent \
       "$LIMA_MEMORY_MAPPING_ENDPOINT") || return 1
-    jq -r '"mapping_sample_unix_nano=\(.sample_unix_nano)", (.mappings[] | "\(.rss_bytes)|\(.anonymous_bytes)|\(.mapping)")' <<<"$mapping_json" |
-      sed -n '1,21p'
+    jq -er '
+      select(.sample_unix_nano | type == "number" and . > 0) |
+      "mapping_sample_unix_nano=\(.sample_unix_nano)",
+      "mapping_anon_bytes=\(.total_anonymous_bytes)",
+      (.mappings | sort_by(-.rss_bytes) | .[:20][] | "\(.rss_bytes)|\(.anonymous_bytes)|\(.mapping)")
+    ' <<<"$mapping_json"
     return
   fi
-  awk '
+  mapping_anon_bytes=$(awk '$1 == "Anonymous:" { total += $2 * 1024 } END { print total + 0 }' \
+    "$proc_root/$server_pid/smaps") || return 1
+  mapping_rows=$(awk '
     /^[[:xdigit:]]+-[[:xdigit:]]+[[:space:]]/ {
       if (mapping != "") print rss_bytes "|" anonymous_bytes "|" mapping
       mapping = $0
@@ -176,27 +198,118 @@ lima_memory_process_mapping_snapshot() {
     END {
       if (mapping != "") print rss_bytes "|" anonymous_bytes "|" mapping
     }
-  ' "$proc_root/$server_pid/smaps" | LC_ALL=C sort -t'|' -k1,1nr | sed -n '1,20p'
+  ' "$proc_root/$server_pid/smaps" | LC_ALL=C sort -t'|' -k1,1nr | sed -n '1,20p') || return 1
+  sampled_at_unix_nano=$(date +%s%N) || return 1
+  printf 'mapping_sample_unix_nano=%s\nmapping_anon_bytes=%s\n' \
+    "$sampled_at_unix_nano" "$mapping_anon_bytes"
+  [[ -z $mapping_rows ]] || printf '%s\n' "$mapping_rows"
 }
 
 lima_memory_write_mapping_sample() {
-  local proc_root="$1" server_pid="$2" sample_prefix="$3" label="$4"
-  local sampled_at_unix_nano="$5" current_bytes="$6" mapping_tmp mapping_snapshot
+  local proc_root="$1" server_pid="$2" sample_prefix="$3" label="$4" history_file="$5"
+  local mapping_tmp mapping_snapshot mapping_timestamp mapping_anon_bytes cgroup_sample
+  local cgroup_timestamp cgroup_current anon_bytes file_bytes kernel_bytes
+  local sampled_server_pid server_rss_bytes server_anon_bytes worker_count worker_processes attribution incomplete_pids
+  local cgroup_memory_peak alignment_delta
   mapping_tmp="$sample_prefix-mappings-$label.tmp"
   mapping_snapshot=$(lima_memory_process_mapping_snapshot "$proc_root" "$server_pid") || return 1
+  mapping_timestamp=$(awk -F= '$1 == "mapping_sample_unix_nano" { print $2; exit }' <<<"$mapping_snapshot")
+  mapping_anon_bytes=$(awk -F= '$1 == "mapping_anon_bytes" { print $2; exit }' <<<"$mapping_snapshot")
+  if [[ ! $mapping_timestamp =~ ^[1-9][0-9]*$ || ! $mapping_anon_bytes =~ ^[0-9]+$ ]]; then
+    return 1
+  fi
+  cgroup_sample=
+  for _ in {1..20}; do
+    cgroup_sample=$(lima_memory_nearest_cgroup_sample "$history_file" "$mapping_timestamp") || return 1
+    [[ -n $cgroup_sample ]] && break
+    sleep 0.005
+  done
+  if [[ -z $cgroup_sample ]]; then
+    return 1
+  fi
+  IFS='|' read -r cgroup_timestamp cgroup_current anon_bytes file_bytes kernel_bytes _ \
+    sampled_server_pid server_rss_bytes server_anon_bytes worker_count worker_processes attribution \
+    incomplete_pids cgroup_memory_peak <<<"$cgroup_sample"
+  if [[ ! $cgroup_timestamp =~ ^[1-9][0-9]*$ || ! $cgroup_current =~ ^[0-9]+$ ||
+    ! $server_anon_bytes =~ ^[0-9]+$ || ! $cgroup_memory_peak =~ ^[0-9]+$ ]]; then
+    return 1
+  fi
+  alignment_delta=$((cgroup_timestamp - mapping_timestamp))
+  (( alignment_delta < 0 )) && alignment_delta=$((-alignment_delta))
   {
-    printf 'cgroup_sample_unix_nano=%s cgroup_current_bytes=%s server_pid=%s\n' \
-      "$sampled_at_unix_nano" "$current_bytes" "$server_pid"
-    printf '%s\n' "$mapping_snapshot"
+    printf 'label=%s\n' "$label"
+    printf 'mapping_sample_unix_nano=%s\n' "$mapping_timestamp"
+    printf 'mapping_anon_bytes=%s\n' "$mapping_anon_bytes"
+    printf 'cgroup_sample_unix_nano=%s\n' "$cgroup_timestamp"
+    printf 'mapping_cgroup_alignment_delta_ns=%s\n' "$alignment_delta"
+    printf 'cgroup_current_bytes=%s\n' "$cgroup_current"
+    printf 'cgroup_memory_peak_bytes=%s\n' "$cgroup_memory_peak"
+    printf 'memory_stat_anon_bytes=%s\n' "$anon_bytes"
+    printf 'memory_stat_file_bytes=%s\n' "$file_bytes"
+    printf 'memory_stat_kernel_bytes=%s\n' "$kernel_bytes"
+    printf 'server_pid=%s\n' "$sampled_server_pid"
+    printf 'server_process_rss_bytes=%s\n' "$server_rss_bytes"
+    printf 'server_process_anon_bytes=%s\n' "$server_anon_bytes"
+    printf 'photo_worker_process_count=%s\n' "$worker_count"
+    printf 'photo_worker_processes=%s\n' "$worker_processes"
+    printf 'process_attribution=%s\n' "$attribution"
+    printf 'process_incomplete_pids=%s\n' "$incomplete_pids"
+    printf '%s\n' "$mapping_snapshot" | sed '1,2d'
   } >"$mapping_tmp" || return 1
   mv -- "$mapping_tmp" "$sample_prefix-mappings-$label"
 }
 
+lima_memory_queue_mapping_request() {
+  local sample_prefix="$1" label="$2" sample_row="$3"
+  local request_file="$sample_prefix-mappings-$label-request"
+  [[ -e "$request_file" || -e "$sample_prefix-mappings-$label" ]] && return 0
+  lima_memory_write_sample_file "$request_file" "$sample_row"
+}
+
+lima_memory_sample_mapping_loop() {
+  local proc_root="$1" server_pid="$2" sample_prefix="$3" history_file="$4"
+  local ready_file="$5" stop_file="$6" error_file="$7" interval_seconds="${8:-0.01}"
+  local label request_file done_file pending
+  while true; do
+    if [[ -e "$ready_file" ]]; then
+      for label in typical spike; do
+        request_file="$sample_prefix-mappings-$label-request"
+        done_file="$sample_prefix-mappings-$label-done"
+        if [[ -r "$request_file" && ! -e "$done_file" ]]; then
+          if ! lima_memory_write_mapping_sample "$proc_root" "$server_pid" "$sample_prefix" \
+            "$label" "$history_file"; then
+            rm -f -- "$sample_prefix-mappings-$label.tmp"
+            printf 'failed to capture a timestamp-aligned %s mapping sample\n' \
+              "$label" >"$error_file"
+            return 1
+          fi
+          : >"$done_file"
+        fi
+      done
+    fi
+    if [[ -e "$stop_file" ]]; then
+      pending=false
+      for label in typical spike; do
+        request_file="$sample_prefix-mappings-$label-request"
+        done_file="$sample_prefix-mappings-$label-done"
+        if [[ -r "$request_file" && ! -e "$done_file" ]]; then
+          pending=true
+        fi
+      done
+      [[ $pending == false ]] && return 0
+    fi
+    sleep "$interval_seconds"
+  done
+}
+
 lima_memory_mapping_capture_check() {
   local memory_peak_bytes="$1" mapping_typical_bytes="$2" mapping_spike_delta_bytes="$3"
-  local typical_file="$4" spike_file="$5"
+  local mapping_anon_tolerance_bytes="$4" typical_file="$5" spike_file="$6"
+  local typical_server_anon spike_server_anon typical_mapping_anon spike_mapping_anon
+  local typical_alignment_delta spike_alignment_delta
+  local server_anon_delta mapping_anon_delta anon_delta_difference
   if [[ ! $memory_peak_bytes =~ ^[0-9]+$ || ! $mapping_typical_bytes =~ ^[0-9]+$ ||
-    ! $mapping_spike_delta_bytes =~ ^[0-9]+$ ]]; then
+    ! $mapping_spike_delta_bytes =~ ^[0-9]+$ || ! $mapping_anon_tolerance_bytes =~ ^[0-9]+$ ]]; then
     printf 'mapping capture thresholds must be nonnegative integers\n' >&2
     return 1
   fi
@@ -205,11 +318,48 @@ lima_memory_mapping_capture_check() {
       "$memory_peak_bytes" >&2
     return 1
   fi
+  if [[ -s $typical_file ]]; then
+    typical_alignment_delta=$(awk -F= '$1 == "mapping_cgroup_alignment_delta_ns" { print $2; exit }' "$typical_file")
+    if [[ ! $typical_alignment_delta =~ ^[0-9]+$ ]] || (( typical_alignment_delta > 100000000 )); then
+      printf 'typical mapping sample is missing a cgroup pair within 100 ms\n' >&2
+      return 1
+    fi
+  fi
   if (( memory_peak_bytes >= mapping_typical_bytes + mapping_spike_delta_bytes )) &&
     [[ ! -s $spike_file ]]; then
     printf 'memory.peak reached %s bytes but no spike mapping sample was captured\n' \
       "$memory_peak_bytes" >&2
     return 1
+  fi
+  if (( memory_peak_bytes >= mapping_typical_bytes + mapping_spike_delta_bytes )); then
+    spike_alignment_delta=$(awk -F= '$1 == "mapping_cgroup_alignment_delta_ns" { print $2; exit }' "$spike_file")
+    if [[ ! $spike_alignment_delta =~ ^[0-9]+$ ]] || (( spike_alignment_delta > 100000000 )); then
+      printf 'spike mapping sample is missing a cgroup pair within 100 ms\n' >&2
+      return 1
+    fi
+    typical_server_anon=$(awk -F= '$1 == "server_process_anon_bytes" { print $2; exit }' "$typical_file")
+    spike_server_anon=$(awk -F= '$1 == "server_process_anon_bytes" { print $2; exit }' "$spike_file")
+    typical_mapping_anon=$(awk -F= '$1 == "mapping_anon_bytes" { print $2; exit }' "$typical_file")
+    spike_mapping_anon=$(awk -F= '$1 == "mapping_anon_bytes" { print $2; exit }' "$spike_file")
+    if [[ ! $typical_server_anon =~ ^[0-9]+$ || ! $spike_server_anon =~ ^[0-9]+$ ||
+      ! $typical_mapping_anon =~ ^[0-9]+$ || ! $spike_mapping_anon =~ ^[0-9]+$ ]]; then
+      printf 'typical and spike mapping samples must include server_process_anon_bytes and mapping_anon_bytes\n' >&2
+      return 1
+    fi
+    server_anon_delta=$((spike_server_anon - typical_server_anon))
+    if (( server_anon_delta < mapping_spike_delta_bytes )); then
+      printf 'mapping spike server anon increase was %s bytes, want at least %s\n' \
+        "$server_anon_delta" "$mapping_spike_delta_bytes" >&2
+      return 1
+    fi
+    mapping_anon_delta=$((spike_mapping_anon - typical_mapping_anon))
+    anon_delta_difference=$((server_anon_delta - mapping_anon_delta))
+    (( anon_delta_difference < 0 )) && anon_delta_difference=$((-anon_delta_difference))
+    if (( anon_delta_difference > mapping_anon_tolerance_bytes )); then
+      printf 'mapping anon delta was %s bytes for a %s-byte server anon increase (tolerance %s)\n' \
+        "$mapping_anon_delta" "$server_anon_delta" "$mapping_anon_tolerance_bytes" >&2
+      return 1
+    fi
   fi
 }
 
@@ -219,7 +369,8 @@ lima_memory_record_cgroup_sample() {
   local stat_anon_bytes=unknown stat_file_bytes=unknown stat_kernel_bytes=unknown
   local observed_current=-1 server_process_pid server_process_rss_bytes server_process_anon_bytes
   local photo_worker_process_count photo_worker_processes attribution incomplete_processes membership_snapshot
-  local before_pid after_pid found
+  local before_pid after_pid found mapping_typical_bytes mapping_spike_delta_bytes mapping_typical_preexisting
+  local mapping_typical_server_anon request_row
   local -a members_before=() members_after=() membership_changes=() incomplete_pids=()
 
   process_snapshot=$(lima_memory_process_snapshot "$proc_root" "$cgroup_dir/cgroup.procs" "$server_pid") || return 1
@@ -283,10 +434,10 @@ lima_memory_record_cgroup_sample() {
     incomplete_processes=$(printf '%s\n' "${incomplete_pids[@]}" | LC_ALL=C sort -u | paste -sd, -)
   fi
   sampled_at_unix_nano=$(date +%s%N) || return 1
-  printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+  printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
     "$sampled_at_unix_nano" "$current_bytes" "$stat_anon_bytes" "$stat_file_bytes" "$stat_kernel_bytes" \
     "$current_bytes" "$server_process_pid" "$server_process_rss_bytes" "$server_process_anon_bytes" \
-    "$photo_worker_process_count" "$photo_worker_processes" "$attribution" "$incomplete_processes" \
+    "$photo_worker_process_count" "$photo_worker_processes" "$attribution" "$incomplete_processes" "$peak_bytes" \
     >>"$sample_prefix-history" || return 1
 
   if [[ -r "$sample_prefix-stat-peak" ]]; then
@@ -307,33 +458,25 @@ lima_memory_record_cgroup_sample() {
     lima_memory_write_sample_file "$sample_prefix-stat-peak" "$current_bytes" || return 1
   fi
 
-  if [[ ${LIMA_MEMORY_CAPTURE_MAPS:-0} == 1 ]]; then
-    local mapping_typical_bytes=${LIMA_MEMORY_MAPPING_TYPICAL_BYTES:-31457280}
-    local mapping_spike_delta_bytes=${LIMA_MEMORY_MAPPING_SPIKE_DELTA_BYTES:-524288}
-    local mapping_spike_current=0
-    local mapping_typical_preexisting=false
+  if [[ ${LIMA_MEMORY_CAPTURE_MAPS:-0} == 1 && -e "$sample_prefix-mappings-ready" ]]; then
+    mapping_typical_bytes=${LIMA_MEMORY_MAPPING_TYPICAL_BYTES:-31457280}
+    mapping_spike_delta_bytes=${LIMA_MEMORY_MAPPING_SPIKE_DELTA_BYTES:-524288}
+    mapping_typical_preexisting=false
     if [[ -s "$sample_prefix-mappings-typical" ]]; then
       mapping_typical_preexisting=true
     fi
-    if [[ -r "$sample_prefix-mappings-spike-current" ]]; then
-      mapping_spike_current=$(<"$sample_prefix-mappings-spike-current") || return 1
-      [[ $mapping_spike_current =~ ^[0-9]+$ ]] || return 1
+    if [[ ! -e "$sample_prefix-mappings-typical-request" ]] && (( current_bytes >= mapping_typical_bytes )); then
+      request_row=$(tail -n 1 "$sample_prefix-history") || return 1
+      lima_memory_queue_mapping_request "$sample_prefix" typical "$request_row" || return 1
     fi
-    if [[ ! -e "$sample_prefix-mappings-typical" ]] && (( current_bytes >= mapping_typical_bytes )); then
-      if lima_memory_write_mapping_sample "$proc_root" "$server_pid" "$sample_prefix" typical \
-        "$sampled_at_unix_nano" "$current_bytes"; then
-        :
-      else
-        rm -f -- "$sample_prefix-mappings-typical.tmp"
-      fi
-    fi
-    if [[ $mapping_typical_preexisting == true ]] && (( current_bytes >= mapping_typical_bytes + mapping_spike_delta_bytes &&
-      ( mapping_spike_current == 0 || current_bytes >= mapping_spike_current + 1048576 ) )); then
-      if lima_memory_write_mapping_sample "$proc_root" "$server_pid" "$sample_prefix" spike \
-        "$sampled_at_unix_nano" "$current_bytes"; then
-        lima_memory_write_sample_file "$sample_prefix-mappings-spike-current" "$current_bytes" || return 1
-      else
-        rm -f -- "$sample_prefix-mappings-spike.tmp"
+    if [[ $mapping_typical_preexisting == true && ! -e "$sample_prefix-mappings-spike-request" &&
+      ! -e "$sample_prefix-mappings-spike" ]]; then
+      mapping_typical_server_anon=$(awk -F= '$1 == "server_process_anon_bytes" { print $2; exit }' \
+        "$sample_prefix-mappings-typical")
+      if [[ $mapping_typical_server_anon =~ ^[0-9]+$ && $server_process_anon_bytes =~ ^[0-9]+$ ]] &&
+        (( server_process_anon_bytes >= mapping_typical_server_anon + mapping_spike_delta_bytes )); then
+        request_row=$(tail -n 1 "$sample_prefix-history") || return 1
+        lima_memory_queue_mapping_request "$sample_prefix" spike "$request_row" || return 1
       fi
     fi
   fi
@@ -355,7 +498,7 @@ lima_memory_sample_cgroup_loop() {
 lima_memory_nearest_cgroup_sample() {
   local history_file="$1" target_timestamp="$2" maximum_delta_ns="${3:-100000000}"
   awk -F'|' -v target="$target_timestamp" -v maximum_delta="$maximum_delta_ns" '
-    NF == 13 && $1 ~ /^[0-9]+$/ {
+    NF == 14 && $1 ~ /^[0-9]+$/ {
       delta = $1 - target
       if (delta < 0) delta = -delta
       if (!found || delta < best_delta) {
