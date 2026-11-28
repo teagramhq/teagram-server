@@ -28,8 +28,10 @@ def patch(kind, changes, expected=True, policy=True):
         raise AssertionError(output)
 
 
-def can_i(expected, verb, resource, name=None):
+def can_i(expected, verb, resource, name=None, subresource=None):
     args = ["auth", "can-i", verb, f"{resource}/{name}" if name else resource]
+    if subresource:
+        args += ["--subresource", subresource]
     args += ["--as", SA, "-n", NAMESPACE]
     result = subprocess.run(["kubectl", *args], text=True, capture_output=True)
     answer = result.stdout.strip()
@@ -86,6 +88,7 @@ expected_rules = [
     {"apiGroups": ["apps"], "resources": ["deployments"], "resourceNames": ["teagram-web"], "verbs": ["get", "list", "watch", "patch"]},
     {"apiGroups": ["apps"], "resources": ["deployments"], "resourceNames": ["cloudflared"], "verbs": ["get"]},
     {"apiGroups": [""], "resources": ["services"], "resourceNames": ["teagram-web"], "verbs": ["get", "patch"]},
+    {"apiGroups": [""], "resources": ["services/proxy"], "resourceNames": ["teagram-web"], "verbs": ["get"]},
     {"apiGroups": ["apps"], "resources": ["replicasets"], "verbs": ["get", "list"]},
     {"apiGroups": [""], "resources": ["pods", "events"], "verbs": ["list"]},
 ]
@@ -143,6 +146,13 @@ web_pod = json.loads(kubectl("get", f"pod/{probe_names[0]}", "-n", NAMESPACE, "-
 web_ip = web_pod["status"]["podIP"]
 if not web_ip:
     raise AssertionError("web network probe pod has no IP")
+proxy_health = kubectl(
+    "--as", SA, "get", "--raw",
+    f"/api/v1/namespaces/{NAMESPACE}/services/teagram-web/proxy/healthz",
+)
+if proxy_health.strip() != "web-ok":
+    raise AssertionError(f"the web deployer service proxy returned an unexpected response: {proxy_health!r}")
+print("web deployer reached the fallback through the service proxy")
 for name in probe_names[1:3]:
     result = kubectl("exec", "-n", NAMESPACE, f"pod/{name}", "--", "wget", "-qO-", "-T", "3",
                      f"http://{web_ip}:8080/healthz")
@@ -169,6 +179,10 @@ for verb, resource, name in [("patch", "statefulsets.apps", "teagramd"),
                              ("get", "secrets", None), ("get", "pods/log", None),
                              ("create", "pods/exec", None), ("patch", "networkpolicies", "teagram-web")]:
     can_i("no", verb, resource, name)
+can_i("yes", "get", "services", "teagram-web", subresource="proxy")
+can_i("no", "get", "services", "kubernetes", subresource="proxy")
+can_i("no", "get", "pods")
+can_i("no", "create", "pods", subresource="portforward")
 
 patch("deployment", {"metadata": {"annotations": {"validation-check": "ok"}}})
 patch("service", {"metadata": {"annotations": {"validation-check": "ok"}}})
