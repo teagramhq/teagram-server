@@ -177,9 +177,37 @@ printf '3145728\n' >"$mapping_cgroup/memory.peak"
 printf '2000000\n' >"$mapping_cgroup/memory.current"
 printf 'low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\n' >"$mapping_cgroup/memory.events"
 printf 'anon 1500000\nfile 100000\nkernel 500000\n' >"$mapping_cgroup/memory.stat"
+mapping_curl_calls_file="$fixture/mapping-curl-calls"
+printf '0\n' >"$mapping_curl_calls_file"
+export mapping_curl_calls_file
+curl() {
+  local mapping_curl_calls
+  mapping_curl_calls=$(<"$mapping_curl_calls_file")
+  mapping_curl_calls=$((mapping_curl_calls + 1))
+  printf '%s\n' "$mapping_curl_calls" >"$mapping_curl_calls_file"
+  if (( mapping_curl_calls == 1 )); then
+    return 7
+  fi
+  printf '%s\n' '{"sample_unix_nano":123,"mappings":[{"rss_bytes":8192,"anonymous_bytes":4096,"mapping":"10000000-10002000 rw-p 00000000 00:00 0 [heap]"}]}'
+}
 LIMA_MEMORY_CAPTURE_MAPS=1 LIMA_MEMORY_MAPPING_TYPICAL_BYTES=1000000 \
   LIMA_MEMORY_MAPPING_SPIKE_DELTA_BYTES=500000 \
+  LIMA_MEMORY_MAPPING_ENDPOINT=http://127.0.0.1:2447/debug/runtime-memory-mappings \
   lima_memory_record_cgroup_sample "$mapping_cgroup" "$proc_root" 101 "$mapping_prefix"
+if [[ -e "$mapping_prefix-mappings-typical" ]]; then
+  printf 'typical mapping sample was persisted after a transient endpoint failure\n' >&2
+  exit 1
+fi
+LIMA_MEMORY_CAPTURE_MAPS=1 LIMA_MEMORY_MAPPING_TYPICAL_BYTES=1000000 \
+  LIMA_MEMORY_MAPPING_SPIKE_DELTA_BYTES=500000 \
+  LIMA_MEMORY_MAPPING_ENDPOINT=http://127.0.0.1:2447/debug/runtime-memory-mappings \
+  lima_memory_record_cgroup_sample "$mapping_cgroup" "$proc_root" 101 "$mapping_prefix"
+mapping_curl_calls=$(<"$mapping_curl_calls_file")
+if [[ $mapping_curl_calls != 3 ]]; then
+  printf 'mapping endpoint retries = %s requests, want 3 after one transient failure\n' "$mapping_curl_calls" >&2
+  exit 1
+fi
+unset -f curl
 for label in typical spike; do
   if [[ ! -r "$mapping_prefix-mappings-$label" ]] ||
     ! grep -Fq '8192|4096|10000000-' "$mapping_prefix-mappings-$label"; then

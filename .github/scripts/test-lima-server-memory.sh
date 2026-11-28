@@ -40,7 +40,7 @@ if [[ ! $LIMA_MEMORY_PROBE_USERNAME_PREFIX =~ ^[A-Za-z0-9_]{1,22}$ ]]; then
     "$LIMA_MEMORY_PROBE_USERNAME_PREFIX" >&2
   exit 2
 fi
-LIMA_MEMORY_MAPPING_ENDPOINT=
+LIMA_MEMORY_MAPPING_ENDPOINT=''
 lima_memory_configure_mapping_endpoint
 MEMORY_CGROUP_DIR=
 MEMORY_CURRENT_FILE=
@@ -85,7 +85,7 @@ finish() {
   stop_memory_sampler
 
   local runtime_sample=unavailable runtime_sample_current=unknown runtime_gc_cpu_fraction=unknown
-  local runtime_cgroup_sample_unix_nano=unknown runtime_sample_alignment_delta_ns=unknown runtime_cgroup_sample= runtime_bundle
+  local runtime_cgroup_sample_unix_nano=unknown runtime_sample_alignment_delta_ns=unknown runtime_cgroup_sample='' runtime_bundle=''
   local runtime_cgroup_anon_bytes=unknown runtime_cgroup_file_bytes=unknown runtime_cgroup_kernel_bytes=unknown
   local runtime_process_sample_peak_bytes=unknown runtime_server_pid=unknown runtime_server_rss_bytes=unknown
   local runtime_server_anon_bytes=unknown runtime_photo_worker_count=unknown runtime_photo_worker_processes=unknown
@@ -503,6 +503,20 @@ stop_memory_sampler
 if [[ -r $MEMORY_SAMPLE_ERROR_FILE ]]; then
   cat "$MEMORY_SAMPLE_ERROR_FILE" >&2
   exit 1
+fi
+if [[ ${LIMA_MEMORY_CAPTURE_MAPS:-0} == 1 ]]; then
+  mapping_sample_peak_current=$(<"$MEMORY_SAMPLE_STAT_PEAK_FILE")
+  mapping_typical_bytes=${LIMA_MEMORY_MAPPING_TYPICAL_BYTES:-31457280}
+  mapping_spike_delta_bytes=${LIMA_MEMORY_MAPPING_SPIKE_DELTA_BYTES:-4194304}
+  if [[ ! -s "$RUNNER_TEMP/lima-memory-sampled-mappings-typical" ]]; then
+    echo 'mapping diagnostics did not capture a typical server mapping sample' >&2
+    exit 1
+  fi
+  if (( mapping_sample_peak_current >= mapping_typical_bytes + mapping_spike_delta_bytes )) &&
+    [[ ! -s "$RUNNER_TEMP/lima-memory-sampled-mappings-spike" ]]; then
+    echo 'mapping diagnostics missed the sampled cgroup-current spike' >&2
+    exit 1
+  fi
 fi
 if [[ ! -r $MEMORY_SAMPLE_RUNTIME_FILE ]]; then
   echo 'memory probe did not capture a timestamp-aligned Go runtime and cgroup/process sample' >&2

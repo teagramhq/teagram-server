@@ -147,7 +147,7 @@ lima_memory_write_sample_file() {
 }
 
 lima_memory_configure_mapping_endpoint() {
-  LIMA_MEMORY_MAPPING_ENDPOINT=
+  LIMA_MEMORY_MAPPING_ENDPOINT=''
   if [[ ${LIMA_MEMORY_CAPTURE_MAPS:-0} == 1 ]]; then
     LIMA_MEMORY_MAPPING_ENDPOINT=http://127.0.0.1:2447/debug/runtime-memory-mappings
   fi
@@ -155,11 +155,11 @@ lima_memory_configure_mapping_endpoint() {
 }
 
 lima_memory_process_mapping_snapshot() {
-  local proc_root="$1" server_pid="$2"
+  local proc_root="$1" server_pid="$2" mapping_json
   if [[ -n ${LIMA_MEMORY_MAPPING_ENDPOINT:-} ]]; then
-    curl --noproxy '*' --fail --connect-timeout 1 --max-time 2 --silent --show-error \
-      "$LIMA_MEMORY_MAPPING_ENDPOINT" |
-      jq -r '"mapping_sample_unix_nano=\(.sample_unix_nano)", (.mappings[] | "\(.rss_bytes)|\(.anonymous_bytes)|\(.mapping)")' |
+    mapping_json=$(curl --noproxy '*' --fail --connect-timeout 1 --max-time 2 --silent \
+      "$LIMA_MEMORY_MAPPING_ENDPOINT") || return 1
+    jq -r '"mapping_sample_unix_nano=\(.sample_unix_nano)", (.mappings[] | "\(.rss_bytes)|\(.anonymous_bytes)|\(.mapping)")' <<<"$mapping_json" |
       sed -n '1,21p'
     return
   fi
@@ -177,6 +177,19 @@ lima_memory_process_mapping_snapshot() {
       if (mapping != "") print rss_bytes "|" anonymous_bytes "|" mapping
     }
   ' "$proc_root/$server_pid/smaps" | LC_ALL=C sort -t'|' -k1,1nr | sed -n '1,20p'
+}
+
+lima_memory_write_mapping_sample() {
+  local proc_root="$1" server_pid="$2" sample_prefix="$3" label="$4"
+  local sampled_at_unix_nano="$5" current_bytes="$6" mapping_tmp mapping_snapshot
+  mapping_tmp="$sample_prefix-mappings-$label.tmp"
+  mapping_snapshot=$(lima_memory_process_mapping_snapshot "$proc_root" "$server_pid") || return 1
+  {
+    printf 'cgroup_sample_unix_nano=%s cgroup_current_bytes=%s server_pid=%s\n' \
+      "$sampled_at_unix_nano" "$current_bytes" "$server_pid"
+    printf '%s\n' "$mapping_snapshot"
+  } >"$mapping_tmp" || return 1
+  mv -- "$mapping_tmp" "$sample_prefix-mappings-$label"
 }
 
 lima_memory_record_cgroup_sample() {
@@ -276,30 +289,27 @@ lima_memory_record_cgroup_sample() {
   if [[ ${LIMA_MEMORY_CAPTURE_MAPS:-0} == 1 ]]; then
     local mapping_typical_bytes=${LIMA_MEMORY_MAPPING_TYPICAL_BYTES:-31457280}
     local mapping_spike_delta_bytes=${LIMA_MEMORY_MAPPING_SPIKE_DELTA_BYTES:-4194304}
-    local mapping_spike_current=0 mapping_tmp
+    local mapping_spike_current=0
     if [[ -r "$sample_prefix-mappings-spike-current" ]]; then
       mapping_spike_current=$(<"$sample_prefix-mappings-spike-current") || return 1
       [[ $mapping_spike_current =~ ^[0-9]+$ ]] || return 1
     fi
     if [[ ! -e "$sample_prefix-mappings-typical" ]] && (( current_bytes >= mapping_typical_bytes )); then
-      mapping_tmp="$sample_prefix-mappings-typical.tmp"
-      {
-        printf 'cgroup_sample_unix_nano=%s cgroup_current_bytes=%s server_pid=%s\n' \
-          "$sampled_at_unix_nano" "$current_bytes" "$server_pid"
-        lima_memory_process_mapping_snapshot "$proc_root" "$server_pid"
-      } >"$mapping_tmp" || return 1
-      mv -- "$mapping_tmp" "$sample_prefix-mappings-typical" || return 1
+      if lima_memory_write_mapping_sample "$proc_root" "$server_pid" "$sample_prefix" typical \
+        "$sampled_at_unix_nano" "$current_bytes"; then
+        :
+      else
+        rm -f -- "$sample_prefix-mappings-typical.tmp"
+      fi
     fi
     if (( current_bytes >= mapping_typical_bytes + mapping_spike_delta_bytes &&
       ( mapping_spike_current == 0 || current_bytes >= mapping_spike_current + 1048576 ) )); then
-      mapping_tmp="$sample_prefix-mappings-spike.tmp"
-      {
-        printf 'cgroup_sample_unix_nano=%s cgroup_current_bytes=%s server_pid=%s\n' \
-          "$sampled_at_unix_nano" "$current_bytes" "$server_pid"
-        lima_memory_process_mapping_snapshot "$proc_root" "$server_pid"
-      } >"$mapping_tmp" || return 1
-      mv -- "$mapping_tmp" "$sample_prefix-mappings-spike" || return 1
-      lima_memory_write_sample_file "$sample_prefix-mappings-spike-current" "$current_bytes" || return 1
+      if lima_memory_write_mapping_sample "$proc_root" "$server_pid" "$sample_prefix" spike \
+        "$sampled_at_unix_nano" "$current_bytes"; then
+        lima_memory_write_sample_file "$sample_prefix-mappings-spike-current" "$current_bytes" || return 1
+      else
+        rm -f -- "$sample_prefix-mappings-spike.tmp"
+      fi
     fi
   fi
 }
@@ -340,7 +350,7 @@ lima_memory_sample_runtime_metrics_loop() {
   local runtime_file="$5" error_file="$6" stop_file="$7"
   local interval_seconds="${8:-0.01}" last_runtime_sample_current=0 best_runtime_sample_current=0
   local sampled_current runtime_sample_timestamp sample_row sample_timestamp sample_current runtime_sample_tmp runtime_bundle_tmp
-  local has_runtime_sample=false sample_attempt
+  local has_runtime_sample=false
 
   while true; do
     if [[ ! -e "$ready_file" ]]; then
@@ -372,7 +382,7 @@ lima_memory_sample_runtime_metrics_loop() {
           return 1
         fi
         sample_row=
-        for sample_attempt in $(seq 20); do
+        for _ in {1..20}; do
           sample_row=$(lima_memory_nearest_cgroup_sample "$sample_history_file" "$runtime_sample_timestamp")
           if [[ -n "$sample_row" ]]; then
             break
