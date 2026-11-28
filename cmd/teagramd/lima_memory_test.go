@@ -77,6 +77,25 @@ func TestApplyLimaGoMemoryLimitPreservesTargetBelowCgroupCeiling(t *testing.T) {
 	restore()
 }
 
+func TestLimaGoMemoryLimitIsAppliedBeforeStartupWork(t *testing.T) {
+	previousLimit := debug.SetMemoryLimit(20 << 20)
+	t.Cleanup(func() { debug.SetMemoryLimit(previousLimit) })
+	memoryMaxPath := writeLimaTestCgroupMemoryMax(t, "48234496")
+
+	var observedLimit int64
+	restore, err := withLimaGoMemoryLimit(slog.Default(), memoryMaxPath, func() error {
+		observedLimit = currentLimaTestMemoryLimit()
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("run bounded startup work: %v", err)
+	}
+	if observedLimit != 14<<20 {
+		t.Fatalf("Go memory limit during startup work = %d bytes, want 14 MiB", observedLimit)
+	}
+	restore()
+}
+
 func writeLimaTestCgroupMemoryMax(t *testing.T, value string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "memory.max")
@@ -156,7 +175,9 @@ func TestLimaRuntimeMemoryEndpointReportsGoHeapAndRuntimeAttribution(t *testing.
 }
 
 func TestReadLimaRuntimeMemoryMappingsRanksRSSAndAnonymousBytes(t *testing.T) {
-	smapsPath := filepath.Join(t.TempDir(), "smaps")
+	directory := t.TempDir()
+	smapsPath := filepath.Join(directory, "smaps")
+	statusPath := filepath.Join(directory, "status")
 	smaps := "10000000-10002000 rw-p 00000000 00:00 0 [heap]\n" +
 		"Size: 8 kB\nRss: 8 kB\nAnonymous: 4 kB\n" +
 		"20000000-20001000 r--p 00000000 00:00 0 /fixture/map.dat\n" +
@@ -164,12 +185,15 @@ func TestReadLimaRuntimeMemoryMappingsRanksRSSAndAnonymousBytes(t *testing.T) {
 	if err := os.WriteFile(smapsPath, []byte(smaps), 0o600); err != nil {
 		t.Fatalf("write smaps fixture: %v", err)
 	}
+	if err := os.WriteFile(statusPath, []byte("Name: teagramd\nRssAnon: 16 kB\n"), 0o600); err != nil {
+		t.Fatalf("write process status fixture: %v", err)
+	}
 
-	sample, err := readLimaRuntimeMemoryMappings(smapsPath)
+	sample, err := readLimaRuntimeMemoryMappings(smapsPath, statusPath)
 	if err != nil {
 		t.Fatalf("read runtime memory mappings: %v", err)
 	}
-	if sample.SampleUnixNano <= 0 || len(sample.Mappings) != 2 {
+	if sample.SampleUnixNano <= 0 || len(sample.Mappings) != 2 || sample.ProcessAnonymousBytes != 16*1024 {
 		t.Fatalf("runtime memory mappings = %+v, want timestamped two-mapping sample", sample)
 	}
 	if sample.TotalAnonymousBytes != 16*1024 {
@@ -185,7 +209,9 @@ func TestReadLimaRuntimeMemoryMappingsRanksRSSAndAnonymousBytes(t *testing.T) {
 }
 
 func TestReadLimaRuntimeMemoryMappingsTotalsAnonymousBytesBeforeTruncating(t *testing.T) {
-	smapsPath := filepath.Join(t.TempDir(), "smaps")
+	directory := t.TempDir()
+	smapsPath := filepath.Join(directory, "smaps")
+	statusPath := filepath.Join(directory, "status")
 	var smaps strings.Builder
 	for index := range 21 {
 		address := 0x10000000 + index*0x2000
@@ -197,8 +223,11 @@ func TestReadLimaRuntimeMemoryMappingsTotalsAnonymousBytesBeforeTruncating(t *te
 	if err := os.WriteFile(smapsPath, []byte(smaps.String()), 0o600); err != nil {
 		t.Fatalf("write smaps fixture: %v", err)
 	}
+	if err := os.WriteFile(statusPath, []byte("RssAnon: 84 kB\n"), 0o600); err != nil {
+		t.Fatalf("write process status fixture: %v", err)
+	}
 
-	sample, err := readLimaRuntimeMemoryMappings(smapsPath)
+	sample, err := readLimaRuntimeMemoryMappings(smapsPath, statusPath)
 	if err != nil {
 		t.Fatalf("read runtime memory mappings: %v", err)
 	}
@@ -207,6 +236,9 @@ func TestReadLimaRuntimeMemoryMappingsTotalsAnonymousBytesBeforeTruncating(t *te
 	}
 	if sample.TotalAnonymousBytes != 42*1024 {
 		t.Fatalf("total anonymous mapping bytes = %d, want 42 KiB across all 21 mappings", sample.TotalAnonymousBytes)
+	}
+	if sample.ProcessAnonymousBytes != 84*1024 {
+		t.Fatalf("process anonymous bytes = %d, want 84 KiB", sample.ProcessAnonymousBytes)
 	}
 	if got := sample.Mappings[len(sample.Mappings)-1].RSSBytes; got != 2*1024 {
 		t.Fatalf("smallest returned mapping RSS = %d, want second-smallest 2 KiB after truncation", got)
@@ -237,9 +269,10 @@ func TestLimaRuntimeMemoryMappingsEndpointReportsProcessMappings(t *testing.T) {
 	}
 
 	var got struct {
-		SampleUnixNano      int64  `json:"sample_unix_nano"`
-		TotalAnonymousBytes uint64 `json:"total_anonymous_bytes"`
-		Mappings            []struct {
+		SampleUnixNano        int64  `json:"sample_unix_nano"`
+		TotalAnonymousBytes   uint64 `json:"total_anonymous_bytes"`
+		ProcessAnonymousBytes uint64 `json:"process_anon_bytes"`
+		Mappings              []struct {
 			RSSBytes       uint64 `json:"rss_bytes"`
 			AnonymousBytes uint64 `json:"anonymous_bytes"`
 			Mapping        string `json:"mapping"`
@@ -248,7 +281,7 @@ func TestLimaRuntimeMemoryMappingsEndpointReportsProcessMappings(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&got); err != nil {
 		t.Fatalf("decode runtime memory mappings: %v", err)
 	}
-	if got.SampleUnixNano <= 0 || got.TotalAnonymousBytes == 0 || len(got.Mappings) == 0 {
+	if got.SampleUnixNano <= 0 || got.TotalAnonymousBytes == 0 || got.ProcessAnonymousBytes == 0 || len(got.Mappings) == 0 {
 		t.Fatalf("runtime memory mappings = %+v, want a timestamped non-empty sample", got)
 	}
 	for _, mapping := range got.Mappings {

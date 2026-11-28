@@ -1060,14 +1060,33 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 	if err := validateServeEnvironment(); err != nil {
 		return err
 	}
-	cfg, err := config.LoadServerConfig(log)
+	var cfg config.Config
+	var stickerSets *api.StickerSetCatalog
+	var stopLimaMemoryDiagnostics func()
+	var startupErr error
+	restoreLimaGoMemoryLimit, err := withLimaGoMemoryLimit(log, limaCgroupMemoryMaxPath, func() error {
+		stopLimaMemoryDiagnostics, startupErr = startLimaRuntimeMemoryDiagnostics(log)
+		if startupErr != nil {
+			return startupErr
+		}
+		cfg, startupErr = config.LoadServerConfig(log)
+		if startupErr != nil {
+			return startupErr
+		}
+		stickerSets, startupErr = api.LoadStickerSetCatalog(cfg.StickerBundle)
+		if startupErr != nil {
+			return fmt.Errorf("load sticker catalogue: %w", startupErr)
+		}
+		return nil
+	})
 	if err != nil {
+		if stopLimaMemoryDiagnostics != nil {
+			stopLimaMemoryDiagnostics()
+		}
 		return err
 	}
-	stickerSets, err := api.LoadStickerSetCatalog(cfg.StickerBundle)
-	if err != nil {
-		return fmt.Errorf("load sticker catalogue: %w", err)
-	}
+	defer restoreLimaGoMemoryLimit()
+	defer stopLimaMemoryDiagnostics()
 	blobAuthority, err := blobmode.Read(blobModePath, blobmode.EffectiveConfig{BlobDir: cfg.BlobDir, BlobS3: cfg.BlobS3})
 	if err != nil {
 		return err
@@ -1086,13 +1105,6 @@ func runAtBlobModePath(log *slog.Logger, blobModePath string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	restoreLimaGoMemoryLimit := applyLimaGoMemoryLimit(log, limaCgroupMemoryMaxPath)
-	defer restoreLimaGoMemoryLimit()
-	stopLimaMemoryDiagnostics, err := startLimaRuntimeMemoryDiagnostics(log)
-	if err != nil {
-		return err
-	}
-	defer stopLimaMemoryDiagnostics()
 	stopShutdownWatchdog := startProcessShutdownWatchdog(ctx, processShutdownTimeout)
 	defer stopShutdownWatchdog()
 	serviceCtx, cancelService := context.WithCancel(context.Background())

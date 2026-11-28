@@ -82,16 +82,17 @@ mapping_snapshot=$(lima_memory_process_mapping_snapshot "$proc_root" 101)
 expected=$'8192|4096\n4096|0'
 if [[ $(sed -n '1p' <<<"$mapping_snapshot") != mapping_sample_unix_nano=* ||
   $(sed -n '2p' <<<"$mapping_snapshot") != mapping_anon_bytes=4096 ||
-  $(sed -n '3,4p' <<<"$mapping_snapshot" | cut -d'|' -f1,2) != "$expected" ]]; then
+  $(sed -n '3p' <<<"$mapping_snapshot") != server_process_anon_bytes=81920 ||
+  $(sed -n '4,5p' <<<"$mapping_snapshot" | cut -d'|' -f1,2) != "$expected" ]]; then
   printf 'mapping RSS snapshot = %s, want %s\n' "$mapping_snapshot" "$expected" >&2
   exit 1
 fi
 curl() {
-  printf '%s\n' '{"sample_unix_nano":123,"total_anonymous_bytes":16384,"mappings":[{"rss_bytes":8192,"anonymous_bytes":4096,"mapping":"10000000-10002000 rw-p 00000000 00:00 0 [heap]"},{"rss_bytes":4096,"anonymous_bytes":0,"mapping":"20000000-20001000 r--p 00000000 00:00 0 /fixture/map.dat"}]}'
+  printf '%s\n' '{"sample_unix_nano":123,"total_anonymous_bytes":16384,"process_anon_bytes":81920,"mappings":[{"rss_bytes":8192,"anonymous_bytes":4096,"mapping":"10000000-10002000 rw-p 00000000 00:00 0 [heap]"},{"rss_bytes":4096,"anonymous_bytes":0,"mapping":"20000000-20001000 r--p 00000000 00:00 0 /fixture/map.dat"}]}'
 }
 mapping_snapshot=$(LIMA_MEMORY_MAPPING_ENDPOINT=http://127.0.0.1:2447/debug/runtime-memory-mappings \
   lima_memory_process_mapping_snapshot "$proc_root" 101)
-if [[ "$mapping_snapshot" != $'mapping_sample_unix_nano=123\nmapping_anon_bytes=16384\n8192|4096|10000000-10002000 rw-p 00000000 00:00 0 [heap]\n4096|0|20000000-20001000 r--p 00000000 00:00 0 /fixture/map.dat' ]]; then
+if [[ "$mapping_snapshot" != $'mapping_sample_unix_nano=123\nmapping_anon_bytes=16384\nserver_process_anon_bytes=81920\n8192|4096|10000000-10002000 rw-p 00000000 00:00 0 [heap]\n4096|0|20000000-20001000 r--p 00000000 00:00 0 /fixture/map.dat' ]]; then
   printf 'endpoint mapping snapshot = %s, want fixture mappings in RSS order\n' "$mapping_snapshot" >&2
   exit 1
 fi
@@ -107,7 +108,7 @@ fi
 export -f lima_memory_process_mapping_snapshot
 export -f curl
 mapping_snapshot_in_child=$(bash -c 'lima_memory_process_mapping_snapshot "$1" 101' _ "$proc_root")
-if [[ "$mapping_snapshot_in_child" != $'mapping_sample_unix_nano=123\nmapping_anon_bytes=16384\n8192|4096|10000000-10002000 rw-p 00000000 00:00 0 [heap]\n4096|0|20000000-20001000 r--p 00000000 00:00 0 /fixture/map.dat' ]]; then
+if [[ "$mapping_snapshot_in_child" != $'mapping_sample_unix_nano=123\nmapping_anon_bytes=16384\nserver_process_anon_bytes=81920\n8192|4096|10000000-10002000 rw-p 00000000 00:00 0 [heap]\n4096|0|20000000-20001000 r--p 00000000 00:00 0 /fixture/map.dat' ]]; then
   printf 'mapping snapshot in sampler child = %s, want timestamped mapping rows\n' \
     "$mapping_snapshot_in_child" >&2
   exit 1
@@ -247,8 +248,8 @@ curl() {
   else
     mapping_anon_bytes=819200
   fi
-  printf '{"sample_unix_nano":%s,"total_anonymous_bytes":%s,"mappings":[{"rss_bytes":%s,"anonymous_bytes":%s,"mapping":"10000000-10002000 rw-p 00000000 00:00 0 [anon: Go: heap]"}]}\n' \
-    "$sample_unix_nano" "$mapping_anon_bytes" "$mapping_anon_bytes" "$mapping_anon_bytes"
+  printf '{"sample_unix_nano":%s,"total_anonymous_bytes":%s,"process_anon_bytes":%s,"mappings":[{"rss_bytes":%s,"anonymous_bytes":%s,"mapping":"10000000-10002000 rw-p 00000000 00:00 0 [anon: Go: heap]"}]}\n' \
+    "$sample_unix_nano" "$mapping_anon_bytes" "$mapping_anon_bytes" "$mapping_anon_bytes" "$mapping_anon_bytes"
 }
 export -f curl
 export LIMA_MEMORY_CAPTURE_MAPS=1
@@ -431,6 +432,21 @@ if mapping_guard_report=$(lima_memory_mapping_capture_check 2500000 1000000 5000
 fi
 if [[ $mapping_guard_report != *'server anon increase was 100000 bytes, want at least 500000'* ]]; then
   printf 'mapping capture guard anon report = %s, want the measured server anon delta\n' \
+    "$mapping_guard_report" >&2
+  exit 1
+fi
+cat >"$mapping_guard_spike" <<'EOF'
+mapping_cgroup_alignment_delta_ns=50000000
+server_process_anon_bytes=1262144
+mapping_anon_bytes=900000
+EOF
+if mapping_guard_report=$(lima_memory_mapping_capture_check 2500000 1000000 262144 1048576 \
+  "$mapping_guard_typical" "$mapping_guard_spike" 2>&1); then
+  printf 'mapping capture guard accepted unchanged mappings for a 256 KiB server anon increase\n' >&2
+  exit 1
+fi
+if [[ $mapping_guard_report != *'mapping anon delta was 0 bytes for a 262144-byte server anon increase'* ]]; then
+  printf 'mapping capture guard unchanged-map report = %s, want the unexplained server anon increase\n' \
     "$mapping_guard_report" >&2
   exit 1
 fi

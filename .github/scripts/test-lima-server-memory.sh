@@ -368,6 +368,61 @@ else
   exit 1
 fi
 
+runtime_diagnostics_ready=false
+for _ in $(seq 300); do
+  if curl --noproxy '*' --fail --connect-timeout 1 --max-time 2 --silent --show-error \
+    --output /dev/null http://127.0.0.1:2447/debug/runtime-memory; then
+    runtime_diagnostics_ready=true
+    break
+  fi
+  if [[ $(docker inspect --format '{{.State.Running}}' "$CONTAINER") != true ]]; then
+    echo 'service container exited before runtime memory diagnostics became ready' >&2
+    exit 1
+  fi
+  sleep 0.1
+done
+if [[ $runtime_diagnostics_ready != true ]]; then
+  echo 'Lima runtime memory diagnostics did not accept a startup request on 127.0.0.1:2447' >&2
+  exit 1
+fi
+touch "$MEMORY_SAMPLE_RUNTIME_READY_FILE"
+if [[ ${LIMA_MEMORY_CAPTURE_MAPS:-0} == 1 ]]; then
+  typical_request_row=
+  for _ in $(seq 500); do
+    if [[ -r $RUNNER_TEMP/lima-memory-sampled-history ]]; then
+      typical_request_row=$(tail -n 1 "$RUNNER_TEMP/lima-memory-sampled-history")
+      [[ -n $typical_request_row ]] && break
+    fi
+    sleep 0.01
+  done
+  if [[ -z $typical_request_row ]]; then
+    echo 'mapping diagnostics did not record a startup cgroup/process baseline' >&2
+    exit 1
+  fi
+  if ! lima_memory_queue_mapping_request "$RUNNER_TEMP/lima-memory-sampled" typical \
+    "$typical_request_row"; then
+    echo 'mapping diagnostics could not queue the startup typical sample' >&2
+    exit 1
+  fi
+  touch "$MEMORY_SAMPLE_MAPPING_READY_FILE"
+  typical_capture_complete=false
+  for _ in $(seq 500); do
+    if [[ -s $RUNNER_TEMP/lima-memory-sampled-mappings-typical ]]; then
+      typical_capture_complete=true
+      break
+    fi
+    if [[ -r $MEMORY_SAMPLE_ERROR_FILE ]]; then
+      cat "$MEMORY_SAMPLE_ERROR_FILE" >&2
+      exit 1
+    fi
+    sleep 0.01
+  done
+  if [[ $typical_capture_complete != true ]]; then
+    echo 'mapping diagnostics did not capture the startup baseline' >&2
+    exit 1
+  fi
+fi
+
 for attempt in $(seq 30); do
   if docker logs "$CONTAINER" 2>&1 | grep -q 'msg=listening'; then
     break
@@ -431,49 +486,6 @@ if [[ $websocket_listener_ready != true ]]; then
   echo 'Lima WebSocket listener did not accept an HTTP connection on 127.0.0.1:2446' >&2
   exit 1
 fi
-if ! curl --noproxy '*' --fail --connect-timeout 1 --max-time 2 --silent --show-error \
-  --output /dev/null http://127.0.0.1:2447/debug/runtime-memory; then
-  echo 'Lima runtime memory diagnostics did not accept a request on 127.0.0.1:2447' >&2
-  exit 1
-fi
-touch "$MEMORY_SAMPLE_RUNTIME_READY_FILE"
-if [[ ${LIMA_MEMORY_CAPTURE_MAPS:-0} == 1 ]]; then
-  typical_request_row=
-  for _ in $(seq 50); do
-    if [[ -r $RUNNER_TEMP/lima-memory-sampled-history ]]; then
-      typical_request_row=$(tail -n 1 "$RUNNER_TEMP/lima-memory-sampled-history")
-      [[ -n $typical_request_row ]] && break
-    fi
-    sleep 0.01
-  done
-  if [[ -z $typical_request_row ]]; then
-    echo 'mapping diagnostics did not record a cgroup/process baseline before uploads' >&2
-    exit 1
-  fi
-  if ! lima_memory_queue_mapping_request "$RUNNER_TEMP/lima-memory-sampled" typical \
-    "$typical_request_row"; then
-    echo 'mapping diagnostics could not queue the pre-upload typical sample' >&2
-    exit 1
-  fi
-  touch "$MEMORY_SAMPLE_MAPPING_READY_FILE"
-  typical_capture_complete=false
-  for _ in $(seq 500); do
-    if [[ -s $RUNNER_TEMP/lima-memory-sampled-mappings-typical ]]; then
-      typical_capture_complete=true
-      break
-    fi
-    if [[ -r $MEMORY_SAMPLE_ERROR_FILE ]]; then
-      cat "$MEMORY_SAMPLE_ERROR_FILE" >&2
-      exit 1
-    fi
-    sleep 0.01
-  done
-  if [[ $typical_capture_complete != true ]]; then
-    echo 'mapping diagnostics did not capture the typical baseline before uploads' >&2
-    exit 1
-  fi
-fi
-
 run_setup_command client-config >"$RUNNER_TEMP/lima-memory-client.json"
 chmod 600 "$RUNNER_TEMP/lima-memory-client.json"
 go build -o "$RUNNER_TEMP/mtproto-smoke" ./cmd/mtproto-smoke
@@ -559,7 +571,7 @@ if [[ ${LIMA_MEMORY_CAPTURE_MAPS:-0} == 1 ]]; then
   mapping_cgroup_peak=$(<"$MEMORY_PEAK_FILE")
   mapping_typical_bytes=${LIMA_MEMORY_MAPPING_TYPICAL_BYTES:-31457280}
   mapping_spike_delta_bytes=$(lima_memory_mapping_spike_delta_bytes) || exit 1
-  mapping_anon_tolerance_bytes=${LIMA_MEMORY_MAPPING_ANON_TOLERANCE_BYTES:-1048576}
+  mapping_anon_tolerance_bytes=${LIMA_MEMORY_MAPPING_ANON_TOLERANCE_BYTES:-131072}
   if ! lima_memory_mapping_capture_check "$mapping_cgroup_peak" "$mapping_typical_bytes" \
     "$mapping_spike_delta_bytes" "$mapping_anon_tolerance_bytes" \
     "$RUNNER_TEMP/lima-memory-sampled-mappings-typical" \

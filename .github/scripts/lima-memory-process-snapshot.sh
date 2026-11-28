@@ -171,7 +171,7 @@ lima_memory_configure_mapping_endpoint() {
 }
 
 lima_memory_process_mapping_snapshot() {
-  local proc_root="$1" server_pid="$2" mapping_json mapping_rows mapping_anon_bytes sampled_at_unix_nano
+  local proc_root="$1" server_pid="$2" mapping_json mapping_rows mapping_anon_bytes sampled_at_unix_nano server_anon_bytes
   if [[ -n ${LIMA_MEMORY_MAPPING_ENDPOINT:-} ]]; then
     mapping_json=$(curl --noproxy '*' --fail --connect-timeout 1 --max-time 2 --silent \
       "$LIMA_MEMORY_MAPPING_ENDPOINT") || return 1
@@ -179,6 +179,7 @@ lima_memory_process_mapping_snapshot() {
       select(.sample_unix_nano | type == "number" and . > 0) |
       "mapping_sample_unix_nano=\(.sample_unix_nano)",
       "mapping_anon_bytes=\(.total_anonymous_bytes)",
+      "server_process_anon_bytes=\(.process_anon_bytes)",
       (.mappings | sort_by(-.rss_bytes) | .[:20][] | "\(.rss_bytes)|\(.anonymous_bytes)|\(.mapping)")
     ' <<<"$mapping_json"
     return
@@ -199,15 +200,17 @@ lima_memory_process_mapping_snapshot() {
       if (mapping != "") print rss_bytes "|" anonymous_bytes "|" mapping
     }
   ' "$proc_root/$server_pid/smaps" | LC_ALL=C sort -t'|' -k1,1nr | sed -n '1,20p') || return 1
+  server_anon_bytes=$(awk '$1 == "RssAnon:" { print $2 * 1024; found = 1; exit } END { if (!found) exit 1 }' \
+    "$proc_root/$server_pid/status") || return 1
   sampled_at_unix_nano=$(date +%s%N) || return 1
-  printf 'mapping_sample_unix_nano=%s\nmapping_anon_bytes=%s\n' \
-    "$sampled_at_unix_nano" "$mapping_anon_bytes"
+  printf 'mapping_sample_unix_nano=%s\nmapping_anon_bytes=%s\nserver_process_anon_bytes=%s\n' \
+    "$sampled_at_unix_nano" "$mapping_anon_bytes" "$server_anon_bytes"
   [[ -z $mapping_rows ]] || printf '%s\n' "$mapping_rows"
 }
 
 lima_memory_write_mapping_sample() {
   local proc_root="$1" server_pid="$2" sample_prefix="$3" label="$4" history_file="$5"
-  local mapping_tmp mapping_snapshot mapping_timestamp mapping_anon_bytes cgroup_sample
+  local mapping_tmp mapping_snapshot mapping_timestamp mapping_anon_bytes mapping_server_anon_bytes cgroup_sample
   local cgroup_timestamp cgroup_current anon_bytes file_bytes kernel_bytes
   local sampled_server_pid server_rss_bytes server_anon_bytes worker_count worker_processes attribution incomplete_pids
   local cgroup_memory_peak alignment_delta
@@ -215,7 +218,9 @@ lima_memory_write_mapping_sample() {
   mapping_snapshot=$(lima_memory_process_mapping_snapshot "$proc_root" "$server_pid") || return 1
   mapping_timestamp=$(awk -F= '$1 == "mapping_sample_unix_nano" { print $2; exit }' <<<"$mapping_snapshot")
   mapping_anon_bytes=$(awk -F= '$1 == "mapping_anon_bytes" { print $2; exit }' <<<"$mapping_snapshot")
-  if [[ ! $mapping_timestamp =~ ^[1-9][0-9]*$ || ! $mapping_anon_bytes =~ ^[0-9]+$ ]]; then
+  mapping_server_anon_bytes=$(awk -F= '$1 == "server_process_anon_bytes" { print $2; exit }' <<<"$mapping_snapshot")
+  if [[ ! $mapping_timestamp =~ ^[1-9][0-9]*$ || ! $mapping_anon_bytes =~ ^[0-9]+$ ||
+    ! $mapping_server_anon_bytes =~ ^[0-9]+$ ]]; then
     return 1
   fi
   cgroup_sample=
@@ -249,12 +254,13 @@ lima_memory_write_mapping_sample() {
     printf 'memory_stat_kernel_bytes=%s\n' "$kernel_bytes"
     printf 'server_pid=%s\n' "$sampled_server_pid"
     printf 'server_process_rss_bytes=%s\n' "$server_rss_bytes"
-    printf 'server_process_anon_bytes=%s\n' "$server_anon_bytes"
+    printf 'server_process_anon_bytes=%s\n' "$mapping_server_anon_bytes"
+    printf 'cgroup_server_process_anon_bytes=%s\n' "$server_anon_bytes"
     printf 'photo_worker_process_count=%s\n' "$worker_count"
     printf 'photo_worker_processes=%s\n' "$worker_processes"
     printf 'process_attribution=%s\n' "$attribution"
     printf 'process_incomplete_pids=%s\n' "$incomplete_pids"
-    printf '%s\n' "$mapping_snapshot" | sed '1,2d'
+    printf '%s\n' "$mapping_snapshot" | sed '1,3d'
   } >"$mapping_tmp" || return 1
   mv -- "$mapping_tmp" "$sample_prefix-mappings-$label"
 }
@@ -321,6 +327,9 @@ lima_memory_mapping_capture_check() {
     ! $mapping_spike_delta_bytes =~ ^[0-9]+$ || ! $mapping_anon_tolerance_bytes =~ ^[0-9]+$ ]]; then
     printf 'mapping capture thresholds must be nonnegative integers\n' >&2
     return 1
+  fi
+  if (( mapping_anon_tolerance_bytes > 131072 )); then
+    mapping_anon_tolerance_bytes=131072
   fi
   if (( memory_peak_bytes >= mapping_typical_bytes )) && [[ ! -s $typical_file ]]; then
     printf 'memory.peak reached %s bytes but no typical mapping sample was captured\n' \

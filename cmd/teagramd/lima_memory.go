@@ -53,9 +53,10 @@ type limaRuntimeMemoryMapping struct {
 }
 
 type limaRuntimeMemoryMappingsSample struct {
-	SampleUnixNano      int64                      `json:"sample_unix_nano"`
-	TotalAnonymousBytes uint64                     `json:"total_anonymous_bytes"`
-	Mappings            []limaRuntimeMemoryMapping `json:"mappings"`
+	SampleUnixNano        int64                      `json:"sample_unix_nano"`
+	TotalAnonymousBytes   uint64                     `json:"total_anonymous_bytes"`
+	ProcessAnonymousBytes uint64                     `json:"process_anon_bytes"`
+	Mappings              []limaRuntimeMemoryMapping `json:"mappings"`
 }
 
 var limaRuntimeMemoryMetricNames = [...]string{
@@ -95,7 +96,7 @@ func serveLimaRuntimeMemoryMappings(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	sample, err := readLimaRuntimeMemoryMappings("/proc/self/smaps")
+	sample, err := readLimaRuntimeMemoryMappings("/proc/self/smaps", "/proc/self/status")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -114,8 +115,8 @@ func newLimaRuntimeMemoryDiagnosticsMux() *http.ServeMux {
 	return mux
 }
 
-func readLimaRuntimeMemoryMappings(path string) (result limaRuntimeMemoryMappingsSample, resultErr error) {
-	file, err := os.Open(path) // #nosec G304 -- production passes /proc/self/smaps; tests use temporary fixtures.
+func readLimaRuntimeMemoryMappings(smapsPath, statusPath string) (result limaRuntimeMemoryMappingsSample, resultErr error) {
+	file, err := os.Open(smapsPath) // #nosec G304 -- production passes /proc/self/smaps; tests use temporary fixtures.
 	if err != nil {
 		return limaRuntimeMemoryMappingsSample{}, fmt.Errorf("open process memory mappings: %w", err)
 	}
@@ -180,11 +181,48 @@ func readLimaRuntimeMemoryMappings(path string) (result limaRuntimeMemoryMapping
 	if len(mappings) > 20 {
 		mappings = mappings[:20]
 	}
+	processAnonymousBytes, err := readLimaProcessAnonymousBytes(statusPath)
+	if err != nil {
+		return limaRuntimeMemoryMappingsSample{}, err
+	}
 	return limaRuntimeMemoryMappingsSample{
-		SampleUnixNano:      time.Now().UnixNano(),
-		TotalAnonymousBytes: totalAnonymousBytes,
-		Mappings:            mappings,
+		SampleUnixNano:        time.Now().UnixNano(),
+		TotalAnonymousBytes:   totalAnonymousBytes,
+		ProcessAnonymousBytes: processAnonymousBytes,
+		Mappings:              mappings,
 	}, nil
+}
+
+func readLimaProcessAnonymousBytes(path string) (result uint64, resultErr error) {
+	file, err := os.Open(path) // #nosec G304 -- production passes /proc/self/status; tests use temporary fixtures.
+	if err != nil {
+		return 0, fmt.Errorf("open process status: %w", err)
+	}
+	defer func() {
+		if err := file.Close(); err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("close process status: %w", err))
+		}
+	}()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) < 2 || fields[0] != "RssAnon:" {
+			continue
+		}
+		kibibytes, err := strconv.ParseUint(fields[1], 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("parse process RssAnon: %w", err)
+		}
+		if kibibytes > math.MaxUint64/1024 {
+			return 0, errors.New("process RssAnon overflows bytes")
+		}
+		return kibibytes * 1024, nil
+	}
+	if err := scanner.Err(); err != nil {
+		return 0, fmt.Errorf("read process status: %w", err)
+	}
+	return 0, errors.New("process status does not include RssAnon")
 }
 
 func isLimaRuntimeMemoryMappingHeader(line string) bool {
@@ -272,6 +310,15 @@ func applyLimaGoMemoryLimit(log *slog.Logger, memoryMaxPath string) func() {
 	debug.SetMemoryLimit(effectiveMemoryLimit)
 	log.Info("Lima Go memory cap applied", "path", memoryMaxPath, "cgroup_memory_max_bytes", cgroupMemoryLimit, "go_memory_limit_bytes", effectiveMemoryLimit)
 	return func() { debug.SetMemoryLimit(previousMemoryLimit) }
+}
+
+func withLimaGoMemoryLimit(log *slog.Logger, memoryMaxPath string, startup func() error) (func(), error) {
+	restore := applyLimaGoMemoryLimit(log, memoryMaxPath)
+	if err := startup(); err != nil {
+		restore()
+		return nil, err
+	}
+	return restore, nil
 }
 
 func startLimaRuntimeMemoryDiagnostics(log *slog.Logger) (func(), error) {
