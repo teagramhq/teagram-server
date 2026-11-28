@@ -12,6 +12,12 @@ mkdir -p "$shim_dir" "$pool_dir"
 cat > "$shim_dir/bash" <<'MOCK_BASH'
 #!/usr/bin/bash
 set -Eeuo pipefail
+if [[ ${SIMULATE_WORKER_HANG:-0} == 1 &&
+  ${1:-} == */run-deploy-workflow-checks.sh &&
+  ${2:-} == --task &&
+  ${3:-} == 11 ]]; then
+  exec /usr/bin/sleep 30
+fi
 if [[ ${1:-} == -n && ${2:-} == .github/scripts/perf-run.sh ]]; then
   printf 'injected bash syntax failure\n' >&2
   exit 42
@@ -46,6 +52,39 @@ grep -Fq 'FAILED: Check workflow contract script syntax' "$worker_log" || {
 }
 
 printf 'worker failed the named check after its first command failed\n'
+
+cat > "$shim_dir/xargs" <<'MOCK_XARGS_HANG'
+#!/usr/bin/bash
+set -Eeuo pipefail
+while (($#)); do
+  case "$1" in
+    -r) shift ;;
+    -n|-P) shift 2 ;;
+    *) break ;;
+  esac
+done
+cat >/dev/null
+exec "$@" 4 --task-index 11
+MOCK_XARGS_HANG
+chmod 0755 "$shim_dir/xargs"
+
+hang_output="$tmp_dir/pool-hang-output.log"
+if TMPDIR="$tmp_dir" PATH="$shim_dir:$PATH" SIMULATE_WORKER_HANG=1 \
+  timeout --signal=TERM --kill-after=1s 1s \
+    /usr/bin/bash "$script_dir/run-deploy-workflow-checks.sh" > "$hang_output" 2>&1; then
+  printf 'worker completed the injected hanging check before timeout\n' >&2
+  exit 1
+else
+  hang_status=$?
+fi
+[[ $hang_status == 124 ]] || {
+  printf 'worker hang test exited with unexpected status %s\n' "$hang_status" >&2
+  exit 1
+}
+grep -Fq 'worker 4: start Check workflow contract script syntax' "$hang_output" || {
+  printf 'pool output did not name the check before it hung\n' >&2
+  exit 1
+}
 
 cat > "$shim_dir/xargs" <<'MOCK_XARGS'
 #!/usr/bin/bash

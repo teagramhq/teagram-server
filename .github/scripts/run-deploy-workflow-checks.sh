@@ -492,6 +492,7 @@ run_worker() {
   fi
   local worker_dir="${DEPLOY_CHECK_POOL_DIR:?worker pool directory is required}/worker-$worker"
   mkdir -p "$worker_dir"
+  exec 3>&2
   exec >"$worker_dir/output.log" 2>&1
   cd "$REPO_ROOT"
 
@@ -501,6 +502,7 @@ run_worker() {
     task_status_file="$worker_dir/$task_index.status"
     rm -f -- "$task_log" "$task_status_file"
     started_ns=$(date +%s%N)
+    printf 'worker %s: start %s\n' "$worker" "$task_name" >&3
     # Foreground execution preserves signal handling; the task shell keeps
     # errexit active inside run_check and records its check status separately.
     DEPLOY_CHECK_POOL_DIR="$worker_dir" bash "$SCRIPT_DIR/run-deploy-workflow-checks.sh" --task "$task_index"
@@ -522,9 +524,13 @@ run_worker() {
     printf '\n===== %s =====\n' "$task_name"
     [[ ! -s $task_log ]] || cat "$task_log"
     if [[ $task_status == 0 ]]; then
+      printf 'worker %s: PASS %s (%s)\n' \
+        "$worker" "$task_name" "$(format_duration "$elapsed_ms")" >&3
       printf 'PASS: %s (%s)\n' "$task_name" "$(format_duration "$elapsed_ms")"
       summary_rows+=("| $task_name | $(format_duration "$elapsed_ms") | passed |")
     else
+      printf 'worker %s: FAILED %s (exit %s, %s)\n' \
+        "$worker" "$task_name" "$task_status" "$(format_duration "$elapsed_ms")" >&3
       printf 'FAILED: %s (exit %s, %s)\n' \
         "$task_name" "$task_status" "$(format_duration "$elapsed_ms")"
       summary_rows+=("| $task_name | $(format_duration "$elapsed_ms") | failed |")
@@ -605,8 +611,8 @@ if {
   for ((worker = 1; worker <= WORKER_COUNT; worker++)); do
     printf '%s\n' "$worker"
   done
-} | xargs -r -n 1 -P "$WORKER_COUNT" bash "$SCRIPT_DIR/run-deploy-workflow-checks.sh" --worker \
-  > "$pool_dir/xargs.log" 2>&1; then
+} | xargs -r -n 1 -P "$WORKER_COUNT" \
+  bash "$SCRIPT_DIR/run-deploy-workflow-checks.sh" --worker; then
   xargs_status=0
 else
   xargs_status=$?
@@ -631,11 +637,6 @@ for ((worker = 1; worker <= WORKER_COUNT; worker++)); do
   fi
 done
 
-if [[ -s $pool_dir/xargs.log ]]; then
-  printf '\n===== Worker pool launcher =====\n'
-  cat "$pool_dir/xargs.log"
-  pool_failed=1
-fi
 if ((xargs_status != 0)); then
   printf 'FAILED: xargs worker pool exited with status %s\n' "$xargs_status"
   pool_failed=1
