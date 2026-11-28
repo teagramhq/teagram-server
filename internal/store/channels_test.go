@@ -1555,6 +1555,60 @@ FOR EACH ROW EXECUTE FUNCTION reject_channel_participant_insert_for_test()
 	}
 }
 
+func TestAddChannelMembersRateLimitDeniesBeforeAdmissionLocks(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	creator := mustUser(t, s, "+15551299824")
+	target := mustUser(t, s, "+15551299825")
+	ch := mustChannel(t, s, creator.ID, "Rate-limited admission locks")
+	budget := store.RateLimitConfig{Limit: 1, Window: time.Hour}
+	if err := s.ChargeRateLimit(ctx, creator.ID, "add_chat_user", budget); err != nil {
+		t.Fatalf("seed rate-limit usage: %v", err)
+	}
+
+	releaseState, err := store.HoldChannelStateRowLock(ctx, s, ch.ID)
+	if err != nil {
+		t.Fatalf("hold channel state lock: %v", err)
+	}
+	releaseOwner, err := store.HoldOwnerLock(ctx, s, target.ID)
+	if err != nil {
+		releaseState()
+		t.Fatalf("hold target owner lock: %v", err)
+	}
+	defer func() {
+		if releaseOwner != nil {
+			releaseOwner()
+		}
+		if releaseState != nil {
+			releaseState()
+		}
+	}()
+
+	callCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.AddChannelMembersWithRateLimit(callCtx, ch.ID, creator.ID, []int64{target.ID}, budget)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		limited, ok := errors.AsType[*store.RateLimitedError](err)
+		if !ok || limited == nil {
+			t.Fatalf("denied add with held admission locks = %v, want RateLimitedError", err)
+		}
+	case <-time.After(5 * time.Second):
+		releaseOwner()
+		releaseOwner = nil
+		releaseState()
+		releaseState = nil
+		err := <-done
+		t.Fatalf("denied add waited for admission locks and then returned %v", err)
+	}
+}
+
 func TestAddChannelMembersEnforcesAccountCapAtAdmission(t *testing.T) {
 	t.Parallel()
 	s := open(t)

@@ -900,28 +900,16 @@ func (s *Store) addChannelMembers(
 		return nil, ErrNotMember
 	}
 
-	state, err := qtx.ChannelStateForUpdate(ctx, channelID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrNotMember
-	}
-	if err != nil {
-		return nil, fmt.Errorf("lock channel state: %w", err)
-	}
 	for _, targetID := range targetIDs {
 		if targetID <= 0 {
 			return nil, ErrNotMember
 		}
 	}
-	if err = lockOwners(ctx, tx, targetIDs...); err != nil {
-		return nil, fmt.Errorf("lock channel cap owners: %w", err)
-	}
-	seats, err := qtx.CountChannelParticipants(ctx, channelID)
-	if err != nil {
-		return nil, fmt.Errorf("count participants: %w", err)
-	}
 
-	eligible := make([]int64, 0, len(targetIDs))
-	absentCount := 0
+	// Discover distinct absent targets and preflight before taking channel-state
+	// or account-cap locks. LockChannel serializes membership changes in this
+	// channel while these reads run.
+	absentTargets := make([]int64, 0, len(targetIDs))
 	seen := make(map[int64]bool, len(targetIDs))
 	for _, targetID := range targetIDs {
 		if seen[targetID] {
@@ -938,7 +926,43 @@ func (s *Store) addChannelMembers(
 		case !errors.Is(err, pgx.ErrNoRows):
 			return nil, fmt.Errorf("target participant: %w", err)
 		}
-		absentCount++
+		absentTargets = append(absentTargets, targetID)
+	}
+
+	if len(absentTargets) > 0 {
+		budgetResult, err := s.checkRateLimitBudgetCost(ctx, qtx, callerID, "add_chat_user", budget, len(absentTargets))
+		if err != nil {
+			return nil, fmt.Errorf("check add_chat_user budget: %w", err)
+		}
+		if budgetResult != nil {
+			return nil, &RateLimitedError{Surface: "add_chat_user", Wait: budgetResult.Wait}
+		}
+	}
+
+	if len(absentTargets) == 0 {
+		if err = tx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("commit: %w", err)
+		}
+		return []int64{}, nil
+	}
+
+	state, err := qtx.ChannelStateForUpdate(ctx, channelID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotMember
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lock channel state: %w", err)
+	}
+	if err = lockOwners(ctx, tx, absentTargets...); err != nil {
+		return nil, fmt.Errorf("lock channel cap owners: %w", err)
+	}
+	seats, err := qtx.CountChannelParticipants(ctx, channelID)
+	if err != nil {
+		return nil, fmt.Errorf("count participants: %w", err)
+	}
+
+	eligible := make([]int64, 0, len(absentTargets))
+	for _, targetID := range absentTargets {
 		if seats >= int64(s.maxChannelParticipants) {
 			continue
 		}
@@ -952,16 +976,6 @@ func (s *Store) addChannelMembers(
 		}
 		eligible = append(eligible, targetID)
 		seats++
-	}
-
-	if absentCount > 0 {
-		budgetResult, err := s.checkRateLimitBudgetCost(ctx, qtx, callerID, "add_chat_user", budget, absentCount)
-		if err != nil {
-			return nil, fmt.Errorf("check add_chat_user budget: %w", err)
-		}
-		if budgetResult != nil {
-			return nil, &RateLimitedError{Surface: "add_chat_user", Wait: budgetResult.Wait}
-		}
 	}
 
 	added := make([]int64, 0, len(eligible))
@@ -981,10 +995,8 @@ func (s *Store) addChannelMembers(
 		}
 		added = append(added, targetID)
 	}
-	if absentCount > 0 {
-		if err := s.consumeRateLimitTx(ctx, qtx, callerID, "add_chat_user", budget, absentCount); err != nil {
-			return nil, err
-		}
+	if err := s.consumeRateLimitTx(ctx, qtx, callerID, "add_chat_user", budget, len(absentTargets)); err != nil {
+		return nil, err
 	}
 
 	if err = tx.Commit(ctx); err != nil {
