@@ -18,6 +18,15 @@
       "code": "#~YQsL89lf9Nd0cL6ssQHDpNc"
     },
     {
+      "name": "profile-hosted-double-hyphen",
+      "input": {
+        "type": 1,
+        "host": "ab--cd.chat.example",
+        "username": "alice"
+      },
+      "code": "#~YQ0J0l5L9-YjDlZLJcv_AcOk1w"
+    },
+    {
       "name": "public-message-default",
       "input": {
         "type": 2,

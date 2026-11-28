@@ -21,6 +21,13 @@ const (
 	textAlphabet    = "0123456789abcdefghijklmnopqrstuvwxyz-._:"
 )
 
+// hostIDNALookup matches URL host parsing; normalizeHost checks label boundaries.
+var hostIDNALookup = idna.New(
+	idna.MapForLookup(),
+	idna.BidiRule(),
+	idna.CheckHyphens(false),
+)
+
 // DefaultServerHost is selected when Link.Host is empty.
 const DefaultServerHost = "server.teagram.io"
 
@@ -509,7 +516,7 @@ func normalizeHost(value string) (string, error) {
 		port = strconv.Itoa(portNumber)
 	}
 
-	asciiHostname, err := idna.Lookup.ToASCII(hostname)
+	asciiHostname, err := hostIDNALookup.ToASCII(hostname)
 	if err != nil {
 		return "", codecError(ErrorInvalidHost, "host")
 	}

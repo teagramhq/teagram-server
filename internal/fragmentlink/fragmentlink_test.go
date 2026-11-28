@@ -299,6 +299,7 @@ func TestEncodeNormalizesHost(t *testing.T) {
 		{name: "WHATWG hexadecimal IPv4", host: "0x7b", canonicalHost: "0.0.0.123"},
 		{name: "WHATWG IPv4 with port", host: "127.1:08443", canonicalHost: "127.0.0.1:8443"},
 		{name: "non-numeric hexadecimal-looking domain", host: "chat.example.0xg", canonicalHost: "chat.example.0xg"},
+		{name: "double hyphen in positions three and four", host: "ab--cd.chat.example", canonicalHost: "ab--cd.chat.example"},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
