@@ -2,6 +2,7 @@ package fragmentlink_test
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -147,6 +148,9 @@ func TestVectors(t *testing.T) {
 	t.Run("invalid", func(t *testing.T) {
 		for _, testCase := range vectors.Invalid {
 			t.Run(testCase.Name, func(t *testing.T) {
+				if testCase.Rule == fragmentlink.ErrorInvalidID && testCase.Input.Type == fragmentlink.TypePublicMessage && testCase.Input.MessageID != "" {
+					assertPublicMessageIDMatchesInput(t, testCase)
+				}
 				_, err := fragmentlink.Decode(testCase.Code)
 				if err == nil {
 					t.Fatalf("Decode(%q) succeeded", testCase.Code)
@@ -161,6 +165,46 @@ func TestVectors(t *testing.T) {
 			})
 		}
 	})
+}
+
+func assertPublicMessageIDMatchesInput(t *testing.T, testCase vectorCase) {
+	t.Helper()
+	payload, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(testCase.Code, "#~"))
+	if err != nil {
+		t.Fatalf("decode vector code: %v", err)
+	}
+	if len(payload) == 0 || fragmentlink.Type(payload[0]&0x1f) != fragmentlink.TypePublicMessage {
+		t.Fatalf("code header = %x, want public message", payload)
+	}
+
+	fieldsRemaining := 2
+	if payload[0]&0x20 != 0 {
+		fieldsRemaining++
+	}
+	data := payload[1:]
+	for range fieldsRemaining - 1 {
+		if len(data) == 0 {
+			t.Fatal("public-message code is missing a length-prefixed field")
+		}
+		length := int(data[0])
+		data = data[1:]
+		if length > len(data) {
+			t.Fatal("public-message code field length exceeds remaining bytes")
+		}
+		data = data[length:]
+	}
+	if len(data) == 0 || len(data) > 8 {
+		t.Fatalf("encoded message ID has %d bytes, want 1 through 8", len(data))
+	}
+
+	var encodedID uint64
+	for _, value := range data {
+		encodedID = encodedID<<8 | uint64(value)
+	}
+	inputID := parseVectorID(t, testCase.Input.MessageID, "message_id")
+	if encodedID != inputID {
+		t.Fatalf("encoded message ID = %d, want vector input %d", encodedID, inputID)
+	}
 }
 
 func TestRandomValidLinksRoundTrip(t *testing.T) {
