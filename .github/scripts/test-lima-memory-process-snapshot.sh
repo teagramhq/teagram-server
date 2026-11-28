@@ -14,6 +14,8 @@ runtime_stop=
 sample_peak_writer_pid=
 runtime_sampler_pid=
 cgroup_sampler_pid=
+typical_capture_pid=
+typical_ready_file=
 mapping_cgroup_stop=
 mapping_worker_stop=
 mapping_worker_release=
@@ -26,11 +28,12 @@ cleanup_fixture() {
   [[ -n ${runtime_final_request_release:-} ]] && : >"$runtime_final_request_release" 2>/dev/null || true
   [[ -n ${runtime_cgroup_stop:-} ]] && : >"$runtime_cgroup_stop" 2>/dev/null || true
   [[ -n ${runtime_stop:-} ]] && : >"$runtime_stop" 2>/dev/null || true
+  [[ -n ${typical_ready_file:-} ]] && printf '1\n' >"$typical_ready_file" 2>/dev/null || true
   [[ -n ${mapping_worker_release:-} ]] && : >"$mapping_worker_release" 2>/dev/null || true
   [[ -n ${mapping_worker_stop:-} ]] && : >"$mapping_worker_stop" 2>/dev/null || true
   [[ -n ${mapping_cgroup_stop:-} ]] && : >"$mapping_cgroup_stop" 2>/dev/null || true
   for pid in "${sample_peak_writer_pid:-}" "${runtime_sampler_pid:-}" "${cgroup_sampler_pid:-}" \
-    "${mapping_worker_pid:-}" "${mapping_cgroup_sampler_pid:-}"; do
+    "${typical_capture_pid:-}" "${mapping_worker_pid:-}" "${mapping_cgroup_sampler_pid:-}"; do
     if [[ -n $pid ]]; then
       wait "$pid" 2>/dev/null || true
     fi
@@ -39,6 +42,37 @@ cleanup_fixture() {
   exit "$status"
 }
 trap cleanup_fixture EXIT
+
+typical_prefix="$fixture/typical-baseline"
+typical_history="$fixture/typical-baseline-history"
+typical_ready_file="$fixture/websocket-ready"
+typical_mapping_ready="$fixture/typical-mappings-ready"
+typical_pre_ready_row='100|1000|800|100|100|1000|101|900|800|0|-|complete|-|1000'
+typical_post_ready_row='200|1200|900|100|100|1200|101|1000|900|0|-|complete|-|1200'
+printf '%s\n' "$typical_pre_ready_row" >"$typical_history"
+lima_memory_capture_typical_mapping_baseline "$typical_prefix" "$typical_history" \
+  "$typical_ready_file" "$typical_mapping_ready" &
+typical_capture_pid=$!
+sleep 0.05
+if [[ -e "$typical_prefix-mappings-typical-request" ]]; then
+  printf 'typical mapping baseline was queued before WebSocket readiness\n' >&2
+  exit 1
+fi
+printf '%s\n' "$typical_post_ready_row" >>"$typical_history"
+printf '150\n' >"$typical_ready_file"
+for _ in $(seq 100); do
+  [[ -e "$typical_prefix-mappings-typical-request" ]] && break
+  sleep 0.01
+done
+if [[ ! -r "$typical_prefix-mappings-typical-request" ]] ||
+  [[ $(<"$typical_prefix-mappings-typical-request") != "$typical_post_ready_row" ]] ||
+  [[ ! -e "$typical_mapping_ready" ]]; then
+  printf 'typical mapping baseline did not use the first post-readiness cgroup sample\n' >&2
+  exit 1
+fi
+wait "$typical_capture_pid"
+typical_capture_pid=
+
 proc_root="$fixture/proc"
 mkdir -p "$proc_root/101" "$proc_root/102" "$proc_root/103" "$proc_root/104"
 

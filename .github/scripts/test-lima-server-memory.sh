@@ -332,6 +332,7 @@ if [[ $container_pid =~ ^[1-9][0-9]*$ ]]; then
     MEMORY_SAMPLE_RUNTIME_READY_FILE="$RUNNER_TEMP/lima-memory-sampled-runtime-ready"
     MEMORY_SAMPLE_RUNTIME_STOP_FILE="$RUNNER_TEMP/lima-memory-sampled-runtime-stop"
     MEMORY_SAMPLE_MAPPING_READY_FILE="$RUNNER_TEMP/lima-memory-sampled-mappings-ready"
+    MEMORY_SAMPLE_WEBSOCKET_READY_FILE="$RUNNER_TEMP/lima-memory-sampled-websocket-ready"
     MEMORY_SAMPLE_MAPPING_STOP_FILE="$RUNNER_TEMP/lima-memory-sampled-mappings-stop"
     MEMORY_SAMPLE_ERROR_FILE="$RUNNER_TEMP/lima-memory-sampled-error"
     MEMORY_SAMPLE_STOP_FILE="$RUNNER_TEMP/lima-memory-sampled-stop"
@@ -386,42 +387,6 @@ if [[ $runtime_diagnostics_ready != true ]]; then
   exit 1
 fi
 touch "$MEMORY_SAMPLE_RUNTIME_READY_FILE"
-if [[ ${LIMA_MEMORY_CAPTURE_MAPS:-0} == 1 ]]; then
-  typical_request_row=
-  for _ in $(seq 500); do
-    if [[ -r $RUNNER_TEMP/lima-memory-sampled-history ]]; then
-      typical_request_row=$(tail -n 1 "$RUNNER_TEMP/lima-memory-sampled-history")
-      [[ -n $typical_request_row ]] && break
-    fi
-    sleep 0.01
-  done
-  if [[ -z $typical_request_row ]]; then
-    echo 'mapping diagnostics did not record a startup cgroup/process baseline' >&2
-    exit 1
-  fi
-  if ! lima_memory_queue_mapping_request "$RUNNER_TEMP/lima-memory-sampled" typical \
-    "$typical_request_row"; then
-    echo 'mapping diagnostics could not queue the startup typical sample' >&2
-    exit 1
-  fi
-  touch "$MEMORY_SAMPLE_MAPPING_READY_FILE"
-  typical_capture_complete=false
-  for _ in $(seq 500); do
-    if [[ -s $RUNNER_TEMP/lima-memory-sampled-mappings-typical ]]; then
-      typical_capture_complete=true
-      break
-    fi
-    if [[ -r $MEMORY_SAMPLE_ERROR_FILE ]]; then
-      cat "$MEMORY_SAMPLE_ERROR_FILE" >&2
-      exit 1
-    fi
-    sleep 0.01
-  done
-  if [[ $typical_capture_complete != true ]]; then
-    echo 'mapping diagnostics did not capture the startup baseline' >&2
-    exit 1
-  fi
-fi
 
 for attempt in $(seq 30); do
   if docker logs "$CONTAINER" 2>&1 | grep -q 'msg=listening'; then
@@ -485,6 +450,34 @@ done
 if [[ $websocket_listener_ready != true ]]; then
   echo 'Lima WebSocket listener did not accept an HTTP connection on 127.0.0.1:2446' >&2
   exit 1
+fi
+if [[ ${LIMA_MEMORY_CAPTURE_MAPS:-0} == 1 ]]; then
+  websocket_ready_timestamp=$(date +%s%N) || {
+    echo 'mapping diagnostics could not timestamp WebSocket readiness' >&2
+    exit 1
+  }
+  if ! lima_memory_write_sample_file "$MEMORY_SAMPLE_WEBSOCKET_READY_FILE" "$websocket_ready_timestamp" ||
+    ! lima_memory_capture_typical_mapping_baseline "$RUNNER_TEMP/lima-memory-sampled" \
+      "$RUNNER_TEMP/lima-memory-sampled-history" "$MEMORY_SAMPLE_WEBSOCKET_READY_FILE" \
+      "$MEMORY_SAMPLE_MAPPING_READY_FILE"; then
+    exit 1
+  fi
+  typical_capture_complete=false
+  for _ in $(seq 500); do
+    if [[ -s $RUNNER_TEMP/lima-memory-sampled-mappings-typical ]]; then
+      typical_capture_complete=true
+      break
+    fi
+    if [[ -r $MEMORY_SAMPLE_ERROR_FILE ]]; then
+      cat "$MEMORY_SAMPLE_ERROR_FILE" >&2
+      exit 1
+    fi
+    sleep 0.01
+  done
+  if [[ $typical_capture_complete != true ]]; then
+    echo 'mapping diagnostics did not capture the pre-upload typical baseline' >&2
+    exit 1
+  fi
 fi
 run_setup_command client-config >"$RUNNER_TEMP/lima-memory-client.json"
 chmod 600 "$RUNNER_TEMP/lima-memory-client.json"

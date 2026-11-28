@@ -272,6 +272,39 @@ lima_memory_queue_mapping_request() {
   lima_memory_write_sample_file "$request_file" "$sample_row"
 }
 
+lima_memory_capture_typical_mapping_baseline() {
+  local sample_prefix="$1" history_file="$2" websocket_ready_file="$3" mapping_ready_file="$4"
+  local websocket_ready_timestamp= sample_row=
+
+  for _ in {1..500}; do
+    if [[ -r "$websocket_ready_file" ]]; then
+      websocket_ready_timestamp=$(<"$websocket_ready_file") || return 1
+      [[ $websocket_ready_timestamp =~ ^[1-9][0-9]*$ ]] && break
+    fi
+    sleep 0.01
+  done
+  if [[ ! $websocket_ready_timestamp =~ ^[1-9][0-9]*$ ]]; then
+    printf 'mapping diagnostics did not observe WebSocket readiness\n' >&2
+    return 1
+  fi
+
+  sample_row=
+  for _ in {1..500}; do
+    if [[ -r "$history_file" ]]; then
+      sample_row=$(awk -F'|' -v ready="$websocket_ready_timestamp" \
+        'NF == 14 && $1 ~ /^[0-9]+$/ && $1 >= ready { print; exit }' "$history_file") || return 1
+      [[ -n $sample_row ]] && break
+    fi
+    sleep 0.01
+  done
+  if [[ -z $sample_row ]]; then
+    printf 'mapping diagnostics did not record a cgroup/process sample after WebSocket readiness\n' >&2
+    return 1
+  fi
+  lima_memory_queue_mapping_request "$sample_prefix" typical "$sample_row" || return 1
+  : >"$mapping_ready_file"
+}
+
 lima_memory_sample_mapping_loop() {
   local proc_root="$1" server_pid="$2" sample_prefix="$3" history_file="$4"
   local ready_file="$5" stop_file="$6" error_file="$7" interval_seconds="${8:-0.01}"
