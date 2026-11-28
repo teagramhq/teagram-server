@@ -13,6 +13,8 @@ dev_workflow="${DEV_DEPLOY_WORKFLOW:-.github/workflows/deploy-dev-target.yml}"
 qa_workflow="${QA_INVITE_DEPLOY_WORKFLOW:-.github/workflows/deploy-qa-invite.yml}"
 ci_workflow="${CI_WORKFLOW:-.github/workflows/ci.yml}"
 demo_forced_command="deploy/teagram-demo/forced-command.sh"
+query_cache_dir=$(mktemp -d)
+trap 'rm -rf -- "$query_cache_dir"' EXIT
 expected_if="\${{ vars.K3S_TAILNET_API_READY == 'true' && (github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')) }}"
 expected_disabled_if="\${{ vars.K3S_TAILNET_API_READY != 'true' && (github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')) }}"
 expected_demo_resolver_ref='${{ github.workflow_sha }}'
@@ -31,37 +33,49 @@ expected_run_name="\${{ inputs.issue && format('{0} [{1}]', github.workflow, inp
 expected_demo_run_name="\${{ inputs.issue && format('{0} [{1}]{2}', github.workflow, inputs.issue, inputs.web_rollback_run_id && format(' [web-rollback={0}]', inputs.web_rollback_run_id) || '') || '' }}"
 expected_issue_description='Issue key to report this run to (e.g. MAIN-123). Leave empty for no report.'
 
+cached_query() {
+  local source=$1 expression=$2 cache_file
+  cache_file="$query_cache_dir/$(basename "$source").json"
+  if [[ ! -f "$cache_file" ]]; then
+    yq -o=json '.' "$source" > "$cache_file"
+  fi
+  expression=$(sed -E \
+    -e 's/\.([A-Za-z_][A-Za-z0-9_]*-[A-Za-z0-9_-]*)/."\1"/g' \
+    -e 's/to_json/tojson/g' <<< "$expression")
+  jq -r "$expression" "$cache_file"
+}
+
 fail() {
   printf '%s: %s\n' "$workflow" "$1" >&2
   exit 1
 }
 
 query() {
+  local source="$workflow"
   if [[ "$1" == *'.jobs.deploy-demo'* ]]; then
-    yq -r "$1" "$demo_workflow"
-    return
+    source="$demo_workflow"
   fi
-  yq -r "$1" "$workflow"
+  cached_query "$source" "$1"
 }
 
 demo_query() {
   if [[ "$1" == *'deploy-dev'* || "$1" == *'check-dev-deploy-target'* ]]; then
-    yq -r "$1" "$dev_workflow"
+    cached_query "$dev_workflow" "$1"
     return
   fi
-  yq -r "$1" "$demo_workflow"
+  cached_query "$demo_workflow" "$1"
 }
 
 dev_query() {
-  yq -r "$1" "$dev_workflow"
+  cached_query "$dev_workflow" "$1"
 }
 
 demo_entry_query() {
-  yq -r "$1" "$demo_entrypoint_workflow"
+  cached_query "$demo_entrypoint_workflow" "$1"
 }
 
 qa_query() {
-  yq -r "$1" "$qa_workflow"
+  cached_query "$qa_workflow" "$1"
 }
 
 ci_fail() {
@@ -70,14 +84,92 @@ ci_fail() {
 }
 
 ci_query() {
-  yq -r "$1" "$ci_workflow"
+  cached_query "$ci_workflow" "$1"
 }
+
+check_alpha_bootstrap_mount_failure() (
+  local tmp
+  tmp="$(mktemp -d)"
+  trap 'rm -rf -- "$tmp"' EXIT
+
+  mkdir -p "$tmp/bin"
+  ci_query '.jobs."test-alpha-bootstrap".steps[] | select(.name == "Run alpha bootstrap apply fixture in a private root namespace") | .run' |
+    sed "s#deploy/k8s/test-bootstrap-alpha.sh#$tmp/bootstrap-fixture#" > "$tmp/workflow-run.sh"
+  [[ -s "$tmp/workflow-run.sh" ]] || ci_fail 'the alpha bootstrap workflow command must be available for mount-failure testing'
+
+  cat > "$tmp/bin/sudo" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${1:-}" == '-n' ]] || exit 2
+shift
+exec "$@"
+SH
+  cat > "$tmp/bin/unshare" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${1:-}" == '--mount' && "${2:-}" == '--propagation' && "${3:-}" == 'private' ]] || exit 2
+shift 3
+exec "$@"
+SH
+  cat > "$tmp/bin/mount" <<'SH'
+#!/usr/bin/env bash
+: > "$ALPHA_BOOTSTRAP_MOUNT_RAN"
+exit 23
+SH
+  cat > "$tmp/bootstrap-fixture" <<'SH'
+#!/usr/bin/env bash
+: > "$ALPHA_BOOTSTRAP_FIXTURE_RAN"
+SH
+  chmod +x "$tmp/bin/sudo" "$tmp/bin/unshare" "$tmp/bin/mount" "$tmp/bootstrap-fixture"
+
+  if PATH="$tmp/bin:$PATH" \
+    ALPHA_BOOTSTRAP_MOUNT_RAN="$tmp/mount-ran" \
+    ALPHA_BOOTSTRAP_FIXTURE_RAN="$tmp/fixture-ran" \
+    bash -euo pipefail "$tmp/workflow-run.sh" > "$tmp/output" 2>&1; then
+    ci_fail 'the alpha bootstrap workflow succeeded after its private root mount failed'
+  fi
+  [[ -e "$tmp/mount-ran" ]] || ci_fail 'the alpha bootstrap workflow did not attempt the private root mount'
+  [[ ! -e "$tmp/fixture-ran" ]] || ci_fail 'the alpha bootstrap fixture ran after its private root mount failed'
+)
 
 check_ci_contract() {
   [[ "$(ci_query '.on | keys | sort | join(",")')" == 'merge_group,pull_request,push' ]] ||
     ci_fail 'triggers must be exactly merge_group, pull_request, and push'
-  [[ "$(ci_query '.jobs."check-deploy-workflow".steps[] | select(.name == "Check RPC performance workflow contract") | .env.GOPROXY')" == 'https://proxy.golang.org|direct' ]] ||
+  [[ "$(ci_query '.jobs."check-deploy-workflow".name')" == 'check: deploy-workflow' ]] ||
+    ci_fail 'the deploy workflow check name must stay unchanged'
+  [[ "$(ci_query '.jobs."check-deploy-workflow".steps[] | select(.name == "Run independent deploy workflow checks in a fixed 5-worker pool") | .run')" == 'bash .github/scripts/run-deploy-workflow-checks.sh' ]] ||
+    ci_fail 'the deploy workflow contracts must use the bounded check runner'
+  grep -Fq 'readonly WORKER_COUNT=5' .github/scripts/run-deploy-workflow-checks.sh ||
+    ci_fail 'the deploy workflow contract worker count must remain fixed at five'
+  [[ "$(.github/scripts/run-deploy-workflow-checks.sh --check-groups)" == '5 workers cover all 37 deploy workflow checks exactly once' ]] ||
+    ci_fail 'every deploy workflow check must be assigned to exactly one fixed worker'
+  [[ "$(ci_query '.jobs.ci.needs | to_entries[] | select(.value == "check-deploy-workflow") | .key')" == '19' ]] ||
+    ci_fail 'the deploy workflow check must remain in its existing position in ci.needs'
+  [[ "$(ci_query '.jobs."test-alpha-bootstrap".name')" == 'test: alpha-bootstrap' ]] ||
+    ci_fail 'the alpha bootstrap fixture must keep its dedicated test job name'
+  [[ "$(ci_query '.jobs."test-alpha-bootstrap".steps[] | select(.name == "Run alpha bootstrap apply fixture in a private root namespace") | .run | contains("sudo -n unshare --mount --propagation private")')" == 'true' ]] ||
+    ci_fail 'the alpha bootstrap fixture must keep its private root filesystem'
+  check_alpha_bootstrap_mount_failure
+  [[ "$(ci_query '.jobs.ci.needs | contains(["test-alpha-bootstrap"])')" == 'true' ]] ||
+    ci_fail 'the required CI gate must include the alpha bootstrap fixture'
+  [[ "$(ci_query '.jobs."publish-k8s-images".needs | contains(["test-alpha-bootstrap"])')" == 'true' ]] ||
+    ci_fail 'Kubernetes image publication must wait for the alpha bootstrap fixture'
+  [[ "$(ci_query '.jobs.ci.steps[] | select(.name == "Require all CI lanes to pass") | .env.TEST_ALPHA_BOOTSTRAP_RESULT')" == '${{ needs.test-alpha-bootstrap.result }}' ]] ||
+    ci_fail 'the required CI gate must receive the alpha bootstrap result'
+  grep -Fq '"$TEST_ALPHA_BOOTSTRAP_RESULT" != "success"' .github/workflows/ci.yml ||
+    ci_fail 'the required CI gate must fail when the alpha bootstrap fixture fails'
+  grep -Fq "GOPROXY='https://proxy.golang.org|direct' .github/scripts/test-perf-workflow-contract.sh" .github/scripts/run-deploy-workflow-checks.sh ||
     ci_fail 'the RPC performance contract must fall back to direct downloads when the module proxy fails'
+  if ! grep -Fq "'Check Lima demo egress isolation'" .github/scripts/run-deploy-workflow-checks.sh ||
+    ! grep -Fq 'python3 -B deploy/teagram-demo/lima/test-egress-isolation-rules.py' .github/scripts/run-deploy-workflow-checks.sh; then
+    ci_fail 'the Lima demo egress isolation contract must stay in the deploy workflow worker pool'
+  fi
+  if ! grep -Fq 'deploy/teagram-demo/test-tailnet-source-address.sh' .github/scripts/run-deploy-workflow-checks.sh ||
+    ! grep -Fq 'deploy/teagram-demo/lima/install-egress-isolation.sh' .github/scripts/run-deploy-workflow-checks.sh ||
+    ! grep -Fq '.github/scripts/lima-memory-process-snapshot.sh' .github/scripts/run-deploy-workflow-checks.sh ||
+    ! grep -Fq '.github/scripts/test-lima-memory-process-snapshot.sh' .github/scripts/run-deploy-workflow-checks.sh; then
+    ci_fail 'the deploy workflow pool must retain the new main-branch syntax and snapshot checks'
+  fi
   [[ "$(ci_query '.on.merge_group.types | join(",")')" == 'checks_requested' ]] ||
     ci_fail 'merge-group CI must run when checks are requested'
   [[ "$(ci_query '.on.push.branches | join(",")')" == 'main' ]] ||
@@ -107,14 +199,16 @@ check_ci_contract() {
     ci_fail 'the demo publication job must record its result after failures'
   [[ "$(ci_query '.jobs."check-demo-web-pin".steps[] | select(.id == "publication_result").env.PUBLICATION_JOB_STATUS')" == '${{ job.status }}' ]] ||
     ci_fail 'the publisher result must preserve the raw publication job status'
-  local actionlint_deploy_run
-  actionlint_deploy_run="$(ci_query '.jobs."check-deploy-workflow".steps[] | select(.name == "Lint deployment, performance, and real-client workflows") | .run')"
-  grep -Fq '.github/workflows/deploy-demo-target.yml' <<< "$actionlint_deploy_run" ||
+  grep -Fq '.github/workflows/deploy-demo-target.yml' .github/scripts/run-deploy-workflow-checks.sh ||
     ci_fail 'CI must actionlint the reusable demo target workflow'
-  grep -Fq '.github/workflows/deploy-dev-target.yml' <<< "$actionlint_deploy_run" ||
+  grep -Fq '.github/workflows/deploy-dev-target.yml' .github/scripts/run-deploy-workflow-checks.sh ||
     ci_fail 'CI must actionlint the reusable dev target workflow'
-  grep -Fq '.github/workflows/deploy-demo.yml' <<< "$actionlint_deploy_run" ||
+  grep -Fq '.github/workflows/deploy-demo.yml' .github/scripts/run-deploy-workflow-checks.sh ||
     ci_fail 'CI must actionlint the demo queue caller with the queue schema exception'
+  grep -Fq "'Lint deployment, performance, and real-client workflows'" .github/scripts/run-deploy-workflow-checks.sh ||
+    ci_fail 'the workflow lint step must remain in the fixed worker pool'
+  [[ "$(ci_query '.jobs."check-deploy-workflow".steps | map(select(.name == "Lint deployment, performance, and real-client workflows")) | length')" == '0' ]] ||
+    ci_fail 'the workflow lint must run only through the fixed worker pool'
   [[ "$(ci_query '.jobs.ci.needs | join(",")')" == *'test-migrations'* ]] ||
     ci_fail 'the required CI gate must include the migrations lane'
   [[ "$(ci_query '.jobs.ci.needs | join(",")')" == *'test-git-hooks'* ]] ||
@@ -153,13 +247,41 @@ check_ci_contract() {
     ci_fail 'the git-hooks lane must run the commit-message regression fixture'
   [[ "$(ci_query '.jobs."test-git-hooks".steps[] | select(.name == "Test selective pre-push checks") | .run')" == 'python3 -B .github/scripts/test_git_hooks.py' ]] ||
     ci_fail 'the git-hooks lane must run the pre-push regression fixture'
-  local qa_password_step_names qa_password_pull
-  qa_password_step_names="$(ci_query '.jobs."check-deploy-workflow".steps | map(.name) | join("|")')"
-  [[ "$qa_password_step_names" == *'Pull PostgreSQL image for QA password timestamp check|Check QA password timestamp operation'* ]] ||
-    ci_fail 'the QA password timestamp check must preload PostgreSQL through the retry/fallback helper'
-  qa_password_pull="$(ci_query '.jobs."check-deploy-workflow".steps[] | select(.name == "Pull PostgreSQL image for QA password timestamp check") | .run')"
-  [[ "$qa_password_pull" == 'bash .github/scripts/pull-base-images.sh --image mirror.gcr.io/library/postgres:18-alpine' ]] ||
-    ci_fail 'the QA password timestamp check must use the canonical PostgreSQL image through the pull helper'
+  if ci_query '.jobs."check-deploy-workflow".steps[] | select((.run // "") | contains("pull-base-images.sh")) | .name' | grep -q .; then
+    ci_fail 'PostgreSQL images must be pulled by their worker fixtures, not as standalone job steps'
+  fi
+  local qa_password_task qa_password_pull_line qa_password_fixture_line
+  local media_dump_task media_dump_pull_line media_dump_image_line media_dump_fixture_image_line media_dump_fixture_line
+  qa_password_task="$(sed -n \
+    "/^    'Check QA password timestamp operation')$/,/^      ;;$/p" \
+    .github/scripts/run-deploy-workflow-checks.sh)"
+  qa_password_pull_line="$(grep -n -E '^[[:space:]]+bash[[:space:]]+\.github/scripts/pull-base-images\.sh[[:space:]]+--image[[:space:]]+mirror\.gcr\.io/library/postgres:18-alpine$' \
+    <<< "$qa_password_task" | cut -d: -f1 || true)"
+  qa_password_fixture_line="$(grep -n -E '^[[:space:]]+deploy/teagram/test-qa-password-timestamps\.sh$' \
+    <<< "$qa_password_task" | cut -d: -f1 || true)"
+  [[ "$qa_password_pull_line" =~ ^[0-9]+$ &&
+     "$qa_password_fixture_line" =~ ^[0-9]+$ &&
+     "$qa_password_pull_line" -lt "$qa_password_fixture_line" ]] ||
+    ci_fail 'the QA password timestamp worker task must pull PostgreSQL before running its fixture'
+  media_dump_task="$(sed -n \
+    "/^    'Check media dump validation against PostgreSQL 18')$/,/^      ;;$/p" \
+    .github/scripts/run-deploy-workflow-checks.sh)"
+  media_dump_pull_line="$(grep -n -E '^[[:space:]]+bash[[:space:]]+[.]github/scripts/pull-base-images[.]sh' \
+    <<< "$media_dump_task" | cut -d: -f1 || true)"
+  media_dump_image_line="$(grep -n -E '^[[:space:]]+--image[[:space:]]+mirror[.]gcr[.]io/library/postgres:18-alpine@sha256:10a5c69a83035ab5239f5620d708520e8b28f5aa1f2b20143e6024532edadfb5$' \
+    <<< "$media_dump_task" | cut -d: -f1 || true)"
+  media_dump_fixture_image_line="$(grep -n -E '^[[:space:]]+PG18_IMAGE=mirror[.]gcr[.]io/library/postgres:18-alpine@sha256:10a5c69a83035ab5239f5620d708520e8b28f5aa1f2b20143e6024532edadfb5' \
+    <<< "$media_dump_task" | cut -d: -f1 || true)"
+  media_dump_fixture_line="$(grep -n -E '^[[:space:]]+bash[[:space:]]+deploy/teagram/test-media-encryption-pg18[.]sh$' \
+    <<< "$media_dump_task" | cut -d: -f1 || true)"
+  [[ "$media_dump_pull_line" =~ ^[0-9]+$ &&
+     "$media_dump_image_line" =~ ^[0-9]+$ &&
+     "$media_dump_fixture_image_line" =~ ^[0-9]+$ &&
+     "$media_dump_fixture_line" =~ ^[0-9]+$ &&
+     "$media_dump_pull_line" -lt "$media_dump_image_line" &&
+     "$media_dump_image_line" -lt "$media_dump_fixture_image_line" &&
+     "$media_dump_fixture_image_line" -lt "$media_dump_fixture_line" ]] ||
+    ci_fail 'the media dump worker task must pull its pinned PostgreSQL image before running its fixture'
   [[ "$(ci_query '.jobs."check-demo-web-pin".permissions.contents')" == 'read' ]] ||
     ci_fail 'the demo web artifact build must use read-only repository access'
   [[ "$(ci_query '.jobs."check-demo-web-pin".permissions | to_entries | map(.key + "=" + .value) | join(",")')" == 'contents=read' ]] ||
@@ -734,8 +856,7 @@ check_demo_credential_gate() (
   run_gate false '' '' false '::notice::Public demo deployment is disabled'
 )
 
-check_contract() {
-  local qa_create_account_run qa_operation_run qa_key_install_run demo_dev_run qa_validate_index qa_tailnet_index dev_target_index dev_tailnet_index
+check_server_deploy_contract() {
   [[ "$(query '.on | keys | sort | join(",")')" == 'workflow_dispatch,workflow_run' ]] ||
     fail 'triggers must be exactly workflow_run and workflow_dispatch'
   [[ "$(query '.on.workflow_dispatch.inputs | keys | join(",")')" == 'issue' ]] ||
@@ -794,6 +915,8 @@ check_contract() {
     fail 'the dev job must run only on dispatch or a successful CI push run'
   [[ "$(query '.jobs."deploy-server".environment')" == 'k3s-prod' ]] ||
     fail 'the k3s deploy job must use environment: k3s-prod'
+  [[ "$(query '.jobs."deploy-server".steps[] | select(.id == "target") | .env.RUN_HEAD_SHA')" == '${{ github.event.workflow_run.head_sha }}' ]] ||
+    fail 'the production deploy must begin from the commit whose CI completed'
   [[ "$(query '.jobs."deploy-server".permissions // {} | to_entries | map(select(.value != "read")) | length')" == 0 ]] ||
     fail 'the dev job must not request write permissions'
   [[ "$(query '.jobs."deploy-server".permissions | to_entries | map(.key + "=" + .value) | join(",")')" == 'actions=read,attestations=read,contents=read' ]] ||
@@ -881,6 +1004,11 @@ check_contract() {
   [[ "$(query '.jobs.deploy-server.steps[] | select(.name == "Deploy, wait for workloads, and smoke the tested release") | .run')" == *'deploy/k8s/deploy-release.sh'* ]] ||
     fail 'the production workflow must delegate apply, rollback, and smoke to the release runner'
 
+  check_target_selection
+}
+
+check_qa_invite_contract() {
+  local qa_create_account_run qa_operation_run qa_key_install_run qa_validate_index qa_tailnet_index
   [[ "$(qa_query '.name')" == 'Deploy qa-invite.' ]] ||
     fail 'the QA invite workflow name must remain stable'
   [[ "$(qa_query '.jobs.qa-invite.environment')" == 'demo' ]] ||
@@ -936,6 +1064,10 @@ check_contract() {
     fail 'QA operation SSH must verify the configured QA invite host pin'
   fi
 
+}
+
+check_demo_contract() {
+  local demo_dev_run dev_target_index dev_tailnet_index
   [[ "$(demo_entry_query '.name')" == 'Deploy demo.' ]] ||
     fail 'the demo must have its own workflow status and router result'
   [[ "$(demo_entry_query '.run-name')" == "$expected_demo_run_name" ]] ||
@@ -1211,7 +1343,7 @@ check_contract() {
     grep -Fq 'actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=1' ||
     fail 'a manual run must resolve the newest successful CI push run on main'
   local ssh_steps demo_ssh_steps demo_port_run
-  ssh_steps="$(query '[.jobs."deploy-server".steps[] | select(.run // "" | test("(^|\s)ssh\s"))] | length')"
+  ssh_steps="$(query '[.jobs."deploy-server".steps[] | select(.run // "" | test("(^|\\s)ssh\\s"))] | length')"
   [[ "$ssh_steps" == 0 ]] || fail 'the production deploy must apply to k3s instead of SSHing to the Compose host'
   local checkout_steps dev_step_names
   checkout_steps="$(query '[.jobs."deploy-server".steps[] | select(.uses // "" | test("^actions/checkout@"))] | length')"
@@ -1239,7 +1371,7 @@ check_contract() {
     fail 'the kubeconfig step must expose the API host output'
   ! grep -Fq '100.124.236.66' "$workflow" ||
     fail 'the deploy workflow must not name the deleted teagram LXC address'
-  demo_ssh_steps="$(query '[.jobs.deploy-demo.steps[] | select(.run // "" | test("(^|\s)ssh\s"))] | length')"
+  demo_ssh_steps="$(query '[.jobs.deploy-demo.steps[] | select(.run // "" | test("(^|\\s)ssh\\s"))] | length')"
   [[ "$demo_ssh_steps" == 2 ]] || fail "expected server and web demo ssh steps, found $demo_ssh_steps"
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Deploy the tested server commit to demo") | .env.DEPLOY_SHA')" == '${{ needs.check-demo-deploy-target.outputs.sha }}' ]] ||
     fail 'the demo ssh step must deploy the exact SHA from the Deploy. run'
@@ -1311,7 +1443,7 @@ check_contract() {
     fail 'demo SSH port must be validated by the shared deploy target validator'
   grep -Fq 'DEMO_DEPLOY_USER "$DEMO_DEPLOY_USER"' <<< "$demo_port_run" ||
     fail 'demo SSH user must be validated by the shared deploy target validator'
-  query '.jobs.deploy-demo.steps[] | select(.run // "" | test("(^|\s)ssh\s")) | .run' |
+  query '.jobs.deploy-demo.steps[] | select(.run // "" | test("(^|\\s)ssh\\s")) | .run' |
     grep -F 'StrictHostKeyChecking=yes' >/dev/null || fail 'the demo ssh step must verify the host key'
   [[ "$(query '.jobs.deploy-demo.steps[] | select(.name == "Install the demo deploy key") | .env.DEMO_DEPLOY_SSH_KEY')" == '${{ secrets.DEMO_DEPLOY_SSH_KEY }}' ]] ||
     fail 'the demo job must use its environment-scoped deploy key'
@@ -1457,11 +1589,11 @@ SSH
     fail 'the public demo deploy must not depend on the independent dev deploy'
   ! grep -Fq 'deploy-demo' < <(demo_query '.jobs.deploy-dev.needs[]') ||
     fail 'the dev deploy must not depend on the independent public demo deploy'
-  [[ "$(query '[.jobs[].steps[].run // "" | select(test("\$\{\{"))] | length')" == 0 ]] ||
+  [[ "$(query '[.jobs[].steps[].run // "" | select(test("\\$\\{\\{"))] | length')" == 0 ]] ||
     fail 'run blocks must not interpolate ${{ }}; pass values through env'
-  [[ "$(demo_query '[.jobs[].steps[].run // "" | select(test("\$\{\{"))] | length')" == 0 ]] ||
+  [[ "$(demo_query '[.jobs[].steps[].run // "" | select(test("\\$\\{\\{"))] | length')" == 0 ]] ||
     fail 'demo run blocks must not interpolate ${{ }}; pass values through env'
-  [[ "$(dev_query '[.jobs[].steps[].run // "" | select(test("\$\{\{"))] | length')" == 0 ]] ||
+  [[ "$(dev_query '[.jobs[].steps[].run // "" | select(test("\\$\\{\\{"))] | length')" == 0 ]] ||
     fail 'dev run blocks must not interpolate ${{ }}; pass values through env'
 
   local uses
@@ -1481,8 +1613,13 @@ SSH
     [[ -n "$uses" ]] || continue
     [[ "$uses" =~ ^[^@]+@[0-9a-f]{40}$ ]] || fail "action not pinned to a commit SHA: $uses"
   done < <(dev_query '.jobs[].steps[].uses // ""')
-  check_target_selection
   check_demo_image_digest_download
+}
+
+check_contract() {
+  check_server_deploy_contract
+  check_qa_invite_contract
+  check_demo_contract
 }
 
 # Each mutation breaks one rule; the contract must reject all of them.
@@ -1540,7 +1677,7 @@ self_test() {
   )
   for mutation in "${mutations[@]}"; do
     yq "$mutation" "$workflow" > "$tmp/deploy.yml"
-    if DEPLOY_WORKFLOW="$tmp/deploy.yml" "$0" --contract-only 2>/dev/null; then
+    if DEPLOY_WORKFLOW="$tmp/deploy.yml" CONTRACT_ONLY_TARGET=deploy "$0" --contract-only 2>/dev/null; then
       printf 'contract accepted a broken workflow: %s\n' "$mutation" >&2
       exit 1
     fi
@@ -1560,7 +1697,7 @@ self_test() {
   )
   for mutation in "${qa_mutations[@]}"; do
     yq "$mutation" "$qa_workflow" > "$tmp/deploy-qa-invite.yml"
-    if QA_INVITE_DEPLOY_WORKFLOW="$tmp/deploy-qa-invite.yml" "$0" --contract-only 2>/dev/null; then
+    if QA_INVITE_DEPLOY_WORKFLOW="$tmp/deploy-qa-invite.yml" CONTRACT_ONLY_TARGET=qa "$0" --contract-only 2>/dev/null; then
       printf 'contract accepted a broken QA invite workflow: %s\n' "$mutation" >&2
       exit 1
     fi
@@ -1609,7 +1746,7 @@ self_test() {
   )
   for mutation in "${demo_mutations[@]}"; do
     yq "$mutation" "$demo_workflow" > "$tmp/deploy-demo.yml"
-    if DEMO_DEPLOY_WORKFLOW="$tmp/deploy-demo.yml" "$0" --contract-only 2>/dev/null; then
+    if DEMO_DEPLOY_WORKFLOW="$tmp/deploy-demo.yml" CONTRACT_ONLY_TARGET=demo "$0" --contract-only 2>/dev/null; then
       printf 'contract accepted a broken demo workflow: %s\n' "$mutation" >&2
       exit 1
     fi
@@ -1640,7 +1777,7 @@ self_test() {
   )
   for mutation in "${demo_entry_mutations[@]}"; do
     yq "$mutation" "$demo_entrypoint_workflow" > "$tmp/deploy-demo-entry.yml"
-    if DEMO_ENTRYPOINT_WORKFLOW="$tmp/deploy-demo-entry.yml" "$0" --contract-only 2>/dev/null; then
+    if DEMO_ENTRYPOINT_WORKFLOW="$tmp/deploy-demo-entry.yml" CONTRACT_ONLY_TARGET=demo "$0" --contract-only 2>/dev/null; then
       printf 'contract accepted a broken demo queue caller: %s\n' "$mutation" >&2
       exit 1
     fi
@@ -1659,7 +1796,7 @@ self_test() {
   )
   for mutation in "${dev_mutations[@]}"; do
     yq "$mutation" "$dev_workflow" > "$tmp/deploy-dev-target.yml"
-    if DEV_DEPLOY_WORKFLOW="$tmp/deploy-dev-target.yml" "$0" --contract-only 2>/dev/null; then
+    if DEV_DEPLOY_WORKFLOW="$tmp/deploy-dev-target.yml" CONTRACT_ONLY_TARGET=demo "$0" --contract-only 2>/dev/null; then
       printf 'contract accepted a broken queued dev target workflow: %s\n' "$mutation" >&2
       exit 1
     fi
@@ -1675,17 +1812,37 @@ self_test() {
     '.jobs."publish-demo-image".if = "${{ success() }}"'
     '.jobs."publish-demo-image".needs = ["lint-go"]'
     '.jobs."publish-demo-image".permissions.packages = "read"'
+    '(.jobs."test-alpha-bootstrap".steps[] | select(.name == "Run alpha bootstrap apply fixture in a private root namespace") | .run) |= sub("exit"; "echo")'
     '(.jobs."publish-demo-image".steps[] | select(.name == "Build and publish the tested demo image") | .with.tags) = "ghcr.io/teagramhq/teagram-server-demo:latest"'
     '(.jobs."publish-demo-image".steps[] | select(.name == "Build and publish the tested demo image") | .with.push) = false'
   )
   for mutation in "${ci_mutations[@]}"; do
     yq "$mutation" "$ci_workflow" > "$tmp/ci.yml"
-    if CI_WORKFLOW="$tmp/ci.yml" "$0" --contract-only 2>/dev/null; then
+    if CI_WORKFLOW="$tmp/ci.yml" CONTRACT_ONLY_TARGET=ci "$0" --contract-only 2>/dev/null; then
       printf 'contract accepted a broken CI workflow: %s\n' "$mutation" >&2
       exit 1
     fi
   done
 }
+
+run_contract_target() {
+  case "${CONTRACT_ONLY_TARGET:-all}" in
+    all)
+      check_contract
+      check_ci_contract
+      ;;
+    deploy) check_server_deploy_contract ;;
+    qa) check_qa_invite_contract ;;
+    demo) check_demo_contract ;;
+    ci) check_ci_contract ;;
+    *) fail "unknown contract target: $CONTRACT_ONLY_TARGET" ;;
+  esac
+}
+
+if [[ "${1:-}" == '--contract-only' ]]; then
+  run_contract_target
+  exit 0
+fi
 
 check_contract
 check_ci_contract
