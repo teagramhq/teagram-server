@@ -841,8 +841,8 @@ func (s *Store) JoinChannelByInvite(ctx context.Context, hash string, userID int
 // Lock order starts with the existing rights-mutation channel row. While holding
 // it, the caller role and distinct absent targets are read, and the add_chat_user
 // budget is checked before taking the channel_state row or sorted account
-// advisory locks. The role is read again after LockChannel, so a demotion that
-// commits first denies this operation. channel_state serializes this channel's
+// advisory locks. The caller role is checked while holding LockChannel, so a
+// demotion that commits first denies this operation. channel_state serializes this channel's
 // participant count and supplies the same pts all new rows use; account locks
 // serialize quota checks across channels. The final charge stays atomic with the
 // mutation and follows the writes, so no channel lock is acquired while the
