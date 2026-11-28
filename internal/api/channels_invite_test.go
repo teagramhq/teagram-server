@@ -287,6 +287,55 @@ func TestInviteToChannelChargesOnlyNewMembers(t *testing.T) {
 	}
 }
 
+func TestInviteToChannelMetersAtCapProbe(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	creator, err := s.CreateUser(ctx, "+15551299831")
+	if err != nil {
+		t.Fatal(err)
+	}
+	atCap, err := s.CreateUser(ctx, "+15551299832")
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination, err := s.CreateChannel(ctx, creator.ID, "At-cap probe", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	channelExec(t, ctx, dsn, `
+WITH new_channels AS (
+	INSERT INTO channels (id, title, creator_id)
+	SELECT 100000000000 + n, 'at-cap fixture', $1 FROM generate_series(1, 500) AS generated(n)
+	RETURNING id
+), states AS (
+	INSERT INTO channel_state (channel_id)
+	SELECT id FROM new_channels
+	RETURNING channel_id
+)
+INSERT INTO channel_participants (channel_id, user_id, role, join_pts)
+SELECT channel_id, $2, 0, 0 FROM states
+`, creator.ID, atCap.ID)
+
+	limit := store.RateLimitConfig{Limit: 1, Window: time.Minute}
+	invite := func() error {
+		_, inviteErr := api.InviteToChannelForTestWithLimits(s, creator.ID, limit, &tg.ChannelsInviteToChannelRequest{
+			Channel: api.InputChannel(creator.ID, destination.ID),
+			Users:   inviteUsers(creator.ID, atCap.ID),
+		})
+		return inviteErr
+	}
+	if err := invite(); err != nil {
+		t.Fatalf("first at-cap probe: %v", err)
+	}
+	if _, found, err := s.ChannelMemberOf(ctx, destination.ID, atCap.ID); err != nil || found {
+		t.Fatalf("at-cap target membership: found=%v err=%v, want skipped", found, err)
+	}
+	if err := invite(); !isFloodWait(err) {
+		t.Fatalf("second at-cap probe with exhausted budget: %v, want FLOOD_WAIT", err)
+	}
+}
+
 func TestInviteToChannelRateLimitIsAtomicWithMembershipAdds(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

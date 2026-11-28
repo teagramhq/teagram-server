@@ -1582,6 +1582,47 @@ func TestAddChannelMembersEnforcesAccountCapAtAdmission(t *testing.T) {
 	}
 }
 
+func TestAddChannelMembersRateLimitChargesAtCapTargets(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	creatorOne := mustUser(t, s, "+15551299821")
+	creatorTwo := mustUser(t, s, "+15551299822")
+	target := mustUser(t, s, "+15551299823")
+	first := mustChannel(t, s, creatorOne.ID, "At-cap source")
+	second := mustChannel(t, s, creatorTwo.ID, "At-cap destination")
+	store.SetChannelCaps(s, 10000, 1)
+	hash, err := s.CreateChannelInvite(ctx, first.ID, creatorOne.ID)
+	if err != nil {
+		t.Fatalf("create source invite: %v", err)
+	}
+	if _, _, err = s.JoinChannelByInvite(ctx, hash, target.ID); err != nil {
+		t.Fatalf("seed at-cap membership: %v", err)
+	}
+	budget := store.RateLimitConfig{Limit: 1, Window: time.Hour}
+	added, err := s.AddChannelMembersWithRateLimit(ctx, second.ID, creatorTwo.ID, []int64{target.ID}, budget)
+	if err != nil || len(added) != 0 {
+		t.Fatalf("add at-cap target = %v, %v; want skipped without error", added, err)
+	}
+	if _, found, err := s.ChannelMemberOf(ctx, second.ID, target.ID); err != nil || found {
+		t.Fatalf("at-cap target membership: found=%v err=%v, want skipped", found, err)
+	}
+	var charged int32
+	if err := store.StorePool(s).QueryRow(ctx,
+		`SELECT token_count FROM rate_limits WHERE subject_id = $1 AND surface = 'add_chat_user'`, creatorTwo.ID,
+	).Scan(&charged); err != nil {
+		t.Fatalf("read at-cap probe charge: %v", err)
+	}
+	if charged != 1 {
+		t.Fatalf("at-cap probe charge = %d, want 1", charged)
+	}
+	_, err = s.AddChannelMembersWithRateLimit(ctx, second.ID, creatorTwo.ID, []int64{target.ID}, budget)
+	limited, ok := errors.AsType[*store.RateLimitedError](err)
+	if !ok || limited == nil || limited.Surface != "add_chat_user" {
+		t.Fatalf("repeat at-cap add with exhausted budget = %v, want add_chat_user RateLimitedError", err)
+	}
+}
+
 func TestConcurrentAddChannelMembersCannotOverfillChannel(t *testing.T) {
 	t.Parallel()
 	s := open(t)

@@ -843,16 +843,18 @@ func (s *Store) JoinChannelByInvite(ctx context.Context, hash string, userID int
 // is read again after LockChannel, so a demotion that commits first denies this
 // operation. channel_state serializes this channel's participant count and
 // supplies the same pts all new rows use; account locks serialize quota checks
-// across channels. An advisory add_chat_user budget read follows those locks
-// before membership writes; its final charge stays atomic with the mutation and
-// follows the writes, so no channel lock is acquired while the counter is held.
+// across channels. An advisory add_chat_user budget read for distinct absent
+// targets follows those locks before membership writes; its final charge stays
+// atomic with the mutation and follows the writes, so no channel lock is
+// acquired while the counter is held.
 func (s *Store) AddChannelMembers(ctx context.Context, channelID, callerID int64, targetIDs []int64) ([]int64, error) {
 	return s.addChannelMembers(ctx, channelID, callerID, targetIDs, RateLimitConfig{})
 }
 
 // AddChannelMembersWithRateLimit admits targets and consumes the caller's
-// add_chat_user budget only for rows this operation can insert. The budget and
-// membership rows commit or roll back together.
+// add_chat_user budget for each distinct target not already in the channel,
+// including targets skipped by an admission cap. Existing members are free.
+// The budget and membership rows commit or roll back together.
 func (s *Store) AddChannelMembersWithRateLimit(
 	ctx context.Context, channelID, callerID int64, targetIDs []int64, budget RateLimitConfig,
 ) ([]int64, error) {
@@ -919,6 +921,7 @@ func (s *Store) addChannelMembers(
 	}
 
 	eligible := make([]int64, 0, len(targetIDs))
+	absentCount := 0
 	seen := make(map[int64]bool, len(targetIDs))
 	for _, targetID := range targetIDs {
 		if seen[targetID] {
@@ -935,6 +938,7 @@ func (s *Store) addChannelMembers(
 		case !errors.Is(err, pgx.ErrNoRows):
 			return nil, fmt.Errorf("target participant: %w", err)
 		}
+		absentCount++
 		if seats >= int64(s.maxChannelParticipants) {
 			continue
 		}
@@ -950,8 +954,8 @@ func (s *Store) addChannelMembers(
 		seats++
 	}
 
-	if len(eligible) > 0 {
-		budgetResult, err := s.checkRateLimitBudgetCost(ctx, qtx, callerID, "add_chat_user", budget, len(eligible))
+	if absentCount > 0 {
+		budgetResult, err := s.checkRateLimitBudgetCost(ctx, qtx, callerID, "add_chat_user", budget, absentCount)
 		if err != nil {
 			return nil, fmt.Errorf("check add_chat_user budget: %w", err)
 		}
@@ -977,8 +981,8 @@ func (s *Store) addChannelMembers(
 		}
 		added = append(added, targetID)
 	}
-	if len(added) > 0 {
-		if err := s.consumeRateLimitTx(ctx, qtx, callerID, "add_chat_user", budget, len(added)); err != nil {
+	if absentCount > 0 {
+		if err := s.consumeRateLimitTx(ctx, qtx, callerID, "add_chat_user", budget, absentCount); err != nil {
 			return nil, err
 		}
 	}
