@@ -24,7 +24,7 @@ const (
 	limaCgroupMemoryMaxPath               = "/sys/fs/cgroup/memory.max"
 	limaGoMemoryLimitCgroupThresholdBytes = 64 << 20
 	// Bound the Go target in small cgroups without raising a lower operator-configured limit.
-	limaGoMemoryLimitCeilingBytes = 16 << 20
+	limaGoMemoryLimitCeilingBytes = 14 << 20
 )
 
 type limaRuntimeMemorySample struct {
