@@ -9,8 +9,8 @@ if [[ "$EUID" -ne 0 ]]; then
   echo 'lima deploy wrapper must run as root' >&2
   exit 1
 fi
-if [[ $# != 1 ]]; then
-  echo 'lima deploy wrapper accepts one command string' >&2
+if [[ $# -gt 1 ]]; then
+  echo 'lima deploy wrapper accepts at most one legacy command argument' >&2
   exit 1
 fi
 [[ -d "$REPO/.git" && ! -L "$REPO" && ! -L "$REPO/.git" ]] || {
@@ -24,11 +24,19 @@ fi
   exit 1
 }
 
-# Revalidate in the privileged wrapper; sudoers intentionally permits arbitrary
-# arguments only because this check admits the same fixed verbs as charlie.
+# Revalidate the SSH client command against the same fixed verbs as charlie.
 # shellcheck source=deploy/teagram-demo/lima/command-contract.sh
 source "$CONTRACT"
-COMMAND=$1
+# The old listener forwards the command as an argument through sudo during cutover.
+if [[ $# == 1 ]]; then
+  COMMAND=$1
+  if [[ -n ${SSH_ORIGINAL_COMMAND:-} && "$COMMAND" != "$SSH_ORIGINAL_COMMAND" ]]; then
+    echo 'legacy deploy command does not match SSH_ORIGINAL_COMMAND' >&2
+    exit 1
+  fi
+else
+  COMMAND=${SSH_ORIGINAL_COMMAND:-}
+fi
 demo_deploy_command_valid "$COMMAND" || {
   echo 'lima deploy command is not in the reviewed command contract' >&2
   exit 1

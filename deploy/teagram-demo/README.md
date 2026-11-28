@@ -447,8 +447,11 @@ The separate `multica-daemon@delta` root key is restricted to
 executable `deploy/teagram-demo/ops/<name>.sh` blob from that commit. The menu
 does not accept shell commands. The charlie `DEMO_DEPLOY_SSH_KEY` remains bound
 to `forced-command.sh`; demo deploys still send a tested SHA and image digest.
-Lima authorizes the same key for `teagram-deploy` on a separate SSH listener,
-through a restricted entry and a root wrapper that revalidates each command.
+Lima authorizes the same key for `root` only on its separate port 2223 listener
+with `PermitRootLogin forced-commands-only`. The key uses
+`restrict,command="/usr/local/sbin/teagram-demo-deploy"`, and the listener's
+`ForceCommand` points to that wrapper. It reads `SSH_ORIGINAL_COMMAND` and
+revalidates the fixed command contract before dispatch.
 
 After the installer commit is on `main`, stream that reviewed installer from
 a trusted checkout to the demo LXC. It fetches and verifies the requested main

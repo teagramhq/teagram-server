@@ -18,8 +18,8 @@ not_ok() {
   failures=$((failures + 1))
 }
 
-# The privileged sudo wrapper accepts the exact server, web, and QA command
-# forms used by charlie's forced command. Rejecting a command has no fallback.
+# The root forced command accepts the exact server, web, and QA command forms
+# used by charlie's forced command. Rejecting a command has no fallback.
 # shellcheck source=deploy/teagram-demo/lima/command-contract.sh
 source "$SCRIPT_DIR/command-contract.sh"
 SHA=$(printf 'a%.0s' {1..40})
@@ -58,9 +58,9 @@ for command in "${invalid_commands[@]}"; do
   fi
 done
 if demo_deploy_command_valid "${valid_commands[0]}" extra; then
-  not_ok 'extra sudo wrapper arguments rejected'
+  not_ok 'extra root wrapper arguments rejected'
 else
-  ok 'extra sudo wrapper arguments rejected'
+  ok 'extra root wrapper arguments rejected'
 fi
 
 if grep -Eq '^([[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d|.*>>?[[:space:]]*/etc/ssh/sshd_config)' \
@@ -71,8 +71,10 @@ else
 fi
 for expected in \
   'ListenAddress 100.117.107.78:2223' \
-  'AuthorizedKeysFile /etc/ssh/authorized_keys/%u' \
+  'AllowUsers root' \
+  'AuthorizedKeysFile /etc/ssh/authorized_keys/teagram-demo-deploy-root' \
   'AuthenticationMethods publickey' \
+  'PermitRootLogin forced-commands-only' \
   'PasswordAuthentication no' \
   'PermitEmptyPasswords no' \
   'DisableForwarding yes' \
@@ -80,25 +82,22 @@ for expected in \
   'PermitTunnel no' \
   'PermitUserEnvironment no' \
   'PermitUserRC no' \
-  'ForceCommand /usr/local/libexec/teagram-demo-deploy-entry'; do
+  'ForceCommand /usr/local/sbin/teagram-demo-deploy'; do
   if grep -Fqx "$expected" "$SCRIPT_DIR/sshd_config"; then
     ok "listener config: $expected"
   else
     not_ok "listener config: $expected"
   fi
 done
-if grep -Fqx 'teagram-deploy ALL=(root) NOPASSWD: /usr/local/sbin/teagram-demo-deploy' \
-  "$SCRIPT_DIR/teagram-deploy.sudoers"; then
-  ok 'sudoers grants only the root wrapper'
+# shellcheck disable=SC2016 # Match installer source text literally.
+if grep -Fq 'verify_checkout_ownership || fail' "$SCRIPT_DIR/install-deploy-entry.sh" &&
+  grep -Fq 'remove_legacy_deploy_access' "$SCRIPT_DIR/install-deploy-entry.sh" &&
+  grep -Fq 'KEY_LINE="restrict,command=\"$ROOT_WRAPPER\"' "$SCRIPT_DIR/install-deploy-entry.sh" &&
+  ! grep -Eq 'apk add.*sudo|sudo -l|visudo|ensure_deploy_account|chpasswd' \
+    "$SCRIPT_DIR/install-deploy-entry.sh"; then
+  ok 'installer preserves the checkout scan, installs the root key and removes the legacy sudo account without installing sudo'
 else
-  not_ok 'sudoers grants only the root wrapper'
-fi
-if grep -Fq 'ensure_deploy_account' "$SCRIPT_DIR/install-deploy-entry.sh" &&
-  grep -Fq 'chpasswd' "$SCRIPT_DIR/install-deploy-entry.sh" &&
-  grep -Fq 'verify_checkout_ownership || fail' "$SCRIPT_DIR/install-deploy-entry.sh"; then
-  ok 'installer provisions a key-authenticating account and exposes the checkout scan for regression tests'
-else
-  not_ok 'installer provisions a key-authenticating account and exposes the checkout scan for regression tests'
+  not_ok 'installer preserves the checkout scan, installs the root key and removes the legacy sudo account without installing sudo'
 fi
 if awk '
   index($0, "migrate_legacy_runtime_paths || fail") { migration = NR }
@@ -109,68 +108,22 @@ if awk '
 else
   not_ok 'installer migrates legacy runtime paths before scanning checkout ownership'
 fi
-SUDO_LIST_VALIDATOR="$TMP_DIR/sudo-list-validator.sh"
-{
-  printf '%s\n' 'ROOT_WRAPPER=/usr/local/sbin/teagram-demo-deploy'
-  sed -n '/^sudo_commands_are_restricted() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
-} > "$SUDO_LIST_VALIDATOR"
-if [[ -s "$SUDO_LIST_VALIDATOR" ]]; then
-  # shellcheck disable=SC1090
-  source "$SUDO_LIST_VALIDATOR"
-  cat > "$TMP_DIR/sudo-list-wrapper-only" <<'EOF'
-Matching Defaults entries for teagram-deploy on lima:
-    env_reset, secure_path=/usr/sbin:/usr/bin
-
-User teagram-deploy may run the following commands on lima:
-    (root) NOPASSWD: /usr/local/sbin/teagram-demo-deploy
-    (root) NOPASSWD: /usr/local/sbin/teagram-demo-deploy
-EOF
-  if sudo_commands_are_restricted "$TMP_DIR/sudo-list-wrapper-only"; then
-    ok 'sudo list accepts the root wrapper as the only command'
-  else
-    not_ok 'sudo list accepts the root wrapper as the only command'
-  fi
-  cat > "$TMP_DIR/sudo-list-extra-group-grant" <<'EOF'
-Matching Defaults entries for teagram-deploy on lima:
-    env_reset, secure_path=/usr/sbin:/usr/bin
-
-User teagram-deploy may run the following commands on lima:
-    (root) NOPASSWD: /usr/local/sbin/teagram-demo-deploy
-    (ALL : ALL) ALL
-EOF
-  if sudo_commands_are_restricted "$TMP_DIR/sudo-list-extra-group-grant"; then
-    not_ok 'sudo list rejects an additional group grant'
-  else
-    ok 'sudo list rejects an additional group grant'
-  fi
-  cat > "$TMP_DIR/sudo-list-extra-user-alias-grant" <<'EOF'
-Matching Defaults entries for teagram-deploy on lima:
-    env_reset, secure_path=/usr/sbin:/usr/bin
-
-User teagram-deploy may run the following commands on lima:
-    (root) NOPASSWD: /usr/local/sbin/teagram-demo-deploy
-    (root) NOPASSWD: /bin/sh
-EOF
-  if sudo_commands_are_restricted "$TMP_DIR/sudo-list-extra-user-alias-grant"; then
-    not_ok 'sudo list rejects an additional user-alias command'
-  else
-    ok 'sudo list rejects an additional user-alias command'
-  fi
+# shellcheck disable=SC2016 # Match installer source text literally.
+if [[ ! -e "$SCRIPT_DIR/deploy-entry.sh" && ! -e "$SCRIPT_DIR/teagram-deploy.sudoers" ]] &&
+  grep -Fq 'rm -- "$LEGACY_SUDOERS_FILE"' "$SCRIPT_DIR/install-deploy-entry.sh" &&
+  grep -Fq 'deluser "$LEGACY_DEPLOY_USER"' "$SCRIPT_DIR/install-deploy-entry.sh"; then
+  ok 'legacy sudo entrypoint and account are removed and their source files are retired'
 else
-  not_ok 'installer validates the complete effective sudo command list'
-fi
-# shellcheck disable=SC2016 # Match the literal installer invocation.
-if grep -Fq 'sudo_commands_are_restricted "$TMP_DIR/sudo-list"' "$SCRIPT_DIR/install-deploy-entry.sh"; then
-  ok 'installer enforces the effective sudo command limit'
-else
-  not_ok 'installer enforces the effective sudo command limit'
+  not_ok 'legacy sudo entrypoint and account are removed and their source files are retired'
 fi
 # shellcheck disable=SC2016 # Match literal source text without expanding it.
-if grep -Fq 'exec sudo -n /usr/local/sbin/teagram-demo-deploy "${SSH_ORIGINAL_COMMAND:-}"' \
-  "$SCRIPT_DIR/deploy-entry.sh"; then
-  ok 'unprivileged entry forwards one command argument'
+if grep -Fq 'COMMAND=${SSH_ORIGINAL_COMMAND:-}' "$SCRIPT_DIR/deploy-root-wrapper.sh" &&
+  grep -Fq 'COMMAND=$1' "$SCRIPT_DIR/deploy-root-wrapper.sh" &&
+  grep -Fq 'if [[ $# -gt 1 ]]' "$SCRIPT_DIR/deploy-root-wrapper.sh" &&
+  grep -Fq '"$COMMAND" != "$SSH_ORIGINAL_COMMAND"' "$SCRIPT_DIR/deploy-root-wrapper.sh"; then
+  ok 'root wrapper validates SSH_ORIGINAL_COMMAND and accepts the legacy entrypoint argument during cutover'
 else
-  not_ok 'unprivileged entry forwards one command argument'
+  not_ok 'root wrapper validates SSH_ORIGINAL_COMMAND and accepts the legacy entrypoint argument during cutover'
 fi
 # shellcheck disable=SC2016 # Match literal source text without expanding it.
 if grep -Fq 'demo_deploy_command_valid "$COMMAND"' "$SCRIPT_DIR/deploy-root-wrapper.sh"; then
@@ -212,18 +165,44 @@ fi
 
 ALPINE_FUNCTIONS="$TMP_DIR/alpine-functions.sh"
 {
-  printf '%s\n' 'REPO=/opt/teagram-demo' 'DEPLOY_USER=teagram-deploy' \
+  printf '%s\n' 'REPO=/opt/teagram-demo' 'DEPLOY_USER=root' \
+    'ROOT_WRAPPER=/usr/local/sbin/teagram-demo-deploy' \
+    'SSH_CONFIG=/etc/ssh/teagram-demo-deploy_sshd_config' \
+    'SERVICE_FILE=/etc/init.d/teagram-demo-deploy-sshd' \
+    'SERVICE_NAME=teagram-demo-deploy-sshd' \
+    'ADDRESS=100.117.107.78' 'PORT=2223' \
+    'AUTHORIZED_KEYS_DIR=/etc/ssh/authorized_keys' \
+    'AUTHORIZED_KEYS=/etc/ssh/authorized_keys/teagram-demo-deploy-root' \
+    'LEGACY_DEPLOY_USER=teagram-deploy' \
+    'LEGACY_AUTHORIZED_KEYS=/etc/ssh/authorized_keys/teagram-deploy' \
+    'LEGACY_ENTRY_PATH=/usr/local/libexec/teagram-demo-deploy-entry' \
+    'LEGACY_SUDOERS_FILE=/etc/sudoers.d/teagram-deploy' \
     'RUNTIME_DIR=/var/lib/teagram-demo/lima/runtime'
+  sed -n '/^fail() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
+  sed -n '/^cleanup() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
+  sed -n '/^require_root_owned() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
+  sed -n '/^install_file() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
+  sed -n '/^install_key_file() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
+  sed -n '/^validate_deploy_key_file() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
+  sed -n '/^snapshot_file() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
+  sed -n '/^restore_file() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
+  sed -n '/^dedicated_listener_ready() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
+  sed -n '/^rollback_deploy_entry() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
+  sed -n '/^stage_deploy_entry() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
+  sed -n '/^activate_deploy_entry() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
+  sed -n '/^directory_hash() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
+  sed -n '/^reject_unmanaged_sudoers_rule() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
   sed -n '/^verify_checkout_ownership() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
   sed -n '/^migrate_legacy_runtime_path() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
   sed -n '/^migrate_legacy_runtime_paths() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
-  sed -n '/^ensure_deploy_account() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
+  sed -n '/^verify_legacy_deploy_access() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
+  sed -n '/^remove_legacy_deploy_access() {$/,/^}/p' "$SCRIPT_DIR/install-deploy-entry.sh"
   sed -n '/^prepare_runtime_dirs() {$/,/^}/p' "$SCRIPT_DIR/prepare-blobs.sh"
 } > "$ALPINE_FUNCTIONS"
 cat > "$TMP_DIR/alpine-deploy-entry-regression.sh" <<'BASH'
 set -Eeuo pipefail
 source /tmp/alpine-functions.sh
-fail() { printf '%s\n' "$1" >&2; exit 1; }
+TMP_DIR=$(mktemp -d /tmp/lima-installer-tests.XXXXXXXX)
 chmod 0755 /
 
 mkdir -p "$REPO/.git" "$REPO/deploy/teagram-demo"
@@ -274,39 +253,387 @@ chown 99:99 "$RUNTIME_DIR/haproxy-run/admin.sock" "$RUNTIME_DIR/tmp/haproxy/prox
 chown 584792:584792 "$RUNTIME_DIR/tmp/turnstile-egress/proxy-temp"
 verify_checkout_ownership
 
-ensure_deploy_account
-ssh-keygen -q -t ed25519 -N '' -f /tmp/fixture-key
-install -d -o root -g root -m 0755 /etc/ssh/authorized_keys
-printf 'restrict,command="/tmp/key-authenticated" %s\n' "$(cat /tmp/fixture-key.pub)" \
-  > /etc/ssh/authorized_keys/$DEPLOY_USER
-chown root:root /etc/ssh/authorized_keys/$DEPLOY_USER
-chmod 0644 /etc/ssh/authorized_keys/$DEPLOY_USER
-cat > /tmp/key-authenticated <<'COMMAND'
-#!/bin/sh
-printf 'key-authenticated\n'
+install -d -o root -g root -m 0755 /etc/ssh/authorized_keys /etc/sudoers.d \
+  /usr/local/libexec /usr/local/sbin /var/empty
+adduser -S -D -H -h /var/empty -s /bin/sh "$LEGACY_DEPLOY_USER"
+printf '%s\n' 'teagram-deploy ALL=(root) NOPASSWD: /usr/local/sbin/teagram-demo-deploy' \
+  > "$LEGACY_SUDOERS_FILE"
+chmod 0440 "$LEGACY_SUDOERS_FILE"
+printf 'legacy authorized key\n' > "$LEGACY_AUTHORIZED_KEYS"
+chmod 0644 "$LEGACY_AUTHORIZED_KEYS"
+printf '#!/bin/sh\nexit 1\n' > "$LEGACY_ENTRY_PATH"
+chmod 0755 "$LEGACY_ENTRY_PATH"
+
+cp /etc/passwd /tmp/legacy-passwd.valid
+set_legacy_passwd_field() {
+  local field=$1 value=$2
+  awk -F: -v OFS=: -v name="$LEGACY_DEPLOY_USER" -v field="$field" -v value="$value" \
+    '$1 == name { $field = value; changed = 1 } { print } END { if (!changed) exit 1 }' \
+    /etc/passwd > /tmp/legacy-passwd.next
+  cat /tmp/legacy-passwd.next > /etc/passwd
+}
+restore_legacy_passwd() { cat /tmp/legacy-passwd.valid > /etc/passwd; }
+
+assert_legacy_files_survive() {
+  [[ -f "$LEGACY_SUDOERS_FILE" && -f "$LEGACY_AUTHORIZED_KEYS" && -f "$LEGACY_ENTRY_PATH" ]]
+  grep -Fqx 'teagram-deploy ALL=(root) NOPASSWD: /usr/local/sbin/teagram-demo-deploy' \
+    "$LEGACY_SUDOERS_FILE"
+  grep -Fqx 'legacy authorized key' "$LEGACY_AUTHORIZED_KEYS"
+  grep -Fqx '#!/bin/sh' "$LEGACY_ENTRY_PATH"
+  awk -F: -v name="$LEGACY_DEPLOY_USER" '$1 == name { found = 1 } END { exit !found }' /etc/passwd
+}
+
+expect_legacy_refusal() {
+  local label=$1 expected=$2
+  shift 2
+  if ( "$@" ) > /tmp/legacy-refusal.out 2>&1; then
+    printf 'legacy access cleanup accepted invalid %s\n' "$label" >&2
+    exit 1
+  fi
+  grep -Fq "$expected" /tmp/legacy-refusal.out || {
+    cat /tmp/legacy-refusal.out >&2
+    printf 'legacy access cleanup rejected %s for the wrong reason\n' "$label" >&2
+    exit 1
+  }
+  assert_legacy_files_survive
+  printf 'ok - legacy access cleanup refuses %s and preserves legacy files\n' "$label"
+}
+
+set_legacy_passwd_field 3 0
+expect_legacy_refusal 'uid 0' 'legacy deploy account has unexpected identity settings' \
+  remove_legacy_deploy_access
+restore_legacy_passwd
+set_legacy_passwd_field 6 /root
+expect_legacy_refusal 'unexpected home' 'legacy deploy account has unexpected identity settings' \
+  remove_legacy_deploy_access
+restore_legacy_passwd
+set_legacy_passwd_field 7 /bin/false
+expect_legacy_refusal 'unexpected shell' 'legacy deploy account has unexpected identity settings' \
+  remove_legacy_deploy_access
+restore_legacy_passwd
+
+reject_with_privileged_group() {
+  local fixture_group=$1
+  id() {
+    if [[ "${1:-}" == -nG && "${2:-}" == "$LEGACY_DEPLOY_USER" ]]; then
+      printf '%s %s\n' "$LEGACY_DEPLOY_USER" "$fixture_group"
+    else
+      command id "$@"
+    fi
+  }
+  remove_legacy_deploy_access
+}
+for group in docker wheel sudo; do
+  expect_legacy_refusal "$group membership" \
+    "legacy deploy account unexpectedly belongs to $group" \
+    reject_with_privileged_group "$group"
+done
+
+printf '%s\n' 'teagram-deploy ALL=(root) NOPASSWD: /bin/sh' > /etc/sudoers
+expect_legacy_refusal 'an unmanaged /etc/sudoers grant' \
+  'an unmanaged sudoers rule still grants access to the legacy deploy account' \
+  remove_legacy_deploy_access
+rm -f /etc/sudoers
+printf '%s\n' 'teagram-deploy ALL=(root) NOPASSWD: /bin/sh' > /etc/sudoers.d/unmanaged
+chmod 0440 /etc/sudoers.d/unmanaged
+expect_legacy_refusal 'an unmanaged sudoers.d grant' \
+  'an unmanaged sudoers file still grants access to the legacy deploy account: /etc/sudoers.d/unmanaged' \
+  remove_legacy_deploy_access
+rm -f /etc/sudoers.d/unmanaged
+
+printf '%s\n' '# force grep to report a read error' > /etc/sudoers.d/grep-read-error
+chmod 0440 /etc/sudoers.d/grep-read-error
+reject_with_sudoers_read_error() {
+  grep() {
+    local argument
+    for argument in "$@"; do
+      [[ "$argument" != /etc/sudoers.d/grep-read-error ]] || return 2
+    done
+    command grep "$@"
+  }
+  remove_legacy_deploy_access
+}
+expect_legacy_refusal 'a sudoers read error' \
+  'could not inspect sudoers file: /etc/sudoers.d/grep-read-error' \
+  reject_with_sudoers_read_error
+rm -f /etc/sudoers.d/grep-read-error
+
+reject_with_sudoers_scan_error() {
+  find() {
+    if [[ ${1:-} == /etc/sudoers.d ]]; then
+      return 2
+    fi
+    command find "$@"
+  }
+  remove_legacy_deploy_access
+}
+expect_legacy_refusal 'a sudoers directory scan failure' \
+  'could not enumerate sudoers files' \
+  reject_with_sudoers_scan_error
+
+remove_legacy_deploy_access
+if id "$LEGACY_DEPLOY_USER" >/dev/null 2>&1; then
+  printf 'legacy deploy account survived cleanup\n' >&2
+  exit 1
+fi
+[[ ! -e "$LEGACY_SUDOERS_FILE" && ! -e "$LEGACY_AUTHORIZED_KEYS" && ! -e "$LEGACY_ENTRY_PATH" ]]
+
+mkdir -p "$REPO/.git" "$REPO/deploy/teagram-demo/lima"
+cp /tmp/deploy-root-wrapper.sh "$REPO/deploy/teagram-demo/lima/deploy-root-wrapper.sh"
+cp /tmp/command-contract.sh "$REPO/deploy/teagram-demo/lima/command-contract.sh"
+cat > "$REPO/deploy/teagram-demo/forced-command.sh" <<'COMMAND'
+#!/bin/bash
+set -Eeuo pipefail
+printf 'executed:%s target:%s\n' "$SSH_ORIGINAL_COMMAND" "$DEMO_DEPLOY_TARGET"
 COMMAND
-chmod 0755 /tmp/key-authenticated
+chmod 0755 "$REPO/deploy/teagram-demo/forced-command.sh" \
+  "$REPO/deploy/teagram-demo/lima/deploy-root-wrapper.sh" \
+  "$REPO/deploy/teagram-demo/lima/command-contract.sh"
+install -m 0755 "$REPO/deploy/teagram-demo/lima/deploy-root-wrapper.sh" \
+  /usr/local/sbin/teagram-demo-deploy
+ssh-keygen -q -t ed25519 -N '' -f /tmp/fixture-key
+ssh-keygen -q -t ed25519 -N '' -f /tmp/other-key
+KEY_LINE="restrict,command=\"$ROOT_WRAPPER\" $(cat /tmp/fixture-key.pub)"
+SECOND_KEY_LINE="restrict,command=\"$ROOT_WRAPPER\" $(cat /tmp/other-key.pub)"
+INSTALL_SOURCE=/tmp/lima-installer-source
+mkdir -m 0700 "$INSTALL_SOURCE"
+cp /tmp/lima-sshd_config "$INSTALL_SOURCE/sshd_config"
+cp /tmp/deploy-sshd-initd "$INSTALL_SOURCE/teagram-demo-deploy-sshd.initd"
+cp /tmp/deploy-root-wrapper.sh "$INSTALL_SOURCE/deploy-root-wrapper.sh"
+cat > /tmp/installer-sshd-ok <<'SH'
+#!/bin/sh
+if [ "$1" = -t ]; then exit 0; fi
+if [ "$1" = -T ]; then
+  printf '%s\n' \
+    'port 2223' 'addressfamily inet' 'listenaddress 100.117.107.78:2223' \
+    'allowusers root' 'authorizedkeysfile /etc/ssh/authorized_keys/teagram-demo-deploy-root' \
+    'authenticationmethods publickey' 'passwordauthentication no' \
+    'kbdinteractiveauthentication no' 'permitrootlogin forced-commands-only' \
+    'disableforwarding yes' 'permittty no' 'permittunnel no' \
+    'permituserenvironment no' 'permituserrc no' \
+    'forcecommand /usr/local/sbin/teagram-demo-deploy'
+  exit 0
+fi
+exit 2
+SH
+cat > /tmp/installer-sshd-fail <<'SH'
+#!/bin/sh
+if [ "$1" = -t ]; then exit 1; fi
+exec /tmp/installer-sshd-ok "$@"
+SH
+chmod 0755 /tmp/installer-sshd-ok /tmp/installer-sshd-fail
+
+stage_failure_root=/tmp/lima-stage-failure
+mkdir -p "$stage_failure_root/live"
+printf 'old ssh config\n' > "$stage_failure_root/live/sshd_config"
+printf 'old service\n' > "$stage_failure_root/live/service"
+printf 'old wrapper\n' > "$stage_failure_root/live/wrapper"
+if (
+  TMP_DIR="$stage_failure_root/tmp"
+  mkdir -m 0700 "$TMP_DIR"
+  SCRIPT_DIR=$INSTALL_SOURCE
+  SSH_CONFIG="$stage_failure_root/live/sshd_config"
+  SERVICE_FILE="$stage_failure_root/live/service"
+  ROOT_WRAPPER="$stage_failure_root/live/wrapper"
+  AUTHORIZED_KEYS_DIR="$stage_failure_root/live/authorized_keys"
+  AUTHORIZED_KEYS="$AUTHORIZED_KEYS_DIR/root"
+  KEY_LINE=$KEY_LINE
+  SSHD_BIN=/tmp/installer-sshd-fail
+  stage_deploy_entry
+) > /tmp/stage-config-refusal.out 2>&1; then
+  printf 'installer accepted an invalid staged sshd config\n' >&2
+  exit 1
+fi
+grep -Fq 'dedicated deploy sshd config failed validation' /tmp/stage-config-refusal.out
+grep -Fqx 'old ssh config' "$stage_failure_root/live/sshd_config"
+grep -Fqx 'old service' "$stage_failure_root/live/service"
+grep -Fqx 'old wrapper' "$stage_failure_root/live/wrapper"
+[[ ! -e "$stage_failure_root/live/authorized_keys/root" ]]
+printf 'ok - invalid staged sshd config leaves live files and listener credentials untouched\n'
+
+stage_key_root=/tmp/lima-stage-key-failure
+mkdir -p "$stage_key_root/live/authorized_keys"
+chmod 0755 "$stage_key_root/live/authorized_keys"
+printf 'old ssh config\n' > "$stage_key_root/live/sshd_config"
+printf 'old service\n' > "$stage_key_root/live/service"
+printf 'old wrapper\n' > "$stage_key_root/live/wrapper"
+printf '%s\n' "$SECOND_KEY_LINE" > "$stage_key_root/live/authorized_keys/root"
+chmod 0600 "$stage_key_root/live/authorized_keys/root"
+if (
+  TMP_DIR="$stage_key_root/tmp"
+  mkdir -m 0700 "$TMP_DIR"
+  SCRIPT_DIR=$INSTALL_SOURCE
+  SSH_CONFIG="$stage_key_root/live/sshd_config"
+  SERVICE_FILE="$stage_key_root/live/service"
+  ROOT_WRAPPER="$stage_key_root/live/wrapper"
+  AUTHORIZED_KEYS_DIR="$stage_key_root/live/authorized_keys"
+  AUTHORIZED_KEYS="$AUTHORIZED_KEYS_DIR/root"
+  KEY_LINE=$KEY_LINE
+  SSHD_BIN=/tmp/installer-sshd-ok
+  stage_deploy_entry
+) > /tmp/stage-key-refusal.out 2>&1; then
+  printf 'installer accepted a mismatched staged deploy key\n' >&2
+  exit 1
+fi
+grep -Fq 'deploy authorized keys file differs from the requested deploy key' /tmp/stage-key-refusal.out || {
+  cat /tmp/stage-key-refusal.out >&2
+  exit 1
+}
+grep -Fqx 'old ssh config' "$stage_key_root/live/sshd_config"
+grep -Fqx 'old service' "$stage_key_root/live/service"
+grep -Fqx 'old wrapper' "$stage_key_root/live/wrapper"
+[[ "$(<"$stage_key_root/live/authorized_keys/root")" == "$SECOND_KEY_LINE" ]]
+printf 'ok - mismatched staged deploy key leaves the live wrapper and listener files untouched\n'
+
+activation_root=/tmp/lima-activation-failure
+mkdir -p "$activation_root/live" "$activation_root/state" /etc/runlevels/default
+printf 'old ssh config\n' > "$activation_root/live/sshd_config"
+printf 'old service\n' > "$activation_root/live/service"
+printf 'old wrapper\n' > "$activation_root/live/wrapper"
+chmod 0600 "$activation_root/live/sshd_config"
+chmod 0755 "$activation_root/live/service" "$activation_root/live/wrapper"
+touch "$activation_root/state/active" "$activation_root/state/fail-restart"
+rc-service() {
+  local service=$1 action=$2
+  [[ "$service" == "$SERVICE_NAME" ]] || return 2
+  printf '%s\n' "$action" >> "$SERVICE_STATE_DIR/actions"
+  case "$action" in
+    status) [[ -f "$SERVICE_STATE_DIR/active" ]] ;;
+    stop) rm -f "$SERVICE_STATE_DIR/active" ;;
+    start) touch "$SERVICE_STATE_DIR/active" ;;
+    restart)
+      if [[ -f "$SERVICE_STATE_DIR/fail-restart" ]]; then
+        rm -f "$SERVICE_STATE_DIR/fail-restart" "$SERVICE_STATE_DIR/active"
+        return 1
+      fi
+      touch "$SERVICE_STATE_DIR/active"
+      ;;
+    *) return 2 ;;
+  esac
+}
+netstat() {
+  [[ "$1" == -ltn ]] || return 2
+  printf 'active=%s address=%s port=%s\n' "$([[ -f "$SERVICE_STATE_DIR/active" ]] && printf yes || printf no)" \
+    "$ADDRESS" "$PORT" >> "$SERVICE_STATE_DIR/netstat.log"
+  if [[ -f "$SERVICE_STATE_DIR/active" ]]; then
+    printf 'tcp 0 0 %s:%s 0.0.0.0:*\n' "$ADDRESS" "$PORT"
+  fi
+}
+rc-update() {
+  local action=$1 service=$2
+  [[ "$service" == "$SERVICE_NAME" ]] || return 2
+  if [[ "$action" == add ]]; then
+    touch "/etc/runlevels/default/$service"
+  elif [[ "$action" == del ]]; then
+    rm -f "/etc/runlevels/default/$service"
+  else
+    return 2
+  fi
+}
+if (
+  TMP_DIR="$activation_root/tmp"
+  mkdir -m 0700 "$TMP_DIR"
+  SCRIPT_DIR=$INSTALL_SOURCE
+  SSH_CONFIG="$activation_root/live/sshd_config"
+  SERVICE_FILE="$activation_root/live/service"
+  ROOT_WRAPPER="$activation_root/live/wrapper"
+  AUTHORIZED_KEYS_DIR="$activation_root/live/authorized_keys"
+  AUTHORIZED_KEYS="$AUTHORIZED_KEYS_DIR/root"
+  SERVICE_NAME=teagram-activation-fixture
+  SERVICE_STATE_DIR="$activation_root/state"
+  KEY_LINE=$KEY_LINE
+  SSHD_BIN=/tmp/installer-sshd-ok
+  ACTIVATION_STARTED=0
+  ACTIVATION_COMPLETE=0
+  SERVICE_WAS_ACTIVE=0
+  SERVICE_WAS_ENABLED=0
+  trap cleanup EXIT
+  stage_deploy_entry
+  activate_deploy_entry
+) > /tmp/activation-rollback.out 2>&1; then
+  printf 'installer activation unexpectedly succeeded despite a failed listener restart\n' >&2
+  exit 1
+fi
+grep -Fqx 'old ssh config' "$activation_root/live/sshd_config"
+grep -Fqx 'old service' "$activation_root/live/service"
+grep -Fqx 'old wrapper' "$activation_root/live/wrapper"
+[[ ! -e "$activation_root/live/authorized_keys/root" ]]
+[[ -f "$activation_root/state/active" ]]
+[[ ! -e /etc/runlevels/default/teagram-activation-fixture ]]
+if grep -Fq 'rollback of previous files or listener failed' /tmp/activation-rollback.out; then
+  cat /tmp/activation-rollback.out "$activation_root/state/actions" "$activation_root/state/netstat.log" >&2
+  exit 1
+fi
+grep -Fqx 'start' "$activation_root/state/actions" || {
+  cat /tmp/activation-rollback.out "$activation_root/state/actions" >&2
+  exit 1
+}
+printf 'ok - failed listener activation restores prior files, credentials, runlevel state, and listener\n'
+
+install_key_file "$KEY_LINE"
+install_key_file "$KEY_LINE"
+[[ $(stat -c '%u:%a' "$AUTHORIZED_KEYS") == '0:600' ]]
+if (install_key_file "$SECOND_KEY_LINE") > /tmp/key-rotation-refusal.out 2>&1; then
+  printf 'installer accepted a different key over the existing deploy key\n' >&2
+  exit 1
+fi
+grep -Fq 'deploy authorized keys file differs from the requested deploy key' \
+  /tmp/key-rotation-refusal.out
+[[ "$(<"$AUTHORIZED_KEYS")" == "$KEY_LINE" ]]
+printf 'ok - installer refuses a different deploy key without changing the installed key\n'
 ssh-keygen -A >/dev/null
 sed -e 's#^ListenAddress .*#ListenAddress 127.0.0.1:2223#' \
   -e 's#^PidFile .*#PidFile /tmp/sshd.pid#' \
-  -e 's#^ForceCommand .*#ForceCommand /tmp/key-authenticated#' \
   /tmp/lima-sshd_config > /tmp/sshd_config
 /usr/sbin/sshd -t -f /tmp/sshd_config
+/usr/sbin/sshd -T -f /tmp/sshd_config > /tmp/sshd-effective
+grep -Fqx 'allowusers root' /tmp/sshd-effective
+grep -Fqx 'permitrootlogin forced-commands-only' /tmp/sshd-effective
+grep -Fqx 'authorizedkeysfile /etc/ssh/authorized_keys/teagram-demo-deploy-root' /tmp/sshd-effective
+grep -Fqx 'forcecommand /usr/local/sbin/teagram-demo-deploy' /tmp/sshd-effective
 /usr/sbin/sshd -E /tmp/sshd.log -f /tmp/sshd_config
+SHA=$(printf 'a%.0s' {1..40})
+DIGEST=$(printf 'c%.0s' {1..64})
+VALID_COMMAND="$SHA sha256:$DIGEST"
 output=
 for _ in {1..10}; do
   if output=$(ssh -F /dev/null -p 2223 -i /tmp/fixture-key -o IdentitiesOnly=yes \
     -o BatchMode=yes -o PreferredAuthentications=publickey \
     -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-    "$DEPLOY_USER@127.0.0.1" ignored-command 2>/tmp/ssh.err); then
+    root@127.0.0.1 "$VALID_COMMAND" 2>/tmp/ssh.err); then
     break
   fi
   sleep 1
 done
-if [[ "$output" != key-authenticated ]]; then
+if [[ "$output" != "executed:$VALID_COMMAND target:lima" ]]; then
   cat /tmp/ssh.err /tmp/sshd.log >&2
 fi
-[[ "$output" == key-authenticated ]]
+[[ "$output" == "executed:$VALID_COMMAND target:lima" ]]
+legacy_output=$(env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  "$ROOT_WRAPPER" "$VALID_COMMAND")
+[[ "$legacy_output" == "executed:$VALID_COMMAND target:lima" ]]
+if SSH_ORIGINAL_COMMAND='bash -c id' "$ROOT_WRAPPER" "$VALID_COMMAND" \
+  >/tmp/ssh-wrapper-mismatch.out 2>&1; then
+  printf 'root wrapper accepted a mismatched legacy command argument\n' >&2
+  exit 1
+fi
+grep -Fq 'legacy deploy command does not match SSH_ORIGINAL_COMMAND' /tmp/ssh-wrapper-mismatch.out
+if ssh -F /dev/null -p 2223 -i /tmp/fixture-key -o IdentitiesOnly=yes \
+  -o BatchMode=yes -o PreferredAuthentications=publickey \
+  -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+  root@127.0.0.1 'bash -c id' >/tmp/ssh-invalid.out 2>/tmp/ssh-invalid.err; then
+  printf 'SSH accepted a command outside the reviewed contract\n' >&2
+  exit 1
+fi
+grep -Fq 'lima deploy command is not in the reviewed command contract' /tmp/ssh-invalid.err
+if ssh -F /dev/null -p 2223 -i /tmp/other-key -o IdentitiesOnly=yes \
+  -o BatchMode=yes -o PreferredAuthentications=publickey \
+  -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+  root@127.0.0.1 "$VALID_COMMAND" >/tmp/ssh-other-key.out 2>/tmp/ssh-other-key.err; then
+  printf 'SSH accepted a key outside the deploy authorized-keys file\n' >&2
+  exit 1
+fi
+[[ ! -s /tmp/ssh-other-key.out ]]
 BASH
 
 ALPINE_CONTAINER="teagram-lima-deploy-$RANDOM-$$"
@@ -322,6 +649,9 @@ else
     alpine_test_stage=copy-scripts
     if ! docker cp "$ALPINE_FUNCTIONS" "$ALPINE_CONTAINER:/tmp/alpine-functions.sh" ||
       ! docker cp "$SCRIPT_DIR/sshd_config" "$ALPINE_CONTAINER:/tmp/lima-sshd_config" ||
+      ! docker cp "$SCRIPT_DIR/deploy-root-wrapper.sh" "$ALPINE_CONTAINER:/tmp/deploy-root-wrapper.sh" ||
+      ! docker cp "$SCRIPT_DIR/teagram-demo-deploy-sshd.initd" "$ALPINE_CONTAINER:/tmp/deploy-sshd-initd" ||
+      ! docker cp "$SCRIPT_DIR/command-contract.sh" "$ALPINE_CONTAINER:/tmp/command-contract.sh" ||
       ! docker cp "$TMP_DIR/alpine-deploy-entry-regression.sh" "$ALPINE_CONTAINER:/tmp/alpine-deploy-entry-regression.sh"; then
       alpine_test_status=1
     else
@@ -334,9 +664,9 @@ else
   fi
 fi
 if (( alpine_test_status == 0 )); then
-  ok 'Alpine migration moves the Stage 1 runtime paths before the ownership scan and accepts a fixture SSH key'
+  ok 'Alpine migration moves Stage 1 runtime paths, removes the legacy sudo account, and verifies root forced-command SSH'
 else
-  not_ok 'Alpine migration moves the Stage 1 runtime paths before the ownership scan and accepts a fixture SSH key'
+  not_ok 'Alpine migration moves Stage 1 runtime paths, removes the legacy sudo account, and verifies root forced-command SSH'
   printf 'Alpine regression stage failed: %s\n' "$alpine_test_stage" >&2
   cat "$TMP_DIR/alpine-deploy-entry.out" "$TMP_DIR/alpine-deploy-entry.err" >&2 2>/dev/null || true
 fi
