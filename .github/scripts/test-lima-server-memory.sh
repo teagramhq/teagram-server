@@ -439,7 +439,40 @@ if ! curl --noproxy '*' --fail --connect-timeout 1 --max-time 2 --silent --show-
 fi
 touch "$MEMORY_SAMPLE_RUNTIME_READY_FILE"
 if [[ ${LIMA_MEMORY_CAPTURE_MAPS:-0} == 1 ]]; then
+  typical_request_row=
+  for _ in $(seq 50); do
+    if [[ -r $RUNNER_TEMP/lima-memory-sampled-history ]]; then
+      typical_request_row=$(tail -n 1 "$RUNNER_TEMP/lima-memory-sampled-history")
+      [[ -n $typical_request_row ]] && break
+    fi
+    sleep 0.01
+  done
+  if [[ -z $typical_request_row ]]; then
+    echo 'mapping diagnostics did not record a cgroup/process baseline before uploads' >&2
+    exit 1
+  fi
+  if ! lima_memory_queue_mapping_request "$RUNNER_TEMP/lima-memory-sampled" typical \
+    "$typical_request_row"; then
+    echo 'mapping diagnostics could not queue the pre-upload typical sample' >&2
+    exit 1
+  fi
   touch "$MEMORY_SAMPLE_MAPPING_READY_FILE"
+  typical_capture_complete=false
+  for _ in $(seq 500); do
+    if [[ -s $RUNNER_TEMP/lima-memory-sampled-mappings-typical ]]; then
+      typical_capture_complete=true
+      break
+    fi
+    if [[ -r $MEMORY_SAMPLE_ERROR_FILE ]]; then
+      cat "$MEMORY_SAMPLE_ERROR_FILE" >&2
+      exit 1
+    fi
+    sleep 0.01
+  done
+  if [[ $typical_capture_complete != true ]]; then
+    echo 'mapping diagnostics did not capture the typical baseline before uploads' >&2
+    exit 1
+  fi
 fi
 
 run_setup_command client-config >"$RUNNER_TEMP/lima-memory-client.json"

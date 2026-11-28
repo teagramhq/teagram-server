@@ -255,7 +255,6 @@ export LIMA_MEMORY_CAPTURE_MAPS=1
 export LIMA_MEMORY_MAPPING_TYPICAL_BYTES=2000000
 export LIMA_MEMORY_MAPPING_SPIKE_DELTA_BYTES=524288
 export LIMA_MEMORY_MAPPING_ENDPOINT=http://127.0.0.1:2447/debug/runtime-memory-mappings
-: >"$mapping_ready"
 lima_memory_sample_mapping_loop "$proc_root" 101 "$mapping_prefix" \
   "$mapping_prefix-history" "$mapping_ready" "$mapping_worker_stop" \
   "$mapping_worker_error" 0.01 &
@@ -263,6 +262,20 @@ mapping_worker_pid=$!
 lima_memory_sample_cgroup_loop "$mapping_cgroup" "$proc_root" 101 "$mapping_prefix" \
   "$mapping_cgroup_stop" "$mapping_worker_error" 0.01 &
 mapping_cgroup_sampler_pid=$!
+mapping_baseline_row=
+for _ in $(seq 500); do
+  if [[ -s "$mapping_prefix-history" ]]; then
+    mapping_baseline_row=$(tail -n 1 "$mapping_prefix-history")
+    [[ -n $mapping_baseline_row ]] && break
+  fi
+  sleep 0.01
+done
+if [[ -z $mapping_baseline_row ]]; then
+  printf 'cgroup sampler did not record a pre-workload mapping baseline\n' >&2
+  exit 1
+fi
+lima_memory_queue_mapping_request "$mapping_prefix" typical "$mapping_baseline_row"
+: >"$mapping_ready"
 for _ in $(seq 500); do
   if [[ -r "$mapping_prefix-mappings-typical" ]]; then
     break
