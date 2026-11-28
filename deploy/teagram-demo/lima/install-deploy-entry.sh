@@ -271,8 +271,9 @@ stage_deploy_entry() {
   install_file "$SCRIPT_DIR/deploy-root-wrapper.sh" "$STAGED_ROOT_WRAPPER" 0755
   sh -n "$STAGED_SERVICE_FILE" || fail 'staged dedicated SSH service failed shell validation'
   printf '%s\n' "$KEY_LINE" > "$STAGED_AUTHORIZED_KEYS" || fail 'could not stage deploy authorized keys'
-  chown root:root "$STAGED_AUTHORIZED_KEYS" && chmod 0600 "$STAGED_AUTHORIZED_KEYS" ||
+  if ! chown root:root "$STAGED_AUTHORIZED_KEYS" || ! chmod 0600 "$STAGED_AUTHORIZED_KEYS"; then
     fail 'could not set staged deploy authorized keys permissions'
+  fi
   ssh-keygen -lf "$STAGED_AUTHORIZED_KEYS" >/dev/null || fail 'staged deploy authorized key failed validation'
   validate_deploy_key_file
 
