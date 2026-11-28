@@ -436,22 +436,30 @@ INCOMPATIBLE_FLOCK_BIN=$TMP_DIR/incompatible-flock-bin
 mkdir -p "$INCOMPATIBLE_FLOCK_BIN"
 cat > "$INCOMPATIBLE_FLOCK_BIN/flock" <<'EOF'
 #!/usr/bin/env bash
-printf 'flock: applet does not support -w\n' >&2
-exit 2
+set -Eeuo pipefail
+for argument in "$@"; do
+  if [[ $argument == "${TEAGRAM_TEST_FLOCK_UNSUPPORTED_OPTION:?}" ]]; then
+    printf 'flock: applet does not support %s\n' "$argument" >&2
+    exit 2
+  fi
+done
 EOF
 chmod 755 "$INCOMPATIBLE_FLOCK_BIN/flock"
-set +e
-PATH="$INCOMPATIBLE_FLOCK_BIN:$PATH" run_check > "$CHECK_OUT" 2>&1
-tools_status=$?
-set -e
-if ((tools_status == 1)) \
-  && grep -q '^FAIL tools:.*flock' "$CHECK_OUT" \
-  && grep -q '^would_reject' "$CHECK_OUT"; then
-  ok 'check.sh rejects flock without -w and -E support'
-else
-  not_ok 'check.sh rejects flock without -w and -E support'
-  cat "$CHECK_OUT" >&2
-fi
+for unsupported_option in -w -E; do
+  set +e
+  TEAGRAM_TEST_FLOCK_UNSUPPORTED_OPTION="$unsupported_option" \
+    PATH="$INCOMPATIBLE_FLOCK_BIN:$PATH" run_check > "$CHECK_OUT" 2>&1
+  tools_status=$?
+  set -e
+  if ((tools_status == 1)) \
+    && grep -q '^FAIL tools:.*flock' "$CHECK_OUT" \
+    && grep -q '^would_reject' "$CHECK_OUT"; then
+    ok "check.sh rejects flock without $unsupported_option support"
+  else
+    not_ok "check.sh rejects flock without $unsupported_option support"
+    cat "$CHECK_OUT" >&2
+  fi
+done
 
 # Drift guard: images shared with the charlie file are the same digests, and
 # teagramd's environment matches apart from lima's caps and single-server
