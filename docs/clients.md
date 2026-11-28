@@ -658,13 +658,15 @@ host is non-canonical. Generators include a host only for another server.
 
 Every field except the last has a one-byte length prefix from 1 through 255.
 The last field consumes the remaining bytes. Host, username, and set short-name
-text is case-folded and represented as a bijective base-40 integer using the
-ordered alphabet `0-9 a-z - . _ :`; each alphabet position is a digit from 1 to
-40. The positive integer is written as minimal big-endian bytes. Usernames
-must match `^[A-Za-z][A-Za-z0-9_]{1,31}$`. Hosts are IDNA-normalized to
-lower-case ASCII, have trailing dots removed, and may include a port from 1
-through 65535. DNS labels must be valid, and `telegram.org` and its subdomains
-are refused.
+text is represented as a bijective base-40 integer using the ordered alphabet
+`0-9 a-z - . _ :`; each alphabet position is a digit from 1 to 40. The
+positive integer is written as minimal big-endian bytes. A `Link` passed to
+`Encode` must already use canonical lowercase usernames and short names, and a
+host normalized to lowercase ASCII; values that would need case-folding or host
+normalization are rejected. Usernames must match
+`^[A-Za-z][A-Za-z0-9_]{1,31}$`. Hosts must be IDNA-normalized with trailing
+dots removed, and may include a canonical decimal port from 1 through 65535.
+DNS labels must be valid, and `telegram.org` and its subdomains are refused.
 Numeric ids are minimal big-endian unsigned integers from 1 through
 `2^63-1`. Join hashes preserve their raw bytes. Invite secrets are 32 bytes and
 are re-encoded as 64 lower-case hexadecimal characters for the API.

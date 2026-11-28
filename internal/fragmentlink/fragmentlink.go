@@ -123,6 +123,9 @@ func Encode(value Link) (string, error) {
 		if err != nil {
 			return "", err
 		}
+		if host != value.Host {
+			return "", codecError(ErrorNonCanonical, "host")
+		}
 		if host == DefaultServerHost {
 			return "", codecError(ErrorNonCanonical, "host")
 		}
@@ -348,7 +351,9 @@ func encodeText(value, field string) ([]byte, error) {
 			return nil, codecError(ErrorInvalidText, field)
 		}
 	}
-	value = strings.ToLower(value)
+	if value != strings.ToLower(value) {
+		return nil, codecError(ErrorNonCanonical, field)
+	}
 	number := new(big.Int)
 	base := big.NewInt(int64(len(textAlphabet)))
 	for _, char := range value {
@@ -394,7 +399,6 @@ func encodeUsername(username string) ([]byte, error) {
 	if !validUsername(username) {
 		return nil, codecError(ErrorInvalidUsername, "username")
 	}
-	username = strings.ToLower(username)
 	return encodeText(username, "username")
 }
 
@@ -552,10 +556,10 @@ func noUnexpectedFields(value Link) error {
 	if value.Type != TypePublicMessage && value.Type != TypePrivateChannelMessage && value.MessageID != 0 {
 		return codecError(ErrorUnexpectedField, "message_id")
 	}
-	if value.Type != TypeJoinChat && len(value.Hash) > 0 {
+	if value.Type != TypeJoinChat && value.Hash != nil {
 		return codecError(ErrorUnexpectedField, "hash")
 	}
-	if value.Type != TypeSignUpInvite && len(value.Secret) > 0 {
+	if value.Type != TypeSignUpInvite && value.Secret != nil {
 		return codecError(ErrorUnexpectedField, "secret")
 	}
 	if value.Type != TypeStickerSet && value.Type != TypeEmojiSet && value.ShortName != "" {

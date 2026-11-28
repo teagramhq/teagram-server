@@ -178,57 +178,71 @@ func TestDecodeRequiresFragmentMarker(t *testing.T) {
 	}
 }
 
-func TestEncodeCaseFoldsTextFields(t *testing.T) {
-	lowerCode, err := fragmentlink.Encode(fragmentlink.Link{Type: fragmentlink.TypeProfile, Username: "alice"})
+func TestEncodeRequiresCanonicalTextFields(t *testing.T) {
+	value := fragmentlink.Link{Type: fragmentlink.TypeProfile, Username: "alice"}
+	code, err := fragmentlink.Encode(value)
 	if err != nil {
 		t.Fatal(err)
 	}
-	upperCode, err := fragmentlink.Encode(fragmentlink.Link{Type: fragmentlink.TypeProfile, Username: "ALICE"})
+	decoded, err := fragmentlink.Decode(code)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if upperCode != lowerCode {
-		t.Fatalf("uppercase code = %q, want folded code %q", upperCode, lowerCode)
-	}
-	decoded, err := fragmentlink.Decode(upperCode)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if decoded.Username != "alice" {
-		t.Fatalf("decoded username = %q, want alice", decoded.Username)
+	if !reflect.DeepEqual(decoded, value) {
+		t.Fatalf("round trip = %#v, want %#v", decoded, value)
 	}
 
-	lowerSetCode, err := fragmentlink.Encode(fragmentlink.Link{Type: fragmentlink.TypeStickerSet, ShortName: "funny_cats"})
-	if err != nil {
-		t.Fatal(err)
+	cases := []struct {
+		name  string
+		value fragmentlink.Link
+	}{
+		{name: "uppercase username", value: fragmentlink.Link{Type: fragmentlink.TypeProfile, Username: "ALICE"}},
+		{name: "uppercase short name", value: fragmentlink.Link{Type: fragmentlink.TypeStickerSet, ShortName: "FUNNY_CATS"}},
 	}
-	upperSetCode, err := fragmentlink.Encode(fragmentlink.Link{Type: fragmentlink.TypeStickerSet, ShortName: "FUNNY_CATS"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if upperSetCode != lowerSetCode {
-		t.Fatalf("uppercase short-name code = %q, want folded code %q", upperSetCode, lowerSetCode)
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, err := fragmentlink.Encode(testCase.value)
+			var codecErr *fragmentlink.Error
+			if !errors.As(err, &codecErr) || codecErr.Kind != fragmentlink.ErrorNonCanonical {
+				t.Fatalf("Encode() error = %v, want kind %q", err, fragmentlink.ErrorNonCanonical)
+			}
+		})
 	}
 }
 
-func TestEncodeNormalizesHost(t *testing.T) {
-	unicodeCode, err := fragmentlink.Encode(fragmentlink.Link{Type: fragmentlink.TypeProfile, Host: "BÜCHER.Example.", Username: "alice"})
+func TestEncodeRequiresCanonicalHost(t *testing.T) {
+	value := fragmentlink.Link{Type: fragmentlink.TypeProfile, Host: "xn--bcher-kva.example", Username: "alice"}
+	code, err := fragmentlink.Encode(value)
 	if err != nil {
 		t.Fatal(err)
 	}
-	asciiCode, err := fragmentlink.Encode(fragmentlink.Link{Type: fragmentlink.TypeProfile, Host: "xn--bcher-kva.example", Username: "alice"})
+	decoded, err := fragmentlink.Decode(code)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if unicodeCode != asciiCode {
-		t.Fatalf("normalized host code = %q, want %q", unicodeCode, asciiCode)
+	if !reflect.DeepEqual(decoded, value) {
+		t.Fatalf("round trip = %#v, want %#v", decoded, value)
 	}
-	decoded, err := fragmentlink.Decode(unicodeCode)
-	if err != nil {
-		t.Fatal(err)
+
+	cases := []struct {
+		name string
+		host string
+	}{
+		{name: "uppercase ASCII", host: "CHAT.example.org"},
+		{name: "Unicode and trailing dot", host: "BÜCHER.Example."},
+		{name: "trailing dot", host: "chat.example.org."},
+		{name: "leading zero port", host: "chat.example.org:08443"},
 	}
-	if decoded.Host != "xn--bcher-kva.example" {
-		t.Fatalf("decoded host = %q, want normalized ASCII host", decoded.Host)
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, err := fragmentlink.Encode(fragmentlink.Link{
+				Type: fragmentlink.TypeProfile, Host: testCase.host, Username: "alice",
+			})
+			var codecErr *fragmentlink.Error
+			if !errors.As(err, &codecErr) || codecErr.Kind != fragmentlink.ErrorNonCanonical {
+				t.Fatalf("Encode() error = %v, want kind %q", err, fragmentlink.ErrorNonCanonical)
+			}
+		})
 	}
 }
 
@@ -246,6 +260,8 @@ func TestEncodeRejectsInvalidTypedFields(t *testing.T) {
 		{name: "invalid host port", value: fragmentlink.Link{Type: fragmentlink.TypeProfile, Host: "chat.example.org:70000", Username: "alice"}, kind: fragmentlink.ErrorInvalidHost},
 		{name: "explicit default host", value: fragmentlink.Link{Type: fragmentlink.TypeProfile, Host: fragmentlink.DefaultServerHost, Username: "alice"}, kind: fragmentlink.ErrorNonCanonical},
 		{name: "unexpected id", value: fragmentlink.Link{Type: fragmentlink.TypeProfile, Username: "alice", MessageID: 1}, kind: fragmentlink.ErrorUnexpectedField},
+		{name: "unexpected empty hash", value: fragmentlink.Link{Type: fragmentlink.TypeProfile, Username: "alice", Hash: []byte{}}, kind: fragmentlink.ErrorUnexpectedField},
+		{name: "unexpected empty secret", value: fragmentlink.Link{Type: fragmentlink.TypeProfile, Username: "alice", Secret: []byte{}}, kind: fragmentlink.ErrorUnexpectedField},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
