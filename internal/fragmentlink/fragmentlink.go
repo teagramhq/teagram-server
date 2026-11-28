@@ -12,13 +12,16 @@ import (
 )
 
 const (
-	version         = 1
-	versionMask     = 0xc0
-	hostPresentMask = 0x20
-	typeMask        = 0x1f
-	maxFieldBytes   = 255
-	maxID           = uint64(1<<63 - 1)
-	textAlphabet    = "0123456789abcdefghijklmnopqrstuvwxyz-._:"
+	version                  = 1
+	versionMask              = 0xc0
+	hostPresentMask          = 0x20
+	typeMask                 = 0x1f
+	maxFieldBytes            = 255
+	maxID                    = uint64(1<<63 - 1)
+	maxUsernameEncodedBytes  = 22
+	maxShortNameLength       = 64
+	maxShortNameEncodedBytes = 43
+	textAlphabet             = "0123456789abcdefghijklmnopqrstuvwxyz-._:"
 )
 
 // hostIDNALookup matches URL host parsing; normalizeHost checks label boundaries.
@@ -185,7 +188,7 @@ func Encode(value Link) (string, error) {
 		if value.ShortName == "" {
 			return "", codecError(ErrorEmptyField, "short_name")
 		}
-		shortName, encodeErr := encodeText(value.ShortName, "short_name")
+		shortName, encodeErr := encodeShortName(value.ShortName)
 		if encodeErr != nil {
 			return "", encodeErr
 		}
@@ -295,7 +298,7 @@ func Decode(fragment string) (Link, error) {
 			value.Secret = append([]byte(nil), fields[fieldIndex]...)
 		}
 	case TypeStickerSet, TypeEmojiSet:
-		value.ShortName, err = decodeText(fields[fieldIndex], "short_name")
+		value.ShortName, err = decodeShortName(fields[fieldIndex])
 	}
 	if err != nil {
 		return Link{}, err
@@ -415,7 +418,17 @@ func encodeUsername(username string) ([]byte, error) {
 	return encodeText(username, "username")
 }
 
+func encodeShortName(shortName string) ([]byte, error) {
+	if len(shortName) > maxShortNameLength {
+		return nil, codecError(ErrorInvalidText, "short_name")
+	}
+	return encodeText(shortName, "short_name")
+}
+
 func decodeUsername(value []byte) (string, error) {
+	if len(value) > maxUsernameEncodedBytes {
+		return "", codecError(ErrorInvalidUsername, "username")
+	}
 	username, err := decodeText(value, "username")
 	if err != nil {
 		return "", err
@@ -424,6 +437,20 @@ func decodeUsername(value []byte) (string, error) {
 		return "", codecError(ErrorInvalidUsername, "username")
 	}
 	return username, nil
+}
+
+func decodeShortName(value []byte) (string, error) {
+	if len(value) > maxShortNameEncodedBytes {
+		return "", codecError(ErrorInvalidText, "short_name")
+	}
+	shortName, err := decodeText(value, "short_name")
+	if err != nil {
+		return "", err
+	}
+	if len(shortName) > maxShortNameLength {
+		return "", codecError(ErrorInvalidText, "short_name")
+	}
+	return shortName, nil
 }
 
 func validUsername(username string) bool {

@@ -339,6 +339,7 @@ func TestEncodeRejectsInvalidTypedFields(t *testing.T) {
 		{name: "zero message id", value: fragmentlink.Link{Type: fragmentlink.TypePublicMessage, Username: "alice"}, kind: fragmentlink.ErrorInvalidID},
 		{name: "missing channel id", value: fragmentlink.Link{Type: fragmentlink.TypePrivateChannelMessage, MessageID: 1}, kind: fragmentlink.ErrorInvalidID},
 		{name: "short invite secret", value: fragmentlink.Link{Type: fragmentlink.TypeSignUpInvite, Secret: make([]byte, 31)}, kind: fragmentlink.ErrorInvalidSecret},
+		{name: "short name too long", value: fragmentlink.Link{Type: fragmentlink.TypeStickerSet, ShortName: strings.Repeat("0", 65)}, kind: fragmentlink.ErrorInvalidText},
 		{name: "invalid host port", value: fragmentlink.Link{Type: fragmentlink.TypeProfile, Host: "chat.example.org:70000", Username: "alice"}, kind: fragmentlink.ErrorInvalidHost},
 		{name: "numeric final host label", value: fragmentlink.Link{Type: fragmentlink.TypeProfile, Host: "example.123", Username: "alice"}, kind: fragmentlink.ErrorInvalidHost},
 		{name: "invalid numeric IPv4 final label", value: fragmentlink.Link{Type: fragmentlink.TypeProfile, Host: "example.09", Username: "alice"}, kind: fragmentlink.ErrorInvalidHost},
@@ -360,6 +361,28 @@ func TestEncodeRejectsInvalidTypedFields(t *testing.T) {
 				t.Fatalf("Encode() error = %v, want kind %q", err, testCase.kind)
 			}
 		})
+	}
+}
+
+func TestShortNameAtLengthLimitRoundTrips(t *testing.T) {
+	input := fragmentlink.Link{Type: fragmentlink.TypeStickerSet, ShortName: strings.Repeat("0", 64)}
+	code, err := fragmentlink.Encode(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(code, "#~"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(payload)-1 > 43 {
+		t.Fatalf("encoded short name is %d bytes, want at most 43", len(payload)-1)
+	}
+	decoded, err := fragmentlink.Decode(code)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(decoded, input) {
+		t.Fatalf("decoded = %#v, want %#v", decoded, input)
 	}
 }
 

@@ -671,6 +671,8 @@ Usernames must match
 must be valid, and `telegram.org` and its subdomains are refused. Vector IDs
 are decimal strings so JSON parsers preserve their exact values; clients parse
 them as integers with exact precision (BigInt in JavaScript).
+Sticker and emoji short names are limited to 64 characters; their encoded text
+fields are limited to 43 bytes.
 Numeric ids are minimal big-endian unsigned integers from 1 through
 `2^63-1`. Join hashes preserve their raw bytes. Invite secrets are 32 bytes and
 are re-encoded as 64 lower-case hexadecimal characters for the API.

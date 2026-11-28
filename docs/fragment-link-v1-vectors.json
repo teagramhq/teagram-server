@@ -253,6 +253,33 @@
       "rule": "invalid_username"
     },
     {
+      "name": "username-field-over-22-bytes",
+      "input": {
+        "type": 1,
+        "username": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      },
+      "code": "#~QRxxywAqSxbltIXE7E7E7E7E7E7E7E7E",
+      "rule": "invalid_username"
+    },
+    {
+      "name": "short-name-over-64-characters-within-byte-limit",
+      "input": {
+        "type": 6,
+        "short_name": "00000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "code": "#~RhjulGvy2Psh5ve4cQxwMtFzaAEGkGkGkGkGkGkGkGkGkGkGkGkGkGkGkGk",
+      "rule": "invalid_text"
+    },
+    {
+      "name": "short-name-field-over-43-bytes",
+      "input": {
+        "type": 6,
+        "short_name": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      },
+      "code": "#~RgOBjN8uJoNQxHrV7-W_xyV0OqAk7E7E7E7E7E7E7E7E7E7E7E7E7E7E7E7E",
+      "rule": "invalid_text"
+    },
+    {
       "name": "invalid-host-reserved-domain",
       "input": {
         "type": 1,
