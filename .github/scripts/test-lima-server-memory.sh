@@ -40,7 +40,6 @@ if [[ ! $LIMA_MEMORY_PROBE_USERNAME_PREFIX =~ ^[A-Za-z0-9_]{1,22}$ ]]; then
     "$LIMA_MEMORY_PROBE_USERNAME_PREFIX" >&2
   exit 2
 fi
-LIMA_MEMORY_MAPPING_ENDPOINT=''
 lima_memory_configure_mapping_endpoint
 MEMORY_CGROUP_DIR=
 MEMORY_CURRENT_FILE=
@@ -559,7 +558,7 @@ fi
 if [[ ${LIMA_MEMORY_CAPTURE_MAPS:-0} == 1 ]]; then
   mapping_cgroup_peak=$(<"$MEMORY_PEAK_FILE")
   mapping_typical_bytes=${LIMA_MEMORY_MAPPING_TYPICAL_BYTES:-31457280}
-  mapping_spike_delta_bytes=${LIMA_MEMORY_MAPPING_SPIKE_DELTA_BYTES:-524288}
+  mapping_spike_delta_bytes=$(lima_memory_mapping_spike_delta_bytes) || exit 1
   mapping_anon_tolerance_bytes=${LIMA_MEMORY_MAPPING_ANON_TOLERANCE_BYTES:-1048576}
   if ! lima_memory_mapping_capture_check "$mapping_cgroup_peak" "$mapping_typical_bytes" \
     "$mapping_spike_delta_bytes" "$mapping_anon_tolerance_bytes" \

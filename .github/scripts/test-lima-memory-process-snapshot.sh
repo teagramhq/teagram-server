@@ -378,6 +378,32 @@ mapping_cgroup_alignment_delta_ns=25000000
 server_process_anon_bytes=1000000
 mapping_anon_bytes=900000
 EOF
+unset LIMA_MEMORY_MAPPING_SPIKE_DELTA_BYTES
+if ! mapping_spike_delta_bytes=$(lima_memory_mapping_spike_delta_bytes); then
+  printf 'mapping spike delta default helper is unavailable\n' >&2
+  exit 1
+fi
+if [[ $mapping_spike_delta_bytes != 262144 ]]; then
+  printf 'mapping spike delta default = %s, want 262144 bytes\n' "$mapping_spike_delta_bytes" >&2
+  exit 1
+fi
+mapping_actual_typical="$fixture/guard-actual-typical"
+mapping_actual_spike="$fixture/guard-actual-spike"
+cat >"$mapping_actual_typical" <<'EOF'
+mapping_cgroup_alignment_delta_ns=25000000
+server_process_anon_bytes=19886080
+mapping_anon_bytes=19877888
+EOF
+cat >"$mapping_actual_spike" <<'EOF'
+mapping_cgroup_alignment_delta_ns=50000000
+server_process_anon_bytes=20205568
+mapping_anon_bytes=20119552
+EOF
+if ! lima_memory_mapping_capture_check 38604800 31457280 "$mapping_spike_delta_bytes" 1048576 \
+  "$mapping_actual_typical" "$mapping_actual_spike"; then
+  printf 'mapping capture guard rejected the measured 319488-byte anon increase and matching mapping delta\n' >&2
+  exit 1
+fi
 if mapping_guard_report=$(lima_memory_mapping_capture_check 2500000 1000000 500000 100000 \
   "$mapping_guard_typical" "$mapping_guard_spike" 2>&1); then
   printf 'mapping capture guard accepted a high-water spike without spike evidence\n' >&2

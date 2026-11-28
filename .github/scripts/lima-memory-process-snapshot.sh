@@ -302,6 +302,15 @@ lima_memory_sample_mapping_loop() {
   done
 }
 
+lima_memory_mapping_spike_delta_bytes() {
+  local mapping_spike_delta_bytes=${LIMA_MEMORY_MAPPING_SPIKE_DELTA_BYTES:-262144}
+  if [[ ! $mapping_spike_delta_bytes =~ ^[0-9]+$ ]]; then
+    printf 'mapping spike delta must be a nonnegative integer\n' >&2
+    return 1
+  fi
+  printf '%s\n' "$mapping_spike_delta_bytes"
+}
+
 lima_memory_mapping_capture_check() {
   local memory_peak_bytes="$1" mapping_typical_bytes="$2" mapping_spike_delta_bytes="$3"
   local mapping_anon_tolerance_bytes="$4" typical_file="$5" spike_file="$6"
@@ -460,7 +469,7 @@ lima_memory_record_cgroup_sample() {
 
   if [[ ${LIMA_MEMORY_CAPTURE_MAPS:-0} == 1 && -e "$sample_prefix-mappings-ready" ]]; then
     mapping_typical_bytes=${LIMA_MEMORY_MAPPING_TYPICAL_BYTES:-31457280}
-    mapping_spike_delta_bytes=${LIMA_MEMORY_MAPPING_SPIKE_DELTA_BYTES:-524288}
+    mapping_spike_delta_bytes=$(lima_memory_mapping_spike_delta_bytes) || return 1
     mapping_typical_preexisting=false
     if [[ -s "$sample_prefix-mappings-typical" ]]; then
       mapping_typical_preexisting=true
