@@ -152,6 +152,22 @@ func InviteToChannelForTestWithLimits(s *store.Store, userID int64, rateLimit st
 	return h.handleInviteToChannel(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
 }
 
+// InviteToChannelForTestWithLimitsAndMetrics invokes handleInviteToChannel with
+// a custom add-user budget and denial recorder.
+func InviteToChannelForTestWithLimitsAndMetrics(
+	s *store.Store, metrics *store.NotificationMetrics, userID int64,
+	rateLimit store.RateLimitConfig, req *tg.ChannelsInviteToChannelRequest,
+) (bin.Encoder, error) {
+	var buf bin.Buffer
+	if err := req.Encode(&buf); err != nil {
+		return nil, err
+	}
+	h := testHandlers(s)
+	h.rateLimitAddChatUser = rateLimit
+	h.rateLimitMetrics = metrics
+	return h.handleInviteToChannel(&mtproto.Request{Ctx: context.Background(), UserID: userID, Buf: &buf})
+}
+
 // GetChannelDifferenceForTest encodes req and invokes handleGetChannelDifference
 // for the caller.
 func GetChannelDifferenceForTest(s *store.Store, userID int64, req *tg.UpdatesGetChannelDifferenceRequest) (bin.Encoder, error) {

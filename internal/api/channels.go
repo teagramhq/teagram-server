@@ -729,13 +729,13 @@ func (h *handlers) handleInviteToChannel(r *mtproto.Request) (bin.Encoder, error
 		}
 		targetIDs[i] = targetID
 	}
-	if len(targetIDs) > 0 {
-		if err := h.checkRateLimitCost(r, "add_chat_user", h.rateLimitAddChatUser, len(targetIDs)); err != nil {
-			return nil, err
-		}
+	added, err := h.store.AddChannelMembersWithRateLimit(
+		r.Ctx, channelID, r.UserID, targetIDs, callerRateLimitForRequest(r, h.rateLimitAddChatUser),
+	)
+	if rateLimited, ok := errors.AsType[*store.RateLimitedError](err); ok {
+		h.recordRateLimitDenial(rateLimited.Surface)
+		return nil, FloodWaitError(int(rateLimited.Wait / time.Second))
 	}
-
-	added, err := h.store.AddChannelMembers(r.Ctx, channelID, r.UserID, targetIDs)
 	if errors.Is(err, store.ErrNotMember) {
 		return nil, errPeerIDInvalid
 	}

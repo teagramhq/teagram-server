@@ -1517,6 +1517,98 @@ func TestAddChannelMembersPreservesExistingMembershipState(t *testing.T) {
 	}
 }
 
+func TestAddChannelMembersRateLimitDeniesBeforeMembershipWrites(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	creator := mustUser(t, s, "+15551299965")
+	first := mustUser(t, s, "+15551299966")
+	second := mustUser(t, s, "+15551299967")
+	ch := mustChannel(t, s, creator.ID, "Rate-limited add")
+	budget := store.RateLimitConfig{Limit: 2, Window: time.Hour}
+	if err := s.ChargeRateLimit(ctx, creator.ID, "add_chat_user", budget); err != nil {
+		t.Fatalf("seed rate-limit usage: %v", err)
+	}
+
+	if _, err := store.StorePool(s).Exec(ctx, `
+CREATE FUNCTION reject_channel_participant_insert_for_test() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+	RAISE EXCEPTION 'membership insert reached before rate-limit denial';
+END;
+$$
+`); err != nil {
+		t.Fatalf("create insert guard: %v", err)
+	}
+	if _, err := store.StorePool(s).Exec(ctx, `
+CREATE TRIGGER reject_channel_participant_insert_for_test
+BEFORE INSERT ON channel_participants
+FOR EACH ROW EXECUTE FUNCTION reject_channel_participant_insert_for_test()
+`); err != nil {
+		t.Fatalf("install insert guard: %v", err)
+	}
+
+	_, err := s.AddChannelMembersWithRateLimit(ctx, ch.ID, creator.ID, []int64{first.ID, second.ID}, budget)
+	limited, ok := errors.AsType[*store.RateLimitedError](err)
+	if !ok || limited == nil {
+		t.Fatalf("add over-budget batch error = %v, want RateLimitedError before any insert", err)
+	}
+}
+
+func TestAddChannelMembersRateLimitDeniesBeforeAdmissionLocks(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	creator := mustUser(t, s, "+15551299824")
+	target := mustUser(t, s, "+15551299825")
+	ch := mustChannel(t, s, creator.ID, "Rate-limited admission locks")
+	budget := store.RateLimitConfig{Limit: 1, Window: time.Hour}
+	if err := s.ChargeRateLimit(ctx, creator.ID, "add_chat_user", budget); err != nil {
+		t.Fatalf("seed rate-limit usage: %v", err)
+	}
+
+	releaseState, err := store.HoldChannelStateRowLock(ctx, s, ch.ID)
+	if err != nil {
+		t.Fatalf("hold channel state lock: %v", err)
+	}
+	releaseOwner, err := store.HoldOwnerLock(ctx, s, target.ID)
+	if err != nil {
+		releaseState()
+		t.Fatalf("hold target owner lock: %v", err)
+	}
+	defer func() {
+		if releaseOwner != nil {
+			releaseOwner()
+		}
+		if releaseState != nil {
+			releaseState()
+		}
+	}()
+
+	callCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.AddChannelMembersWithRateLimit(callCtx, ch.ID, creator.ID, []int64{target.ID}, budget)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		limited, ok := errors.AsType[*store.RateLimitedError](err)
+		if !ok || limited == nil {
+			t.Fatalf("denied add with held admission locks = %v, want RateLimitedError", err)
+		}
+	case <-time.After(5 * time.Second):
+		releaseOwner()
+		releaseOwner = nil
+		releaseState()
+		releaseState = nil
+		err := <-done
+		t.Fatalf("denied add waited for admission locks and then returned %v", err)
+	}
+}
+
 func TestAddChannelMembersEnforcesAccountCapAtAdmission(t *testing.T) {
 	t.Parallel()
 	s := open(t)
@@ -1541,6 +1633,47 @@ func TestAddChannelMembersEnforcesAccountCapAtAdmission(t *testing.T) {
 	}
 	if _, found, err := s.ChannelMemberOf(ctx, second.ID, target.ID); err != nil || found {
 		t.Errorf("target at account cap admitted: found=%v err=%v", found, err)
+	}
+}
+
+func TestAddChannelMembersRateLimitChargesAtCapTargets(t *testing.T) {
+	t.Parallel()
+	s := open(t)
+	ctx := context.Background()
+	creatorOne := mustUser(t, s, "+15551299821")
+	creatorTwo := mustUser(t, s, "+15551299822")
+	target := mustUser(t, s, "+15551299823")
+	first := mustChannel(t, s, creatorOne.ID, "At-cap source")
+	second := mustChannel(t, s, creatorTwo.ID, "At-cap destination")
+	store.SetChannelCaps(s, 10000, 1)
+	hash, err := s.CreateChannelInvite(ctx, first.ID, creatorOne.ID)
+	if err != nil {
+		t.Fatalf("create source invite: %v", err)
+	}
+	if _, _, err = s.JoinChannelByInvite(ctx, hash, target.ID); err != nil {
+		t.Fatalf("seed at-cap membership: %v", err)
+	}
+	budget := store.RateLimitConfig{Limit: 1, Window: time.Hour}
+	added, err := s.AddChannelMembersWithRateLimit(ctx, second.ID, creatorTwo.ID, []int64{target.ID}, budget)
+	if err != nil || len(added) != 0 {
+		t.Fatalf("add at-cap target = %v, %v; want skipped without error", added, err)
+	}
+	if _, found, err := s.ChannelMemberOf(ctx, second.ID, target.ID); err != nil || found {
+		t.Fatalf("at-cap target membership: found=%v err=%v, want skipped", found, err)
+	}
+	var charged int32
+	if err := store.StorePool(s).QueryRow(ctx,
+		`SELECT token_count FROM rate_limits WHERE subject_id = $1 AND surface = 'add_chat_user'`, creatorTwo.ID,
+	).Scan(&charged); err != nil {
+		t.Fatalf("read at-cap probe charge: %v", err)
+	}
+	if charged != 1 {
+		t.Fatalf("at-cap probe charge = %d, want 1", charged)
+	}
+	_, err = s.AddChannelMembersWithRateLimit(ctx, second.ID, creatorTwo.ID, []int64{target.ID}, budget)
+	limited, ok := errors.AsType[*store.RateLimitedError](err)
+	if !ok || limited == nil || limited.Surface != "add_chat_user" {
+		t.Fatalf("repeat at-cap add with exhausted budget = %v, want add_chat_user RateLimitedError", err)
 	}
 }
 

@@ -3,6 +3,7 @@ package api_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -229,6 +230,170 @@ func TestInviteToChannelChargesPerTargetAndCapsRequestSize(t *testing.T) {
 	}
 	if _, found, err := s.ChannelMemberOf(ctx, ch.ID, first.ID); err != nil || found {
 		t.Errorf("oversized request admitted target: found=%v err=%v", found, err)
+	}
+}
+
+func TestInviteToChannelChargesOnlyNewMembers(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, creator, ch, _ := inviteChannelFixture(t)
+	existing, err := s.CreateUser(ctx, "+15551299981")
+	if err != nil {
+		t.Fatal(err)
+	}
+	newMember, err := s.CreateUser(ctx, "+15551299982")
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked, err := s.CreateUser(ctx, "+15551299983")
+	if err != nil {
+		t.Fatal(err)
+	}
+	limit := store.RateLimitConfig{Limit: 2, Window: time.Minute}
+	metrics := store.NewNotificationMetrics()
+	invite := func(userIDs ...int64) error {
+		_, inviteErr := api.InviteToChannelForTestWithLimitsAndMetrics(s, metrics, creator.ID, limit, &tg.ChannelsInviteToChannelRequest{
+			Channel: api.InputChannel(creator.ID, ch.ID),
+			Users:   inviteUsers(creator.ID, userIDs...),
+		})
+		return inviteErr
+	}
+
+	if err := invite(existing.ID); err != nil {
+		t.Fatalf("invite first new member: %v", err)
+	}
+	if err := invite(existing.ID, newMember.ID); err != nil {
+		t.Fatalf("invite existing and new member with one token remaining: %v", err)
+	}
+	if _, found, err := s.ChannelMemberOf(ctx, ch.ID, newMember.ID); err != nil || !found {
+		t.Fatalf("mixed invite membership: found=%v err=%v, want new member added", found, err)
+	}
+	if err := invite(blocked.ID); !isFloodWait(err) {
+		t.Fatalf("invite beyond remaining budget: err=%v, want FLOOD_WAIT", err)
+	}
+	if _, found, err := s.ChannelMemberOf(ctx, ch.ID, blocked.ID); err != nil || found {
+		t.Fatalf("rate-limited invite membership: found=%v err=%v, want no row", found, err)
+	}
+
+	for i := range 10 {
+		if err := invite(existing.ID); err != nil {
+			t.Fatalf("repeat invite of existing member %d: %v", i+1, err)
+		}
+	}
+	got := metrics.Snapshot().RateLimitDenials
+	want := store.RateLimitDenialSurfaceCounts{AddChatUser: 1}
+	if got.Count != 1 || got.BySurface != want || got.Dropped != 0 {
+		t.Fatalf("rate-limit denials = %+v, want one real add_chat_user denial", got)
+	}
+}
+
+func TestInviteToChannelMetersAtCapProbe(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, dsn := openStoreDSN(t)
+	creator, err := s.CreateUser(ctx, "+15551299831")
+	if err != nil {
+		t.Fatal(err)
+	}
+	atCap, err := s.CreateUser(ctx, "+15551299832")
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination, err := s.CreateChannel(ctx, creator.ID, "At-cap probe", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	channelExec(t, ctx, dsn, `
+WITH new_channels AS (
+	INSERT INTO channels (id, title, creator_id)
+	SELECT 100000000000 + n, 'at-cap fixture', $1 FROM generate_series(1, 500) AS generated(n)
+	RETURNING id
+), states AS (
+	INSERT INTO channel_state (channel_id)
+	SELECT id FROM new_channels
+	RETURNING channel_id
+)
+INSERT INTO channel_participants (channel_id, user_id, role, join_pts)
+SELECT channel_id, $2, 0, 0 FROM states
+`, creator.ID, atCap.ID)
+
+	limit := store.RateLimitConfig{Limit: 1, Window: time.Minute}
+	invite := func() error {
+		_, inviteErr := api.InviteToChannelForTestWithLimits(s, creator.ID, limit, &tg.ChannelsInviteToChannelRequest{
+			Channel: api.InputChannel(creator.ID, destination.ID),
+			Users:   inviteUsers(creator.ID, atCap.ID),
+		})
+		return inviteErr
+	}
+	if err := invite(); err != nil {
+		t.Fatalf("first at-cap probe: %v", err)
+	}
+	if _, found, err := s.ChannelMemberOf(ctx, destination.ID, atCap.ID); err != nil || found {
+		t.Fatalf("at-cap target membership: found=%v err=%v, want skipped", found, err)
+	}
+	if err := invite(); !isFloodWait(err) {
+		t.Fatalf("second at-cap probe with exhausted budget: %v, want FLOOD_WAIT", err)
+	}
+}
+
+func TestInviteToChannelRateLimitIsAtomicWithMembershipAdds(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, creator, ch, _ := inviteChannelFixture(t)
+	secondChannel, err := s.CreateChannel(ctx, creator.ID, "Invite race", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := s.CreateUser(ctx, "+15551299984")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.CreateUser(ctx, "+15551299985")
+	if err != nil {
+		t.Fatal(err)
+	}
+	limit := store.RateLimitConfig{Limit: 1, Window: time.Minute}
+	targetIDs := []int64{first.ID, second.ID}
+	channelIDs := []int64{ch.ID, secondChannel.ID}
+	errs := make([]error, len(targetIDs))
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i, targetID := range targetIDs {
+		wg.Go(func() {
+			<-start
+			_, errs[i] = api.InviteToChannelForTestWithLimits(s, creator.ID, limit, &tg.ChannelsInviteToChannelRequest{
+				Channel: api.InputChannel(creator.ID, channelIDs[i]),
+				Users:   inviteUsers(creator.ID, targetID),
+			})
+		})
+	}
+	close(start)
+	wg.Wait()
+
+	admitted, denied := 0, 0
+	for _, err := range errs {
+		switch {
+		case err == nil:
+			admitted++
+		case isFloodWait(err):
+			denied++
+		default:
+			t.Fatalf("concurrent invite error: %v", err)
+		}
+	}
+	if admitted != 1 || denied != 1 {
+		t.Fatalf("concurrent invite outcomes: admitted=%d denied=%d, want one of each", admitted, denied)
+	}
+	added := 0
+	for i, targetID := range targetIDs {
+		if _, found, err := s.ChannelMemberOf(ctx, channelIDs[i], targetID); err != nil {
+			t.Fatalf("read concurrent invite membership: %v", err)
+		} else if found {
+			added++
+		}
+	}
+	if added != admitted {
+		t.Fatalf("concurrent members added=%d, successful charged invites=%d", added, admitted)
 	}
 }
 

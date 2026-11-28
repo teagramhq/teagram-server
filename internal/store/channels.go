@@ -838,13 +838,32 @@ func (s *Store) JoinChannelByInvite(ctx context.Context, hash string, userID int
 // that are already present or at either admission cap are silently skipped; the
 // returned ids name only rows this call inserted.
 //
-// Lock order is the existing rights-mutation channel row first, then the
-// channel_state row used by joins, then sorted account advisory locks. The role
-// is read again after LockChannel, so a demotion that commits first denies this
-// operation. channel_state serializes this channel's participant count and
-// supplies the same pts all new rows use; account locks serialize quota checks
-// across channels.
+// Lock order starts with the existing rights-mutation channel row. While holding
+// it, the caller role and distinct absent targets are read, and the add_chat_user
+// budget is checked before taking the channel_state row or sorted account
+// advisory locks. The caller role is checked while holding LockChannel, so a
+// demotion that commits first denies this operation. channel_state serializes this channel's
+// participant count and supplies the same pts all new rows use; account locks
+// serialize quota checks across channels. The final charge stays atomic with the
+// mutation and follows the writes, so no channel lock is acquired while the
+// counter is held.
 func (s *Store) AddChannelMembers(ctx context.Context, channelID, callerID int64, targetIDs []int64) ([]int64, error) {
+	return s.addChannelMembers(ctx, channelID, callerID, targetIDs, RateLimitConfig{})
+}
+
+// AddChannelMembersWithRateLimit admits targets and consumes the caller's
+// add_chat_user budget for each distinct target not already in the channel,
+// including targets skipped by an admission cap. Existing members are free.
+// The budget and membership rows commit or roll back together.
+func (s *Store) AddChannelMembersWithRateLimit(
+	ctx context.Context, channelID, callerID int64, targetIDs []int64, budget RateLimitConfig,
+) ([]int64, error) {
+	return s.addChannelMembers(ctx, channelID, callerID, targetIDs, budget)
+}
+
+func (s *Store) addChannelMembers(
+	ctx context.Context, channelID, callerID int64, targetIDs []int64, budget RateLimitConfig,
+) ([]int64, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin: %w", err)
@@ -881,27 +900,16 @@ func (s *Store) AddChannelMembers(ctx context.Context, channelID, callerID int64
 		return nil, ErrNotMember
 	}
 
-	state, err := qtx.ChannelStateForUpdate(ctx, channelID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrNotMember
-	}
-	if err != nil {
-		return nil, fmt.Errorf("lock channel state: %w", err)
-	}
 	for _, targetID := range targetIDs {
 		if targetID <= 0 {
 			return nil, ErrNotMember
 		}
 	}
-	if err = lockOwners(ctx, tx, targetIDs...); err != nil {
-		return nil, fmt.Errorf("lock channel cap owners: %w", err)
-	}
-	seats, err := qtx.CountChannelParticipants(ctx, channelID)
-	if err != nil {
-		return nil, fmt.Errorf("count participants: %w", err)
-	}
 
-	added := make([]int64, 0, len(targetIDs))
+	// Discover distinct absent targets and preflight before taking channel-state
+	// or account-cap locks. LockChannel serializes membership changes in this
+	// channel while these reads run.
+	absentTargets := make([]int64, 0, len(targetIDs))
 	seen := make(map[int64]bool, len(targetIDs))
 	for _, targetID := range targetIDs {
 		if seen[targetID] {
@@ -918,6 +926,43 @@ func (s *Store) AddChannelMembers(ctx context.Context, channelID, callerID int64
 		case !errors.Is(err, pgx.ErrNoRows):
 			return nil, fmt.Errorf("target participant: %w", err)
 		}
+		absentTargets = append(absentTargets, targetID)
+	}
+
+	if len(absentTargets) > 0 {
+		budgetResult, err := s.checkRateLimitBudgetCost(ctx, qtx, callerID, "add_chat_user", budget, len(absentTargets))
+		if err != nil {
+			return nil, fmt.Errorf("check add_chat_user budget: %w", err)
+		}
+		if budgetResult != nil {
+			return nil, &RateLimitedError{Surface: "add_chat_user", Wait: budgetResult.Wait}
+		}
+	}
+
+	if len(absentTargets) == 0 {
+		if err = tx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("commit: %w", err)
+		}
+		return []int64{}, nil
+	}
+
+	state, err := qtx.ChannelStateForUpdate(ctx, channelID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotMember
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lock channel state: %w", err)
+	}
+	if err = lockOwners(ctx, tx, absentTargets...); err != nil {
+		return nil, fmt.Errorf("lock channel cap owners: %w", err)
+	}
+	seats, err := qtx.CountChannelParticipants(ctx, channelID)
+	if err != nil {
+		return nil, fmt.Errorf("count participants: %w", err)
+	}
+
+	eligible := make([]int64, 0, len(absentTargets))
+	for _, targetID := range absentTargets {
 		if seats >= int64(s.maxChannelParticipants) {
 			continue
 		}
@@ -929,7 +974,12 @@ func (s *Store) AddChannelMembers(ctx context.Context, channelID, callerID int64
 		if joined >= int64(s.maxChannelsPerUser) {
 			continue
 		}
+		eligible = append(eligible, targetID)
+		seats++
+	}
 
+	added := make([]int64, 0, len(eligible))
+	for _, targetID := range eligible {
 		n, err := qtx.InsertChannelParticipantIfAbsent(ctx, db.InsertChannelParticipantIfAbsentParams{
 			ChannelID: channelID, UserID: targetID, Role: channelRoleMember, JoinPts: state.Pts,
 			AvailableMinID: channelParticipantHistoryFloor(channel.PreHistoryHidden, state.NextLocalID),
@@ -944,7 +994,9 @@ func (s *Store) AddChannelMembers(ctx context.Context, channelID, callerID int64
 			return nil, fmt.Errorf("insert initial channel read state for target %d: %w", targetID, err)
 		}
 		added = append(added, targetID)
-		seats++
+	}
+	if err := s.consumeRateLimitTx(ctx, qtx, callerID, "add_chat_user", budget, len(absentTargets)); err != nil {
+		return nil, err
 	}
 
 	if err = tx.Commit(ctx); err != nil {

@@ -271,6 +271,12 @@ func (s *Store) CheckRateLimitBudget(ctx context.Context, subjectID int64, surfa
 func (s *Store) CheckRateLimitBudgetCost(
 	ctx context.Context, subjectID int64, surface string, cfg RateLimitConfig, cost int,
 ) (*RateLimitResult, error) {
+	return s.checkRateLimitBudgetCost(ctx, s.q, subjectID, surface, cfg, cost)
+}
+
+func (s *Store) checkRateLimitBudgetCost(
+	ctx context.Context, q *db.Queries, subjectID int64, surface string, cfg RateLimitConfig, cost int,
+) (*RateLimitResult, error) {
 	if !cfg.enabled() {
 		return nil, nil //nolint:nilnil // disabled config is not an error
 	}
@@ -278,7 +284,7 @@ func (s *Store) CheckRateLimitBudgetCost(
 		return nil, fmt.Errorf("check rate limit budget: invalid cost %d", cost)
 	}
 
-	row, err := s.q.CheckRateLimitBudget(ctx, db.CheckRateLimitBudgetParams{
+	row, err := q.CheckRateLimitBudget(ctx, db.CheckRateLimitBudgetParams{
 		SubjectID: subjectID,
 		Surface:   surface,
 	})
