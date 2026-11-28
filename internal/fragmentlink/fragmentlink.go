@@ -59,8 +59,9 @@ func (linkType Type) String() string {
 	}
 }
 
-// Link is the canonical target value encoded by a v1 fragment link.
-// Text fields are returned in lower case. Host is empty for the default server.
+// Link is the semantic target value encoded by a v1 fragment link.
+// Encode normalizes text and hosts; Decode returns the normalized value.
+// Host is empty for the default server.
 type Link struct {
 	Type      Type
 	Host      string
@@ -122,9 +123,6 @@ func Encode(value Link) (string, error) {
 		host, err := normalizeHost(value.Host)
 		if err != nil {
 			return "", err
-		}
-		if host != value.Host {
-			return "", codecError(ErrorNonCanonical, "host")
 		}
 		if host == DefaultServerHost {
 			return "", codecError(ErrorNonCanonical, "host")
@@ -346,13 +344,11 @@ func encodeText(value, field string) ([]byte, error) {
 	if value == "" {
 		return nil, codecError(ErrorEmptyField, field)
 	}
+	value = foldASCIICase(value)
 	for _, char := range value {
 		if char > 0x7f {
 			return nil, codecError(ErrorInvalidText, field)
 		}
-	}
-	if value != strings.ToLower(value) {
-		return nil, codecError(ErrorNonCanonical, field)
 	}
 	number := new(big.Int)
 	base := big.NewInt(int64(len(textAlphabet)))
@@ -365,6 +361,15 @@ func encodeText(value, field string) ([]byte, error) {
 		number.Add(number, big.NewInt(int64(index+1)))
 	}
 	return number.Bytes(), nil
+}
+
+func foldASCIICase(value string) string {
+	return strings.Map(func(char rune) rune {
+		if char >= 'A' && char <= 'Z' {
+			return char + ('a' - 'A')
+		}
+		return char
+	}, value)
 }
 
 func decodeText(value []byte, field string) (string, error) {
@@ -396,6 +401,7 @@ func encodeUsername(username string) ([]byte, error) {
 	if username == "" {
 		return nil, codecError(ErrorEmptyField, "username")
 	}
+	username = foldASCIICase(username)
 	if !validUsername(username) {
 		return nil, codecError(ErrorInvalidUsername, "username")
 	}

@@ -155,7 +155,7 @@ func TestRandomValidLinksRoundTrip(t *testing.T) {
 }
 
 func TestEncodeRejectsTextOutsideAlphabet(t *testing.T) {
-	for _, shortName := range []string{"bad name", "Kitty"} {
+	for _, shortName := range []string{"bad name", "kitty!", "\u212AKitty"} {
 		_, err := fragmentlink.Encode(fragmentlink.Link{Type: fragmentlink.TypeStickerSet, ShortName: shortName})
 		if err == nil {
 			t.Fatalf("Encode() accepted short name %q outside the v1 alphabet", shortName)
@@ -178,69 +178,74 @@ func TestDecodeRequiresFragmentMarker(t *testing.T) {
 	}
 }
 
-func TestEncodeRequiresCanonicalTextFields(t *testing.T) {
-	value := fragmentlink.Link{Type: fragmentlink.TypeProfile, Username: "alice"}
-	code, err := fragmentlink.Encode(value)
+func TestEncodeCaseFoldsTextFields(t *testing.T) {
+	lowerUsername := fragmentlink.Link{Type: fragmentlink.TypeProfile, Username: "alice"}
+	lowerCode, err := fragmentlink.Encode(lowerUsername)
 	if err != nil {
 		t.Fatal(err)
 	}
-	decoded, err := fragmentlink.Decode(code)
+	upperCode, err := fragmentlink.Encode(fragmentlink.Link{Type: fragmentlink.TypeProfile, Username: "ALICE"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(decoded, value) {
-		t.Fatalf("round trip = %#v, want %#v", decoded, value)
+	if upperCode != lowerCode {
+		t.Fatalf("uppercase username code = %q, want folded code %q", upperCode, lowerCode)
+	}
+	decoded, err := fragmentlink.Decode(upperCode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(decoded, lowerUsername) {
+		t.Fatalf("decoded uppercase username = %#v, want %#v", decoded, lowerUsername)
 	}
 
-	cases := []struct {
-		name  string
-		value fragmentlink.Link
-	}{
-		{name: "uppercase username", value: fragmentlink.Link{Type: fragmentlink.TypeProfile, Username: "ALICE"}},
-		{name: "uppercase short name", value: fragmentlink.Link{Type: fragmentlink.TypeStickerSet, ShortName: "FUNNY_CATS"}},
+	lowerSet := fragmentlink.Link{Type: fragmentlink.TypeStickerSet, ShortName: "funny_cats"}
+	lowerSetCode, err := fragmentlink.Encode(lowerSet)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, testCase := range cases {
-		t.Run(testCase.name, func(t *testing.T) {
-			_, err := fragmentlink.Encode(testCase.value)
-			var codecErr *fragmentlink.Error
-			if !errors.As(err, &codecErr) || codecErr.Kind != fragmentlink.ErrorNonCanonical {
-				t.Fatalf("Encode() error = %v, want kind %q", err, fragmentlink.ErrorNonCanonical)
-			}
-		})
+	upperSetCode, err := fragmentlink.Encode(fragmentlink.Link{Type: fragmentlink.TypeStickerSet, ShortName: "FUNNY_CATS"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if upperSetCode != lowerSetCode {
+		t.Fatalf("uppercase short-name code = %q, want folded code %q", upperSetCode, lowerSetCode)
 	}
 }
 
-func TestEncodeRequiresCanonicalHost(t *testing.T) {
-	value := fragmentlink.Link{Type: fragmentlink.TypeProfile, Host: "xn--bcher-kva.example", Username: "alice"}
-	code, err := fragmentlink.Encode(value)
-	if err != nil {
-		t.Fatal(err)
-	}
-	decoded, err := fragmentlink.Decode(code)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(decoded, value) {
-		t.Fatalf("round trip = %#v, want %#v", decoded, value)
-	}
-
+func TestEncodeNormalizesHost(t *testing.T) {
 	cases := []struct {
-		name string
-		host string
+		name          string
+		host          string
+		canonicalHost string
 	}{
-		{name: "uppercase ASCII", host: "CHAT.example.org"},
-		{name: "Unicode and trailing dot", host: "BÜCHER.Example."},
-		{name: "trailing dot", host: "chat.example.org."},
-		{name: "leading zero port", host: "chat.example.org:08443"},
+		{name: "uppercase ASCII", host: "CHAT.example.org", canonicalHost: "chat.example.org"},
+		{name: "Unicode and trailing dot", host: "BÜCHER.Example.", canonicalHost: "xn--bcher-kva.example"},
+		{name: "trailing dot", host: "chat.example.org.", canonicalHost: "chat.example.org"},
+		{name: "leading zero port", host: "chat.example.org:08443", canonicalHost: "chat.example.org:8443"},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
-			_, err := fragmentlink.Encode(fragmentlink.Link{
+			gotCode, err := fragmentlink.Encode(fragmentlink.Link{
 				Type: fragmentlink.TypeProfile, Host: testCase.host, Username: "alice",
 			})
-			var codecErr *fragmentlink.Error
-			if !errors.As(err, &codecErr) || codecErr.Kind != fragmentlink.ErrorNonCanonical {
-				t.Fatalf("Encode() error = %v, want kind %q", err, fragmentlink.ErrorNonCanonical)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := fragmentlink.Link{Type: fragmentlink.TypeProfile, Host: testCase.canonicalHost, Username: "alice"}
+			wantCode, err := fragmentlink.Encode(want)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gotCode != wantCode {
+				t.Fatalf("Encode() = %q, want normalized code %q", gotCode, wantCode)
+			}
+			decoded, err := fragmentlink.Decode(gotCode)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(decoded, want) {
+				t.Fatalf("decoded = %#v, want normalized value %#v", decoded, want)
 			}
 		})
 	}
@@ -253,7 +258,7 @@ func TestEncodeRejectsInvalidTypedFields(t *testing.T) {
 		kind  fragmentlink.ErrorKind
 	}{
 		{name: "invalid username", value: fragmentlink.Link{Type: fragmentlink.TypeProfile, Username: "a"}, kind: fragmentlink.ErrorInvalidUsername},
-		{name: "non-ascii username", value: fragmentlink.Link{Type: fragmentlink.TypeProfile, Username: "Klice"}, kind: fragmentlink.ErrorInvalidUsername},
+		{name: "non-ascii username", value: fragmentlink.Link{Type: fragmentlink.TypeProfile, Username: "\u212A" + "lice"}, kind: fragmentlink.ErrorInvalidUsername},
 		{name: "zero message id", value: fragmentlink.Link{Type: fragmentlink.TypePublicMessage, Username: "alice"}, kind: fragmentlink.ErrorInvalidID},
 		{name: "missing channel id", value: fragmentlink.Link{Type: fragmentlink.TypePrivateChannelMessage, MessageID: 1}, kind: fragmentlink.ErrorInvalidID},
 		{name: "short invite secret", value: fragmentlink.Link{Type: fragmentlink.TypeSignUpInvite, Secret: make([]byte, 31)}, kind: fragmentlink.ErrorInvalidSecret},
