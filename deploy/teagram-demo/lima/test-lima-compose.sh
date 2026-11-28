@@ -244,8 +244,11 @@ jq '.services["qa-invite"] = (.services.migrate | .mem_limit = "1")' \
   "$LIMA_JSON" > "$TAMPERED_CONFIG_DIR/qa-invite.json"
 jq '.services.teagramd.environment.TG_PG_MAX_CONNS = "8"' \
   "$LIMA_JSON" > "$TAMPERED_CONFIG_DIR/postgres-pool.json"
-jq '.services["budget-probe"] = {image: ("fixture@sha256:" + ("a" * 64)), mem_limit: "52428800"}' \
-  "$LIMA_JSON" > "$TAMPERED_CONFIG_DIR/memory.json"
+jq '.services["budget-probe"] = {
+  image: ("fixture@sha256:" + ("a" * 64)),
+  mem_limit: "52428800",
+  memswap_limit: "52428800"
+}' "$LIMA_JSON" > "$TAMPERED_CONFIG_DIR/memory.json"
 jq '.services.edge.mem_limit = "3145728"' \
   "$LIMA_JSON" > "$TAMPERED_CONFIG_DIR/min-mem-limit.json"
 jq '.services.edge.memswap_limit = "3145728"' \
@@ -422,7 +425,9 @@ assert_config_failure 'check.sh rejects a tag-only image' 'FAIL image-digests:' 
 assert_config_failure 'check.sh rejects a build key' 'FAIL config-build:' "$TAMPERED_CONFIG_DIR/build.json"
 assert_config_failure 'check.sh rejects qa-invite' 'FAIL config-qa-invite:' "$TAMPERED_CONFIG_DIR/qa-invite.json"
 assert_config_failure 'check.sh rejects an uncapped Postgres pool' 'FAIL postgres-pool:' "$TAMPERED_CONFIG_DIR/postgres-pool.json"
-assert_config_failure 'check.sh rejects a memory sum over 200 MiB' 'FAIL mem-limits:' "$TAMPERED_CONFIG_DIR/memory.json"
+assert_config_failure 'check.sh rejects a memory sum over 200 MiB' \
+  'FAIL mem-limits: all services except one-shot migrate total 210 MiB, budget is 200 MiB' \
+  "$TAMPERED_CONFIG_DIR/memory.json"
 assert_config_failure 'check.sh rejects a mem_limit below 6 MiB' 'FAIL mem-limits:' "$TAMPERED_CONFIG_DIR/min-mem-limit.json"
 assert_config_failure 'check.sh rejects a memswap_limit below 6 MiB' 'FAIL mem-limits:' "$TAMPERED_CONFIG_DIR/min-memswap-limit.json"
 assert_config_failure 'check.sh rejects an unexpected subnet' 'FAIL subnets:' "$TAMPERED_CONFIG_DIR/subnet.json"
