@@ -12,7 +12,7 @@
 # password and the tunnel token. Never print it into a log or a comment.
 #
 # Images are pinned by digest and never built here. Memory limits (mem_limit,
-# MiB) of all long-running services add up to 157 MiB; migrate is one-shot.
+# MiB) of all long-running services add up to 160 MiB; migrate is one-shot.
 # Fixed subnets: backend 198.18.130.0/24, egress 198.18.132.0/24, edge
 # 198.18.133.0/24. The source-scoped FORWARD and DOCKER-USER isolation hooks
 # name these.
@@ -266,8 +266,8 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
-    mem_limit: 3m
-    memswap_limit: 3m
+    mem_limit: 6m
+    memswap_limit: 6m
     cpus: "0.25"
     pids_limit: 64
     volumes:

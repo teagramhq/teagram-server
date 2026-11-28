@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Resolves the lima Compose stack against fixture values and asserts the lima
 # acceptance criteria: no qa-invite and no build keys, digest-pinned images,
-# memory limits within the 200 MiB budget, the blob bind, fixed subnets, and
-# secrets named by check.sh. It also checks that lima's teagramd environment
-# matches the charlie file except for the lima-specific memory and pool caps,
-# and that check.sh never prints a secret.
+# memory limits of at least 6 MiB within the 200 MiB budget, a compatible
+# flock, the blob bind, fixed subnets, and secrets named by check.sh. It also
+# checks that lima's teagramd environment matches the charlie file except for
+# the lima-specific memory and pool caps, and that check.sh never prints a
+# secret.
 set -Eeuo pipefail
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -245,6 +246,10 @@ jq '.services.teagramd.environment.TG_PG_MAX_CONNS = "8"' \
   "$LIMA_JSON" > "$TAMPERED_CONFIG_DIR/postgres-pool.json"
 jq '.services["budget-probe"] = {image: ("fixture@sha256:" + ("a" * 64)), mem_limit: "52428800"}' \
   "$LIMA_JSON" > "$TAMPERED_CONFIG_DIR/memory.json"
+jq '.services.edge.mem_limit = "3145728"' \
+  "$LIMA_JSON" > "$TAMPERED_CONFIG_DIR/min-mem-limit.json"
+jq '.services.edge.memswap_limit = "3145728"' \
+  "$LIMA_JSON" > "$TAMPERED_CONFIG_DIR/min-memswap-limit.json"
 jq '.networks.egress.ipam.config[0].subnet = "198.18.134.0/24"' \
   "$LIMA_JSON" > "$TAMPERED_CONFIG_DIR/subnet.json"
 
@@ -303,10 +308,12 @@ fi
 # shellcheck disable=SC2016 # $n is a jq variable, not a shell expansion.
 expect 'criterion 2: every service has a memory limit' \
   '(.services | length) as $n | [.services[] | select((.mem_limit // "0" | tonumber) > 0)] | length == $n'
+expect 'criterion 2: every service has at least 6 MiB memory and swap limits' \
+  '[.services[] | select((.mem_limit | tonumber) < 6291456 or (.memswap_limit | tonumber) < 6291456)] | length == 0'
 expect 'criterion 2: long-running limits total at most 200 MiB' \
   '[.services | to_entries[] | select(.key != "migrate") | .value.mem_limit | tonumber] | add <= 209715200'
-expect 'criterion 2: long-running limits total exactly 157 MiB' \
-  '[.services | to_entries[] | select(.key != "migrate") | .value.mem_limit | tonumber] | add == 157 * 1048576'
+expect 'criterion 2: long-running limits total exactly 160 MiB' \
+  '[.services | to_entries[] | select(.key != "migrate") | .value.mem_limit | tonumber] | add == 160 * 1048576'
 expect 'criterion 2: only the single server pool is capped at three' \
   '.services.teagramd.environment.TG_PG_MAX_CONNS == "3" and (.services | has("teagramd-next") | not)'
 expect 'criterion 2: server has a 46 MiB limit and 18 MiB Go memory limit' \
@@ -416,7 +423,30 @@ assert_config_failure 'check.sh rejects a build key' 'FAIL config-build:' "$TAMP
 assert_config_failure 'check.sh rejects qa-invite' 'FAIL config-qa-invite:' "$TAMPERED_CONFIG_DIR/qa-invite.json"
 assert_config_failure 'check.sh rejects an uncapped Postgres pool' 'FAIL postgres-pool:' "$TAMPERED_CONFIG_DIR/postgres-pool.json"
 assert_config_failure 'check.sh rejects a memory sum over 200 MiB' 'FAIL mem-limits:' "$TAMPERED_CONFIG_DIR/memory.json"
+assert_config_failure 'check.sh rejects a mem_limit below 6 MiB' 'FAIL mem-limits:' "$TAMPERED_CONFIG_DIR/min-mem-limit.json"
+assert_config_failure 'check.sh rejects a memswap_limit below 6 MiB' 'FAIL mem-limits:' "$TAMPERED_CONFIG_DIR/min-memswap-limit.json"
 assert_config_failure 'check.sh rejects an unexpected subnet' 'FAIL subnets:' "$TAMPERED_CONFIG_DIR/subnet.json"
+
+INCOMPATIBLE_FLOCK_BIN=$TMP_DIR/incompatible-flock-bin
+mkdir -p "$INCOMPATIBLE_FLOCK_BIN"
+cat > "$INCOMPATIBLE_FLOCK_BIN/flock" <<'EOF'
+#!/usr/bin/env bash
+printf 'flock: applet does not support -w\n' >&2
+exit 2
+EOF
+chmod 755 "$INCOMPATIBLE_FLOCK_BIN/flock"
+set +e
+PATH="$INCOMPATIBLE_FLOCK_BIN:$PATH" run_check > "$CHECK_OUT" 2>&1
+tools_status=$?
+set -e
+if ((tools_status == 1)) \
+  && grep -q '^FAIL tools:.*flock' "$CHECK_OUT" \
+  && grep -q '^would_reject' "$CHECK_OUT"; then
+  ok 'check.sh rejects flock without -w and -E support'
+else
+  not_ok 'check.sh rejects flock without -w and -E support'
+  cat "$CHECK_OUT" >&2
+fi
 
 # Drift guard: images shared with the charlie file are the same digests, and
 # teagramd's environment matches apart from lima's caps and single-server
@@ -679,7 +709,7 @@ for name in env-file secret-files tunnel-token compose-config config-build confi
     not_ok "check.sh passes $name on the fixture"
   fi
 done
-if grep -q '^PASS mem-limits (157 MiB of 200 MiB)$' "$CHECK_OUT"; then
+if grep -q '^PASS mem-limits (160 MiB of 200 MiB)$' "$CHECK_OUT"; then
   ok 'check.sh validates the single-server memory ceiling'
 else
   not_ok 'check.sh validates the single-server memory ceiling'

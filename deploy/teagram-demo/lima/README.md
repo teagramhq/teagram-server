@@ -64,8 +64,8 @@ Limits of the long-running services, in MiB. The sum stays at or below 200.
 | cloudflared | 25 | 25 |
 | turnstile-egress (squid) | 24 | 23 |
 | haproxy | 10 | 10 |
-| edge (nginx) | 3 | 2 |
-| **Total** | **157** | |
+| edge (nginx) | 6 | 2 |
+| **Total** | **160** | |
 
 The Lima Compose environment caps the server pool at `TG_PG_MAX_CONNS=3`.
 The rollout uses a short maintenance window: it stops the old teagramd before
@@ -109,7 +109,7 @@ all uploads passed and `max`, `oom`, and `oom_kill` stayed at zero. On PR head
 44 MiB gate had peaks of 35.87, 36.16, and 40.22 MiB; each run reported
 `max=0`, `oom=0`, and `oom_kill=0` ([CI job 139612009143](https://github.com/teagramhq/teagram-server/actions/runs/45730687633/job/139612009143)).
 
-The long-running Lima stack uses 157 MiB of limits. `migrate` (64 MiB) is
+The long-running Lima stack uses 160 MiB of limits. `migrate` (64 MiB) is
 one-shot and outside the sum.
 
 ## Blobs
@@ -134,11 +134,11 @@ TEAGRAM_DEMO_LIMA_ENV_FILE=/var/lib/teagram-demo/lima.env \
   deploy/teagram-demo/lima/check.sh
 ```
 
-The check needs `docker`, `jq`, `python3`, GNU `stat`, and `mountpoint` and
-`findmnt` from util-linux. It fails if the blob cap is not mounted read-write,
-so it is expected to reject until `prepare-blobs.sh` has run. Compose parser
-diagnostics are withheld because malformed dotenv values can appear in its
-error text.
+The check needs `docker`, `jq`, `python3`, GNU `stat`, `mountpoint` and
+`findmnt` from util-linux, and `flock` from Alpine's `flock` package with `-w`
+and `-E` support. It fails if the blob cap is not mounted read-write, so it is
+expected to reject until `prepare-blobs.sh` has run. Compose parser diagnostics
+are withheld because malformed dotenv values can appear in its error text.
 
 ## Deploy entry and rollout
 
