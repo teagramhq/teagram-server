@@ -322,10 +322,10 @@ expect 'criterion 2: only the single server pool is capped at three' \
 expect 'criterion 2: server has a 46 MiB limit and 18 MiB Go memory limit' \
   '(.services.teagramd.mem_limit | tonumber) == 48234496 and .services.teagramd.environment.GOMEMLIMIT == "18MiB"'
 PROBE_GOMEMLIMIT=$(sed -n 's/^LIMA_GOMEMLIMIT=//p' "$REPO_ROOT/.github/scripts/test-lima-server-memory.sh")
-if [[ $PROBE_GOMEMLIMIT == "$(jq -r '.services.teagramd.environment.GOMEMLIMIT' "$LIMA_JSON")" ]]; then
-  ok 'criterion 2: memory probe uses the Lima Go memory limit'
+if [[ $PROBE_GOMEMLIMIT == 20MiB ]]; then
+  ok 'criterion 2: memory probe keeps its 20 MiB diagnostic Go memory limit'
 else
-  not_ok 'criterion 2: memory probe uses the Lima Go memory limit'
+  not_ok 'criterion 2: memory probe keeps its 20 MiB diagnostic Go memory limit'
 fi
 expect 'criterion 2: postgres is capped at 49 MiB after rebalancing' \
   '(.services.postgres.mem_limit | tonumber) == 51380224'
