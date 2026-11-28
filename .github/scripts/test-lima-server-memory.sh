@@ -505,16 +505,12 @@ if [[ -r $MEMORY_SAMPLE_ERROR_FILE ]]; then
   exit 1
 fi
 if [[ ${LIMA_MEMORY_CAPTURE_MAPS:-0} == 1 ]]; then
-  mapping_sample_peak_current=$(<"$MEMORY_SAMPLE_STAT_PEAK_FILE")
+  mapping_cgroup_peak=$(<"$MEMORY_PEAK_FILE")
   mapping_typical_bytes=${LIMA_MEMORY_MAPPING_TYPICAL_BYTES:-31457280}
-  mapping_spike_delta_bytes=${LIMA_MEMORY_MAPPING_SPIKE_DELTA_BYTES:-4194304}
-  if [[ ! -s "$RUNNER_TEMP/lima-memory-sampled-mappings-typical" ]]; then
-    echo 'mapping diagnostics did not capture a typical server mapping sample' >&2
-    exit 1
-  fi
-  if (( mapping_sample_peak_current >= mapping_typical_bytes + mapping_spike_delta_bytes )) &&
-    [[ ! -s "$RUNNER_TEMP/lima-memory-sampled-mappings-spike" ]]; then
-    echo 'mapping diagnostics missed the sampled cgroup-current spike' >&2
+  mapping_spike_delta_bytes=${LIMA_MEMORY_MAPPING_SPIKE_DELTA_BYTES:-524288}
+  if ! lima_memory_mapping_capture_check "$mapping_cgroup_peak" "$mapping_typical_bytes" \
+    "$mapping_spike_delta_bytes" "$RUNNER_TEMP/lima-memory-sampled-mappings-typical" \
+    "$RUNNER_TEMP/lima-memory-sampled-mappings-spike"; then
     exit 1
   fi
 fi

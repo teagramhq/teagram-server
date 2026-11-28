@@ -192,6 +192,27 @@ lima_memory_write_mapping_sample() {
   mv -- "$mapping_tmp" "$sample_prefix-mappings-$label"
 }
 
+lima_memory_mapping_capture_check() {
+  local memory_peak_bytes="$1" mapping_typical_bytes="$2" mapping_spike_delta_bytes="$3"
+  local typical_file="$4" spike_file="$5"
+  if [[ ! $memory_peak_bytes =~ ^[0-9]+$ || ! $mapping_typical_bytes =~ ^[0-9]+$ ||
+    ! $mapping_spike_delta_bytes =~ ^[0-9]+$ ]]; then
+    printf 'mapping capture thresholds must be nonnegative integers\n' >&2
+    return 1
+  fi
+  if (( memory_peak_bytes >= mapping_typical_bytes )) && [[ ! -s $typical_file ]]; then
+    printf 'memory.peak reached %s bytes but no typical mapping sample was captured\n' \
+      "$memory_peak_bytes" >&2
+    return 1
+  fi
+  if (( memory_peak_bytes >= mapping_typical_bytes + mapping_spike_delta_bytes )) &&
+    [[ ! -s $spike_file ]]; then
+    printf 'memory.peak reached %s bytes but no spike mapping sample was captured\n' \
+      "$memory_peak_bytes" >&2
+    return 1
+  fi
+}
+
 lima_memory_record_cgroup_sample() {
   local cgroup_dir="$1" proc_root="$2" server_pid="$3" sample_prefix="$4"
   local process_snapshot peak_bytes events current_bytes stat_snapshot stat_name stat_value sampled_at_unix_nano
@@ -288,8 +309,12 @@ lima_memory_record_cgroup_sample() {
 
   if [[ ${LIMA_MEMORY_CAPTURE_MAPS:-0} == 1 ]]; then
     local mapping_typical_bytes=${LIMA_MEMORY_MAPPING_TYPICAL_BYTES:-31457280}
-    local mapping_spike_delta_bytes=${LIMA_MEMORY_MAPPING_SPIKE_DELTA_BYTES:-4194304}
+    local mapping_spike_delta_bytes=${LIMA_MEMORY_MAPPING_SPIKE_DELTA_BYTES:-524288}
     local mapping_spike_current=0
+    local mapping_typical_preexisting=false
+    if [[ -s "$sample_prefix-mappings-typical" ]]; then
+      mapping_typical_preexisting=true
+    fi
     if [[ -r "$sample_prefix-mappings-spike-current" ]]; then
       mapping_spike_current=$(<"$sample_prefix-mappings-spike-current") || return 1
       [[ $mapping_spike_current =~ ^[0-9]+$ ]] || return 1
@@ -302,7 +327,7 @@ lima_memory_record_cgroup_sample() {
         rm -f -- "$sample_prefix-mappings-typical.tmp"
       fi
     fi
-    if (( current_bytes >= mapping_typical_bytes + mapping_spike_delta_bytes &&
+    if [[ $mapping_typical_preexisting == true ]] && (( current_bytes >= mapping_typical_bytes + mapping_spike_delta_bytes &&
       ( mapping_spike_current == 0 || current_bytes >= mapping_spike_current + 1048576 ) )); then
       if lima_memory_write_mapping_sample "$proc_root" "$server_pid" "$sample_prefix" spike \
         "$sampled_at_unix_nano" "$current_bytes"; then

@@ -198,6 +198,18 @@ if [[ -e "$mapping_prefix-mappings-typical" ]]; then
   printf 'typical mapping sample was persisted after a transient endpoint failure\n' >&2
   exit 1
 fi
+if [[ -e "$mapping_prefix-mappings-spike" ]]; then
+  printf 'spike mapping sample was captured without a successful typical baseline\n' >&2
+  exit 1
+fi
+LIMA_MEMORY_CAPTURE_MAPS=1 LIMA_MEMORY_MAPPING_TYPICAL_BYTES=1000000 \
+  LIMA_MEMORY_MAPPING_SPIKE_DELTA_BYTES=500000 \
+  LIMA_MEMORY_MAPPING_ENDPOINT=http://127.0.0.1:2447/debug/runtime-memory-mappings \
+  lima_memory_record_cgroup_sample "$mapping_cgroup" "$proc_root" 101 "$mapping_prefix"
+if [[ ! -r "$mapping_prefix-mappings-typical" || -e "$mapping_prefix-mappings-spike" ]]; then
+  printf 'mapping spike sample was not deferred until after the typical baseline\n' >&2
+  exit 1
+fi
 LIMA_MEMORY_CAPTURE_MAPS=1 LIMA_MEMORY_MAPPING_TYPICAL_BYTES=1000000 \
   LIMA_MEMORY_MAPPING_SPIKE_DELTA_BYTES=500000 \
   LIMA_MEMORY_MAPPING_ENDPOINT=http://127.0.0.1:2447/debug/runtime-memory-mappings \
@@ -215,6 +227,31 @@ for label in typical spike; do
     exit 1
   fi
 done
+
+mapping_guard_typical="$fixture/guard-typical"
+mapping_guard_spike="$fixture/guard-spike"
+printf 'typical sample\n' >"$mapping_guard_typical"
+if mapping_guard_report=$(lima_memory_mapping_capture_check 2500000 1000000 500000 \
+  "$mapping_guard_typical" "$mapping_guard_spike" 2>&1); then
+  printf 'mapping capture guard accepted a high-water spike without spike evidence\n' >&2
+  exit 1
+fi
+expected='memory.peak reached 2500000 bytes but no spike mapping sample was captured'
+if [[ "$mapping_guard_report" != "$expected" ]]; then
+  printf 'mapping capture guard report = %s, want %s\n' "$mapping_guard_report" "$expected" >&2
+  exit 1
+fi
+if ! lima_memory_mapping_capture_check 1400000 1000000 500000 \
+  "$mapping_guard_typical" "$mapping_guard_spike"; then
+  printf 'mapping capture guard rejected a high-water value below the spike threshold\n' >&2
+  exit 1
+fi
+printf 'spike mapping sample\n' >"$mapping_guard_spike"
+if ! lima_memory_mapping_capture_check 2500000 1000000 500000 \
+  "$mapping_guard_typical" "$mapping_guard_spike"; then
+  printf 'mapping capture guard rejected complete high-water mapping evidence\n' >&2
+  exit 1
+fi
 
 peak_unattributed_bytes=$(lima_memory_peak_unattributed_bytes 44675072 39170048)
 if [[ "$peak_unattributed_bytes" != 5505024 ]]; then
