@@ -3706,6 +3706,9 @@ jobs:
           LIMA_SERVICE_IMAGE: teagramd:ci
           # Set the repository Actions variable to 10 only for opt-in diagnostics.
           LIMA_MEMORY_PROBE_ATTEMPTS: ${{ vars.LIMA_MEMORY_PROBE_ATTEMPTS }}
+          # Opt-in uncapped mapping diagnostics use a 96 MiB cgroup and retain
+          # GOMEMLIMIT=20MiB to isolate the pre-ceiling workload.
+          LIMA_MEMORY_CAPTURE_MAPS: ${{ vars.LIMA_MEMORY_CAPTURE_MAPS }}
         run: |
           probe_failed=0
           probe_attempts="${LIMA_MEMORY_PROBE_ATTEMPTS:-3}"
@@ -3716,9 +3719,21 @@ jobs:
               exit 2
               ;;
           esac
+          if [[ ${LIMA_MEMORY_CAPTURE_MAPS:-} == 1 ]]; then
+            for attempt in $(seq 3); do
+              echo "Lima uncapped mapping diagnostic attempt $attempt/3"
+              if ! LIMA_MEMORY_PROBE_ATTEMPT="$attempt" LIMA_MEMORY_PROBE_ATTEMPTS=3 \
+                LIMA_MEMORY_PROBE_CGROUP_LIMIT_BYTES=100663296 LIMA_MEMORY_CAPTURE_MAPS=1 \
+                .github/scripts/test-lima-server-memory.sh; then
+                probe_failed=1
+              fi
+            done
+          fi
           for attempt in $(seq "$probe_attempts"); do
             echo "Lima service memory probe attempt $attempt/$probe_attempts"
-            if ! LIMA_MEMORY_PROBE_ATTEMPT="$attempt" LIMA_MEMORY_PROBE_ATTEMPTS="$probe_attempts" .github/scripts/test-lima-server-memory.sh; then
+            if ! env -u LIMA_MEMORY_CAPTURE_MAPS -u LIMA_MEMORY_PROBE_CGROUP_LIMIT_BYTES \
+              LIMA_MEMORY_PROBE_ATTEMPT="$attempt" LIMA_MEMORY_PROBE_ATTEMPTS="$probe_attempts" \
+              .github/scripts/test-lima-server-memory.sh; then
               probe_failed=1
             fi
           done

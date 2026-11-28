@@ -9,18 +9,30 @@ LIMA_SERVICE_IMAGE=${LIMA_SERVICE_IMAGE:-teagramd:ci}
 CONTAINER=teagramd-lima-memory
 KEY_VOLUME=tg-lima-memory-key
 BLOB_VOLUME=tg-lima-memory-blobs
-EXPECTED_LIMIT=$((46 * 1024 * 1024))
+EXPECTED_LIMIT=${LIMA_MEMORY_PROBE_CGROUP_LIMIT_BYTES:-$((46 * 1024 * 1024))}
+if [[ ! $EXPECTED_LIMIT =~ ^[1-9][0-9]*$ ]]; then
+  printf 'LIMA_MEMORY_PROBE_CGROUP_LIMIT_BYTES must be a positive integer, got %s\n' "$EXPECTED_LIMIT" >&2
+  exit 2
+fi
 MIN_HEADROOM=$((2 * 1024 * 1024))
 MEMORY_SAMPLE_INTERVAL_MS=10
 RUNTIME_SAMPLE_INTERVAL_BYTES=$((512 * 1024))
 LIMA_GOMEMLIMIT=20MiB
 LIMA_GOMEMLIMIT_BYTES=$(( ${LIMA_GOMEMLIMIT%MiB} * 1024 * 1024 ))
 LIMA_GO_MEMORY_LIMIT_CEILING_BYTES=$((14 * 1024 * 1024))
-if (( LIMA_GOMEMLIMIT_BYTES < LIMA_GO_MEMORY_LIMIT_CEILING_BYTES )); then
+if (( EXPECTED_LIMIT > 64 * 1024 * 1024 )); then
+  LIMA_EXPECTED_GO_MEMORY_LIMIT_BYTES=$LIMA_GOMEMLIMIT_BYTES
+elif (( LIMA_GOMEMLIMIT_BYTES < LIMA_GO_MEMORY_LIMIT_CEILING_BYTES )); then
   LIMA_EXPECTED_GO_MEMORY_LIMIT_BYTES=$LIMA_GOMEMLIMIT_BYTES
 else
   LIMA_EXPECTED_GO_MEMORY_LIMIT_BYTES=$LIMA_GO_MEMORY_LIMIT_CEILING_BYTES
 fi
+if (( EXPECTED_LIMIT % (1024 * 1024) != 0 )); then
+  printf 'LIMA_MEMORY_PROBE_CGROUP_LIMIT_BYTES must be a positive whole MiB value, got %s\n' \
+    "$EXPECTED_LIMIT" >&2
+  exit 2
+fi
+DOCKER_MEMORY_LIMIT_MIB=$((EXPECTED_LIMIT / (1024 * 1024)))
 LIMA_MEMORY_PROBE_ATTEMPTS=${LIMA_MEMORY_PROBE_ATTEMPTS:-3}
 MEMORY_CGROUP_DIR=
 MEMORY_CURRENT_FILE=
@@ -30,13 +42,7 @@ MEMORY_EVENTS_FILE=
 MEMORY_SAMPLE_PEAK_FILE=
 MEMORY_SAMPLE_EVENTS_FILE=
 MEMORY_SAMPLE_STAT_PEAK_FILE=
-MEMORY_SAMPLE_CURRENT_FILE=
-MEMORY_SAMPLE_ANON_FILE=
-MEMORY_SAMPLE_FILE_FILE=
-MEMORY_SAMPLE_KERNEL_FILE=
-MEMORY_SAMPLE_PROCESS_FILE=
 MEMORY_SAMPLE_RUNTIME_FILE=
-MEMORY_SAMPLE_RUNTIME_PEAK_FILE=
 MEMORY_SAMPLE_RUNTIME_READY_FILE=
 MEMORY_SAMPLE_RUNTIME_STOP_FILE=
 MEMORY_SAMPLE_ERROR_FILE=
@@ -51,15 +57,15 @@ PROBE_PHASE=server_startup
 UPLOAD_OUTCOME=not_started
 
 stop_memory_sampler() {
-  if [[ -n $MEMORY_SAMPLER_PID ]]; then
-    : >"$MEMORY_SAMPLE_STOP_FILE" 2>/dev/null || true
-    wait "$MEMORY_SAMPLER_PID" 2>/dev/null || true
-    MEMORY_SAMPLER_PID=
-  fi
   if [[ -n $MEMORY_RUNTIME_SAMPLER_PID ]]; then
     : >"$MEMORY_SAMPLE_RUNTIME_STOP_FILE" 2>/dev/null || true
     wait "$MEMORY_RUNTIME_SAMPLER_PID" 2>/dev/null || true
     MEMORY_RUNTIME_SAMPLER_PID=
+  fi
+  if [[ -n $MEMORY_SAMPLER_PID ]]; then
+    : >"$MEMORY_SAMPLE_STOP_FILE" 2>/dev/null || true
+    wait "$MEMORY_SAMPLER_PID" 2>/dev/null || true
+    MEMORY_SAMPLER_PID=
   fi
 }
 
@@ -71,12 +77,36 @@ finish() {
   stop_memory_sampler
 
   local runtime_sample=unavailable runtime_sample_current=unknown runtime_gc_cpu_fraction=unknown
-  if [[ -r $MEMORY_SAMPLE_RUNTIME_FILE && -r $MEMORY_SAMPLE_RUNTIME_PEAK_FILE ]]; then
-    runtime_sample=$(<"$MEMORY_SAMPLE_RUNTIME_FILE")
-    runtime_sample_current=$(<"$MEMORY_SAMPLE_RUNTIME_PEAK_FILE")
+  local runtime_cgroup_sample_unix_nano=unknown runtime_sample_alignment_delta_ns=unknown runtime_cgroup_sample= runtime_bundle
+  local runtime_cgroup_anon_bytes=unknown runtime_cgroup_file_bytes=unknown runtime_cgroup_kernel_bytes=unknown
+  local runtime_process_sample_peak_bytes=unknown runtime_server_pid=unknown runtime_server_rss_bytes=unknown
+  local runtime_server_anon_bytes=unknown runtime_photo_worker_count=unknown runtime_photo_worker_processes=unknown
+  local runtime_process_attribution=unmatched runtime_process_incomplete_pids=unknown runtime_timestamp
+  local mapping_label mapping_file
+  if [[ -r $MEMORY_SAMPLE_RUNTIME_FILE ]]; then
+    runtime_bundle=$(<"$MEMORY_SAMPLE_RUNTIME_FILE")
+    if runtime_sample=$(jq -ec '.runtime | select(type == "object")' <<<"$runtime_bundle") &&
+      runtime_cgroup_sample=$(jq -er '.cgroup_sample | select(type == "string")' <<<"$runtime_bundle"); then
+    IFS='|' read -r runtime_cgroup_sample_unix_nano runtime_sample_current runtime_cgroup_anon_bytes \
+      runtime_cgroup_file_bytes runtime_cgroup_kernel_bytes runtime_process_sample_peak_bytes runtime_server_pid \
+      runtime_server_rss_bytes runtime_server_anon_bytes runtime_photo_worker_count runtime_photo_worker_processes \
+      runtime_process_attribution runtime_process_incomplete_pids <<<"$runtime_cgroup_sample"
+    if runtime_timestamp=$(jq -er '.sample_unix_nano | select(type == "number" and . > 0)' <<<"$runtime_sample") &&
+      [[ $runtime_timestamp =~ ^[0-9]+$ && $runtime_cgroup_sample_unix_nano =~ ^[0-9]+$ ]]; then
+      runtime_sample_alignment_delta_ns=$((runtime_cgroup_sample_unix_nano - runtime_timestamp))
+      (( runtime_sample_alignment_delta_ns < 0 )) && runtime_sample_alignment_delta_ns=$((-runtime_sample_alignment_delta_ns))
+    else
+      runtime_cgroup_sample_unix_nano=unknown
+      runtime_sample_alignment_delta_ns=unknown
+    fi
     if ! runtime_gc_cpu_fraction=$(jq -er '.gc_cpu_fraction | select(type == "number" and . >= 0 and . <= 1)' <<<"$runtime_sample"); then
       status=1
       printf 'Go runtime memory sample is missing a valid cumulative GC CPU fraction\n' >&2
+    fi
+    else
+      runtime_sample=unavailable
+      status=1
+      printf 'Go runtime sample bundle is missing its paired cgroup/process sample\n' >&2
     fi
   fi
   if [[ $status -eq 0 && $runtime_sample == unavailable ]]; then
@@ -117,39 +147,54 @@ finish() {
     photo_worker_processes=unknown
     process_attribution=unknown
     process_incomplete_pids=unknown
-    if [[ -r $MEMORY_SAMPLE_STAT_PEAK_FILE && -r $MEMORY_SAMPLE_CURRENT_FILE &&
-      -r $MEMORY_SAMPLE_ANON_FILE && -r $MEMORY_SAMPLE_FILE_FILE && -r $MEMORY_SAMPLE_KERNEL_FILE ]]; then
-      stat_sample_peak_bytes=$(<"$MEMORY_SAMPLE_STAT_PEAK_FILE")
-      sample_current_bytes=$(<"$MEMORY_SAMPLE_CURRENT_FILE")
-      stat_anon_bytes=$(<"$MEMORY_SAMPLE_ANON_FILE")
-      stat_file_bytes=$(<"$MEMORY_SAMPLE_FILE_FILE")
-      stat_kernel_bytes=$(<"$MEMORY_SAMPLE_KERNEL_FILE")
+    if [[ $runtime_sample_current =~ ^[0-9]+$ && $runtime_process_sample_peak_bytes == "$runtime_sample_current" ]]; then
+      stat_sample_peak_bytes=$runtime_sample_current
+      sample_current_bytes=$runtime_sample_current
+      stat_anon_bytes=$runtime_cgroup_anon_bytes
+      stat_file_bytes=$runtime_cgroup_file_bytes
+      stat_kernel_bytes=$runtime_cgroup_kernel_bytes
     fi
     if [[ $peak_bytes =~ ^[0-9]+$ && $sample_current_bytes =~ ^[0-9]+$ ]]; then
       memory_peak_unattributed_bytes=$(lima_memory_peak_unattributed_bytes \
         "$peak_bytes" "$sample_current_bytes") || memory_peak_unattributed_bytes=unknown
     fi
-    if [[ -r $MEMORY_SAMPLE_PROCESS_FILE ]]; then
-      IFS='|' read -r process_sample_peak_bytes server_process_pid server_process_rss_bytes server_process_anon_bytes photo_worker_process_count photo_worker_processes process_attribution process_incomplete_pids \
-        <"$MEMORY_SAMPLE_PROCESS_FILE"
+    if [[ $runtime_sample_current =~ ^[0-9]+$ && $runtime_process_sample_peak_bytes == "$runtime_sample_current" ]]; then
+      process_sample_peak_bytes=$runtime_process_sample_peak_bytes
+      server_process_pid=$runtime_server_pid
+      server_process_rss_bytes=$runtime_server_rss_bytes
+      server_process_anon_bytes=$runtime_server_anon_bytes
+      photo_worker_process_count=$runtime_photo_worker_count
+      photo_worker_processes=$runtime_photo_worker_processes
+      process_attribution=$runtime_process_attribution
+      process_incomplete_pids=$runtime_process_incomplete_pids
     fi
-    printf 'LIMA_MEMORY_PROBE result=%s attempt=%s/%s phase=%s uploads=%s image=%s image_id=%s revision=%s gomemlimit=%s websocket_listener=127.0.0.1:2446 websocket_origin=https://web.teagram.io websocket_browser_only=false peak_mib=%s peak_bytes=%s memory_peak_unattributed_bytes=%s memory_stat_sample_interval_ms=%s memory_stat_sample_peak_bytes=%s memory_stat_sample_current_bytes=%s memory_stat_anon_bytes=%s memory_stat_file_bytes=%s memory_stat_kernel_bytes=%s memory_max_bytes=%s metrics_source=%s max_events=%s oom=%s oom_kill=%s memory_process_sample_peak_bytes=%s memory_process_attribution=%s memory_process_incomplete_pids=%s server_process_pid=%s server_process_rss_bytes=%s server_process_anon_bytes=%s photo_worker_process_count=%s photo_worker_processes=%s\n' \
+    printf 'LIMA_MEMORY_PROBE result=%s attempt=%s/%s phase=%s uploads=%s image=%s image_id=%s revision=%s gomemlimit=%s websocket_listener=127.0.0.1:2446 websocket_origin=https://web.teagram.io websocket_browser_only=false peak_mib=%s peak_bytes=%s memory_peak_unattributed_bytes=%s memory_stat_sample_interval_ms=%s memory_stat_sample_unix_nano=%s memory_runtime_sample_alignment_delta_ns=%s memory_stat_sample_peak_bytes=%s memory_stat_sample_current_bytes=%s memory_stat_anon_bytes=%s memory_stat_file_bytes=%s memory_stat_kernel_bytes=%s memory_max_bytes=%s metrics_source=%s max_events=%s oom=%s oom_kill=%s memory_process_sample_peak_bytes=%s memory_process_attribution=%s memory_process_incomplete_pids=%s server_process_pid=%s server_process_rss_bytes=%s server_process_anon_bytes=%s photo_worker_process_count=%s photo_worker_processes=%s\n' \
       "$([[ $status -eq 0 ]] && printf passed || printf failed)" "${LIMA_MEMORY_PROBE_ATTEMPT:-1}" "$LIMA_MEMORY_PROBE_ATTEMPTS" "$PROBE_PHASE" "$UPLOAD_OUTCOME" \
-      "$LIMA_SERVICE_IMAGE" "${IMAGE_ID:-unknown}" "$IMAGE_REVISION" "$LIMA_GOMEMLIMIT" "$peak_mib" "$peak_bytes" "$memory_peak_unattributed_bytes" "$MEMORY_SAMPLE_INTERVAL_MS" "$stat_sample_peak_bytes" "$sample_current_bytes" "$stat_anon_bytes" "$stat_file_bytes" "$stat_kernel_bytes" "$MEMORY_MAX_BYTES" "$MEMORY_METRICS_SOURCE" \
+      "$LIMA_SERVICE_IMAGE" "${IMAGE_ID:-unknown}" "$IMAGE_REVISION" "$LIMA_GOMEMLIMIT" "$peak_mib" "$peak_bytes" "$memory_peak_unattributed_bytes" "$MEMORY_SAMPLE_INTERVAL_MS" "$runtime_cgroup_sample_unix_nano" "$runtime_sample_alignment_delta_ns" "$stat_sample_peak_bytes" "$sample_current_bytes" "$stat_anon_bytes" "$stat_file_bytes" "$stat_kernel_bytes" "$MEMORY_MAX_BYTES" "$MEMORY_METRICS_SOURCE" \
       "${max_events:-unknown}" "${oom:-unknown}" "${oom_kill:-unknown}" "$process_sample_peak_bytes" "$process_attribution" "$process_incomplete_pids" "$server_process_pid" "$server_process_rss_bytes" "$server_process_anon_bytes" "$photo_worker_process_count" "$photo_worker_processes"
-    printf 'LIMA_GO_RUNTIME_MEMORY gc_cpu_fraction=%s sample_current_bytes=%s metrics=%s\n' \
-      "$runtime_gc_cpu_fraction" "$runtime_sample_current" "$runtime_sample"
+    printf 'LIMA_GO_RUNTIME_MEMORY gc_cpu_fraction=%s cgroup_sample_unix_nano=%s alignment_delta_ns=%s sample_current_bytes=%s metrics=%s\n' \
+      "$runtime_gc_cpu_fraction" "$runtime_cgroup_sample_unix_nano" "$runtime_sample_alignment_delta_ns" "$runtime_sample_current" "$runtime_sample"
+    if [[ ${LIMA_MEMORY_CAPTURE_MAPS:-0} == 1 ]]; then
+      for mapping_label in typical spike; do
+        mapping_file="$RUNNER_TEMP/lima-memory-sampled-mappings-$mapping_label"
+        if [[ -r $mapping_file ]]; then
+          printf 'LIMA_MEMORY_MAPPING_SAMPLE label=%s ' "$mapping_label"
+          tr '\n' ' ' <"$mapping_file"
+          printf '\n'
+        fi
+      done
+    fi
     if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then
       {
         printf '\n### Lima service memory probe\n\n'
-        printf '| Attempt | Result | Phase | Uploads | Image | Image ID | Revision | GOMEMLIMIT | WebSocket settings | Peak cgroup memory | Peak gap above sampled current (unattributed) | Stat sample interval | Peak at stat sample | Sampled current | memory.stat anon | memory.stat file | memory.stat kernel | memory.max | Metrics source | max events | OOM events | OOM kills | Process sample peak | Process attribution | Incomplete process PIDs | Server PID | Server RSS | Server anon | Photo worker count | Photo worker processes (PID:RSS:anon bytes) |\n'
+        printf '| Attempt | Result | Phase | Uploads | Image | Image ID | Revision | GOMEMLIMIT | WebSocket settings | Peak cgroup memory | Peak gap above paired sample (unattributed) | Stat sample interval | Paired sample timestamp (ns) | Go/cgroup alignment delta (ns) | Paired sampled current | memory.stat anon | memory.stat file | memory.stat kernel | memory.max | Metrics source | max events | OOM events | OOM kills | Process sample current | Process attribution | Incomplete process PIDs | Server PID | Server RSS | Server anon | Photo worker count | Photo worker processes (PID:RSS:anon bytes) |\n'
         printf '| ---: | --- | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | --- | --- | ---: | --- | ---: | --- | --- |\n'
-        printf '| %s/%s | %s | %s | %s | %s | %s | %s | %s | 127.0.0.1:2446, https://web.teagram.io, browser_only=false | %s MiB (%s bytes) | %s bytes | %s ms | %s bytes | %s bytes | %s bytes | %s bytes | %s bytes | %s bytes | %s | %s | %s | %s | %s bytes | %s | %s | %s | %s bytes | %s bytes | %s | %s |\n' \
+        printf '| %s/%s | %s | %s | %s | %s | %s | %s | %s | 127.0.0.1:2446, https://web.teagram.io, browser_only=false | %s MiB (%s bytes) | %s bytes | %s ms | %s | %s | %s bytes | %s bytes | %s bytes | %s bytes | %s bytes | %s | %s | %s | %s | %s bytes | %s | %s | %s | %s bytes | %s bytes | %s | %s |\n' \
           "${LIMA_MEMORY_PROBE_ATTEMPT:-1}" "$LIMA_MEMORY_PROBE_ATTEMPTS" "$([[ $status -eq 0 ]] && printf passed || printf failed)" "$PROBE_PHASE" "$UPLOAD_OUTCOME" \
-          "$LIMA_SERVICE_IMAGE" "${IMAGE_ID:-unknown}" "$IMAGE_REVISION" "$LIMA_GOMEMLIMIT" "$peak_mib" "$peak_bytes" "$memory_peak_unattributed_bytes" "$MEMORY_SAMPLE_INTERVAL_MS" "$stat_sample_peak_bytes" "$sample_current_bytes" "$stat_anon_bytes" "$stat_file_bytes" "$stat_kernel_bytes" "$MEMORY_MAX_BYTES" \
+          "$LIMA_SERVICE_IMAGE" "${IMAGE_ID:-unknown}" "$IMAGE_REVISION" "$LIMA_GOMEMLIMIT" "$peak_mib" "$peak_bytes" "$memory_peak_unattributed_bytes" "$MEMORY_SAMPLE_INTERVAL_MS" "$runtime_cgroup_sample_unix_nano" "$runtime_sample_alignment_delta_ns" "$sample_current_bytes" "$stat_anon_bytes" "$stat_file_bytes" "$stat_kernel_bytes" "$MEMORY_MAX_BYTES" \
           "$MEMORY_METRICS_SOURCE" "${max_events:-unknown}" "${oom:-unknown}" "${oom_kill:-unknown}" "$process_sample_peak_bytes" "$process_attribution" "$process_incomplete_pids" "$server_process_pid" "$server_process_rss_bytes" "$server_process_anon_bytes" "$photo_worker_process_count" "$photo_worker_processes"
-        printf '\nGo runtime memory sample at sampled current peak (%s bytes):\n\n%s\n' \
-          "$runtime_sample_current" "$runtime_sample"
+        printf '\nGo runtime memory sample paired with cgroup/process sample %s (alignment delta %s ns):\n\n%s\n' \
+          "$runtime_cgroup_sample_unix_nano" "$runtime_sample_alignment_delta_ns" "$runtime_sample"
       } >>"$GITHUB_STEP_SUMMARY"
     fi
   fi
@@ -176,9 +221,14 @@ rm -f "$RUNNER_TEMP/lima-memory-start-gate" "$RUNNER_TEMP/lima-memory-photo.jpg"
   "$RUNNER_TEMP/lima-memory-sampled-stat-peak" "$RUNNER_TEMP/lima-memory-sampled-stat-peak.tmp" \
   "$RUNNER_TEMP/lima-memory-sampled-current" "$RUNNER_TEMP/lima-memory-sampled-anon" \
   "$RUNNER_TEMP/lima-memory-sampled-file" "$RUNNER_TEMP/lima-memory-sampled-kernel" \
-  "$RUNNER_TEMP/lima-memory-sampled-processes" "$RUNNER_TEMP/lima-memory-sampled-error" \
+  "$RUNNER_TEMP/lima-memory-sampled-processes" "$RUNNER_TEMP/lima-memory-sampled-history" \
+  "$RUNNER_TEMP/lima-memory-sampled-mappings-typical" "$RUNNER_TEMP/lima-memory-sampled-mappings-typical.tmp" \
+  "$RUNNER_TEMP/lima-memory-sampled-mappings-spike" "$RUNNER_TEMP/lima-memory-sampled-mappings-spike.tmp" \
+  "$RUNNER_TEMP/lima-memory-sampled-mappings-spike-current" "$RUNNER_TEMP/lima-memory-sampled-mappings-spike-current.tmp" \
+  "$RUNNER_TEMP/lima-memory-sampled-error" \
   "$RUNNER_TEMP/lima-memory-sampled-stop" "$RUNNER_TEMP/lima-memory-sampled-runtime" \
-  "$RUNNER_TEMP/lima-memory-sampled-runtime-peak" "$RUNNER_TEMP/lima-memory-sampled-runtime-ready" \
+  "$RUNNER_TEMP/lima-memory-sampled-runtime-peak" "$RUNNER_TEMP/lima-memory-sampled-runtime.bundle.tmp" \
+  "$RUNNER_TEMP/lima-memory-sampled-runtime-ready" \
   "$RUNNER_TEMP/lima-memory-sampled-runtime-stop" \
   "$RUNNER_TEMP/lima-memory-sampled-runtime.tmp"
 if ! docker image inspect "$LIMA_SERVICE_IMAGE" >/dev/null 2>&1; then
@@ -209,7 +259,7 @@ docker run --rm --volume "$KEY_VOLUME:/var/lib/teagramd" "$IMAGE_ID" bootstrap-i
 # removed on exit. Keep auth budgets above the twenty test sign-ins from the loopback client.
 docker run --detach --name "$CONTAINER" \
   --network host \
-  --memory 46m --memory-swap 46m --cpus 0.5 --pids-limit 128 \
+  --memory "${DOCKER_MEMORY_LIMIT_MIB}m" --memory-swap "${DOCKER_MEMORY_LIMIT_MIB}m" --cpus 0.5 --pids-limit 128 \
   --read-only \
   --volume "$KEY_VOLUME:/var/lib/teagramd" \
   --volume "$BLOB_VOLUME:/var/lib/teagramd-blobs" \
@@ -264,13 +314,7 @@ if [[ $container_pid =~ ^[1-9][0-9]*$ ]]; then
     MEMORY_SAMPLE_PEAK_FILE="$RUNNER_TEMP/lima-memory-sampled-peak"
     MEMORY_SAMPLE_EVENTS_FILE="$RUNNER_TEMP/lima-memory-sampled-events"
     MEMORY_SAMPLE_STAT_PEAK_FILE="$RUNNER_TEMP/lima-memory-sampled-stat-peak"
-    MEMORY_SAMPLE_CURRENT_FILE="$RUNNER_TEMP/lima-memory-sampled-current"
-    MEMORY_SAMPLE_ANON_FILE="$RUNNER_TEMP/lima-memory-sampled-anon"
-    MEMORY_SAMPLE_FILE_FILE="$RUNNER_TEMP/lima-memory-sampled-file"
-    MEMORY_SAMPLE_KERNEL_FILE="$RUNNER_TEMP/lima-memory-sampled-kernel"
-    MEMORY_SAMPLE_PROCESS_FILE="$RUNNER_TEMP/lima-memory-sampled-processes"
     MEMORY_SAMPLE_RUNTIME_FILE="$RUNNER_TEMP/lima-memory-sampled-runtime"
-    MEMORY_SAMPLE_RUNTIME_PEAK_FILE="$RUNNER_TEMP/lima-memory-sampled-runtime-peak"
     MEMORY_SAMPLE_RUNTIME_READY_FILE="$RUNNER_TEMP/lima-memory-sampled-runtime-ready"
     MEMORY_SAMPLE_RUNTIME_STOP_FILE="$RUNNER_TEMP/lima-memory-sampled-runtime-stop"
     MEMORY_SAMPLE_ERROR_FILE="$RUNNER_TEMP/lima-memory-sampled-error"
@@ -286,9 +330,10 @@ if [[ $container_pid =~ ^[1-9][0-9]*$ ]]; then
       "$RUNNER_TEMP/lima-memory-sampled" "$MEMORY_SAMPLE_STOP_FILE" "$MEMORY_SAMPLE_ERROR_FILE" \
       0.01 &
     MEMORY_SAMPLER_PID=$!
-    lima_memory_sample_runtime_metrics_loop "$MEMORY_SAMPLE_STAT_PEAK_FILE" "$RUNTIME_SAMPLE_INTERVAL_BYTES" \
+    lima_memory_sample_runtime_metrics_loop "$MEMORY_SAMPLE_STAT_PEAK_FILE" \
+      "$RUNNER_TEMP/lima-memory-sampled-history" "$RUNTIME_SAMPLE_INTERVAL_BYTES" \
       "$MEMORY_SAMPLE_RUNTIME_READY_FILE" "$MEMORY_SAMPLE_RUNTIME_FILE" \
-      "$MEMORY_SAMPLE_RUNTIME_PEAK_FILE" "$MEMORY_SAMPLE_ERROR_FILE" "$MEMORY_SAMPLE_RUNTIME_STOP_FILE" \
+      "$MEMORY_SAMPLE_ERROR_FILE" "$MEMORY_SAMPLE_RUNTIME_STOP_FILE" \
       0.01 &
     MEMORY_RUNTIME_SAMPLER_PID=$!
   else
@@ -321,19 +366,33 @@ if [[ $memory_limit != "$EXPECTED_LIMIT" ]]; then
   exit 1
 fi
 
-memory_cap_log=$(docker logs "$CONTAINER" 2>&1 | awk '/msg="Lima Go memory cap applied"/ { line = $0 } END { if (line != "") print line }')
+if (( EXPECTED_LIMIT <= 64 * 1024 * 1024 )); then
+  memory_cap_log=$(docker logs "$CONTAINER" 2>&1 | awk '/msg="Lima Go memory cap applied"/ { line = $0 } END { if (line != "") print line }')
+else
+  memory_cap_log=$(docker logs "$CONTAINER" 2>&1 | awk '/msg="Lima Go memory cap not applied"/ { line = $0 } END { if (line != "") print line }')
+fi
 if [[ -z $memory_cap_log ]]; then
-  echo 'Lima Go memory cap applied log is missing from the server container' >&2
+  echo 'Lima Go memory cap decision log is missing from the server container' >&2
   exit 1
 fi
-case "$memory_cap_log" in
-  *"cgroup_memory_max_bytes=$EXPECTED_LIMIT go_memory_limit_bytes=$LIMA_EXPECTED_GO_MEMORY_LIMIT_BYTES") ;;
-  *)
-    printf 'Lima Go memory cap log does not match the probe cgroup and effective GOMEMLIMIT=%s target (%s bytes): %s\n' \
-      "$LIMA_GOMEMLIMIT" "$LIMA_EXPECTED_GO_MEMORY_LIMIT_BYTES" "$memory_cap_log" >&2
-    exit 1
-    ;;
-esac
+if (( EXPECTED_LIMIT <= 64 * 1024 * 1024 )); then
+  case "$memory_cap_log" in
+    *"cgroup_memory_max_bytes=$EXPECTED_LIMIT go_memory_limit_bytes=$LIMA_EXPECTED_GO_MEMORY_LIMIT_BYTES") ;;
+    *)
+      printf 'Lima Go memory cap log does not match the probe cgroup and effective GOMEMLIMIT=%s target (%s bytes): %s\n' \
+        "$LIMA_GOMEMLIMIT" "$LIMA_EXPECTED_GO_MEMORY_LIMIT_BYTES" "$memory_cap_log" >&2
+      exit 1
+      ;;
+  esac
+else
+  case "$memory_cap_log" in
+    *"cgroup_memory_max_bytes=$EXPECTED_LIMIT threshold_bytes=$((64 * 1024 * 1024))") ;;
+    *)
+      printf 'Lima Go memory cap skip log does not match the diagnostic cgroup limit: %s\n' "$memory_cap_log" >&2
+      exit 1
+      ;;
+  esac
+fi
 printf '%s\n' "$memory_cap_log"
 
 websocket_listener_ready=false
@@ -437,14 +496,18 @@ if [[ -r $MEMORY_SAMPLE_ERROR_FILE ]]; then
   cat "$MEMORY_SAMPLE_ERROR_FILE" >&2
   exit 1
 fi
-if [[ ! -r $MEMORY_SAMPLE_PROCESS_FILE || ! -r $MEMORY_SAMPLE_STAT_PEAK_FILE ]]; then
-  echo 'memory probe did not capture process attribution at a sampled peak' >&2
+if [[ ! -r $MEMORY_SAMPLE_RUNTIME_FILE ]]; then
+  echo 'memory probe did not capture a timestamp-aligned Go runtime and cgroup/process sample' >&2
   exit 1
 fi
-IFS='|' read -r process_sample_peak_bytes server_process_pid server_process_rss_bytes server_process_anon_bytes photo_worker_process_count photo_worker_processes process_attribution process_incomplete_pids \
-  <"$MEMORY_SAMPLE_PROCESS_FILE"
-stat_sample_peak_bytes=$(<"$MEMORY_SAMPLE_STAT_PEAK_FILE")
-if [[ ! $process_sample_peak_bytes =~ ^[0-9]+$ ||
+runtime_cgroup_sample=$(jq -er '.cgroup_sample | select(type == "string")' "$MEMORY_SAMPLE_RUNTIME_FILE")
+IFS='|' read -r runtime_cgroup_sample_unix_nano sample_current_bytes stat_anon_bytes stat_file_bytes stat_kernel_bytes \
+  process_sample_peak_bytes server_process_pid server_process_rss_bytes server_process_anon_bytes \
+  photo_worker_process_count photo_worker_processes process_attribution process_incomplete_pids \
+  <<<"$runtime_cgroup_sample"
+stat_sample_peak_bytes=$sample_current_bytes
+if [[ ! $runtime_cgroup_sample_unix_nano =~ ^[0-9]+$ ||
+  ! $process_sample_peak_bytes =~ ^[0-9]+$ ||
   ! $stat_sample_peak_bytes =~ ^[0-9]+$ ||
   $process_sample_peak_bytes != "$stat_sample_peak_bytes" ||
   ( $process_attribution != complete && $process_attribution != incomplete ) ||

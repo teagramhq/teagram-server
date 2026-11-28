@@ -6,7 +6,30 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "$script_dir/lima-memory-process-snapshot.sh"
 
 fixture="$(mktemp -d)"
-trap 'rm -rf -- "$fixture"' EXIT
+runtime_request_release=
+runtime_final_request_release=
+runtime_final_request_started=
+runtime_cgroup_stop=
+runtime_stop=
+sample_peak_writer_pid=
+runtime_sampler_pid=
+cgroup_sampler_pid=
+cleanup_fixture() {
+  local status=$?
+  trap - EXIT
+  [[ -n ${runtime_request_release:-} ]] && : >"$runtime_request_release" 2>/dev/null || true
+  [[ -n ${runtime_final_request_release:-} ]] && : >"$runtime_final_request_release" 2>/dev/null || true
+  [[ -n ${runtime_cgroup_stop:-} ]] && : >"$runtime_cgroup_stop" 2>/dev/null || true
+  [[ -n ${runtime_stop:-} ]] && : >"$runtime_stop" 2>/dev/null || true
+  for pid in "${sample_peak_writer_pid:-}" "${runtime_sampler_pid:-}" "${cgroup_sampler_pid:-}"; do
+    if [[ -n $pid ]]; then
+      wait "$pid" 2>/dev/null || true
+    fi
+  done
+  rm -rf -- "$fixture"
+  exit "$status"
+}
+trap cleanup_fixture EXIT
 proc_root="$fixture/proc"
 mkdir -p "$proc_root/101" "$proc_root/102" "$proc_root/103" "$proc_root/104"
 
@@ -35,6 +58,23 @@ Name:   photothumb
 VmRSS:  90 kB
 RssAnon: 85 kB
 EOF
+cat >"$proc_root/101/smaps" <<'EOF'
+10000000-10002000 rw-p 00000000 00:00 0 [heap]
+Size:                  8 kB
+Rss:                   8 kB
+Anonymous:             4 kB
+20000000-20001000 r--p 00000000 00:00 0 /fixture/map.dat
+Size:                  4 kB
+Rss:                   4 kB
+Anonymous:             0 kB
+EOF
+
+mapping_snapshot=$(lima_memory_process_mapping_snapshot "$proc_root" 101 | cut -d'|' -f1,2)
+expected=$'8192|4096\n4096|0'
+if [[ "$mapping_snapshot" != "$expected" ]]; then
+  printf 'mapping RSS snapshot = %s, want %s\n' "$mapping_snapshot" "$expected" >&2
+  exit 1
+fi
 
 snapshot="$(lima_memory_process_snapshot "$proc_root" "$fixture/cgroup.procs" 101)"
 expected='101|102400|81920|2|102:71680:61440,103:76800:66560|complete|-|101,102,103'
@@ -95,6 +135,25 @@ if [[ $(<"$sample_prefix-stat-peak") != 2500000 || $(<"$sample_prefix-current") 
   printf 'cgroup sample fields do not match the selected process sample\n' >&2
   exit 1
 fi
+
+mapping_cgroup="$fixture/mapping-cgroup"
+mapping_prefix="$fixture/mapping-sample"
+mkdir -p "$mapping_cgroup"
+printf '101\n102\n' >"$mapping_cgroup/cgroup.procs"
+printf '3145728\n' >"$mapping_cgroup/memory.peak"
+printf '2000000\n' >"$mapping_cgroup/memory.current"
+printf 'low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\n' >"$mapping_cgroup/memory.events"
+printf 'anon 1500000\nfile 100000\nkernel 500000\n' >"$mapping_cgroup/memory.stat"
+LIMA_MEMORY_CAPTURE_MAPS=1 LIMA_MEMORY_MAPPING_TYPICAL_BYTES=1000000 \
+  LIMA_MEMORY_MAPPING_SPIKE_DELTA_BYTES=500000 \
+  lima_memory_record_cgroup_sample "$mapping_cgroup" "$proc_root" 101 "$mapping_prefix"
+for label in typical spike; do
+  if [[ ! -r "$mapping_prefix-mappings-$label" ]] ||
+    ! rg -q '8192\|4096\|10000000-' "$mapping_prefix-mappings-$label"; then
+    printf 'mapping sample %s is missing the expected heap RSS row\n' "$label" >&2
+    exit 1
+  fi
+done
 
 peak_unattributed_bytes=$(lima_memory_peak_unattributed_bytes 44675072 39170048)
 if [[ "$peak_unattributed_bytes" != 5505024 ]]; then
@@ -169,9 +228,11 @@ runtime_cgroup_stop="$fixture/runtime-cgroup-stop"
 runtime_stop="$fixture/runtime-runtime-stop"
 runtime_error="$fixture/runtime-error"
 runtime_file="$fixture/runtime.json"
-runtime_sample_current="$fixture/runtime-current"
 runtime_request_started="$fixture/runtime-request-started"
 runtime_request_release="$fixture/runtime-request-release"
+runtime_final_request_started="$fixture/runtime-final-request-started"
+runtime_final_request_release="$fixture/runtime-final-request-release"
+runtime_request_samples="$fixture/runtime-request-samples"
 mkdir -p "$runtime_cgroup"
 printf '101\n102\n103\n' >"$runtime_cgroup/cgroup.procs"
 printf '3145728\n' >"$runtime_cgroup/memory.peak"
@@ -205,12 +266,20 @@ curl() {
     while [[ ! -e "$runtime_request_release" ]]; do
       sleep 0.01
     done
+  elif (( runtime_curl_calls == 2 )); then
+    : >"$runtime_final_request_started"
+    while [[ ! -e "$runtime_final_request_release" ]]; do
+      sleep 0.01
+    done
   fi
-  printf '{"heap_live_bytes":%s}\n' "$runtime_curl_calls" >"$output"
+  local sample_unix_nano
+  sample_unix_nano=$(date +%s%N)
+  printf '{"sample_unix_nano":%s,"heap_live_bytes":%s}\n' "$sample_unix_nano" "$runtime_curl_calls" >"$output"
+  printf '%s|%s\n' "$runtime_curl_calls" "$sample_unix_nano" >>"$runtime_request_samples"
 }
 
-lima_memory_sample_runtime_metrics_loop "$runtime_prefix-stat-peak" "$((512 * 1024))" "$runtime_ready" \
-  "$runtime_file" "$runtime_sample_current" "$runtime_error" "$runtime_stop" 0.01 &
+lima_memory_sample_runtime_metrics_loop "$runtime_prefix-stat-peak" "$runtime_prefix-history" \
+  "$((512 * 1024))" "$runtime_ready" "$runtime_file" "$runtime_error" "$runtime_stop" 0.01 &
 runtime_sampler_pid=$!
 for _ in $(seq 200); do
   if [[ -e "$runtime_request_started" ]]; then
@@ -239,23 +308,27 @@ VmRSS:  95 kB
 RssAnon: 90 kB
 EOF
 printf '101\n102\n103\n105\n' >"$runtime_cgroup/cgroup.procs"
-printf '3000000\n' >"$runtime_cgroup/memory.current"
-printf 'anon 2400000\nfile 100000\nkernel 500000\n' >"$runtime_cgroup/memory.stat"
+printf '3100000\n' >"$runtime_cgroup/memory.current"
+printf 'anon 2500000\nfile 100000\nkernel 500000\n' >"$runtime_cgroup/memory.stat"
 sampled_current=
 sampled_worker_count=
 sampled_attribution=
 for _ in $(seq 200); do
   if [[ -r "$runtime_prefix-processes" ]]; then
-    IFS='|' read -r sampled_current _ _ _ sampled_worker_count _ sampled_attribution _ \
-      <"$runtime_prefix-processes"
-    if [[ "$sampled_current" == 3000000 && "$sampled_worker_count" == 3 &&
-      "$sampled_attribution" == complete ]]; then
-      break
+    sampled_current=
+    sampled_worker_count=
+    sampled_attribution=
+    if IFS='|' read -r sampled_current _ _ _ sampled_worker_count _ sampled_attribution _ \
+      <"$runtime_prefix-processes"; then
+      if [[ "$sampled_current" == 3100000 && "$sampled_worker_count" == 3 &&
+        "$sampled_attribution" == complete ]]; then
+        break
+      fi
     fi
   fi
   sleep 0.01
 done
-if [[ "$sampled_current" != 3000000 || "$sampled_worker_count" != 3 ||
+if [[ "$sampled_current" != 3100000 || "$sampled_worker_count" != 3 ||
   "$sampled_attribution" != complete ]]; then
   process_snapshot=missing
   if [[ -r "$runtime_prefix-processes" ]]; then
@@ -263,28 +336,77 @@ if [[ "$sampled_current" != 3000000 || "$sampled_worker_count" != 3 ||
   fi
   printf 'process sampler missed the short-lived worker while runtime metrics were blocked: %s\n' \
     "$process_snapshot" >&2
-  : >"$runtime_request_release"
-  : >"$runtime_cgroup_stop"
-  : >"$runtime_stop"
-  wait "$cgroup_sampler_pid" 2>/dev/null || true
-  wait "$runtime_sampler_pid" 2>/dev/null || true
+  exit 1
+fi
+for _ in $(seq 200); do
+  if [[ -r "$runtime_prefix-history" ]] &&
+    rg -q '^([0-9]+)\|3100000\|' "$runtime_prefix-history"; then
+    break
+  fi
+  sleep 0.01
+done
+if ! rg -q '^([0-9]+)\|3100000\|' "$runtime_prefix-history"; then
+  printf 'cgroup sampler did not record the high-current worker snapshot\n' >&2
+  exit 1
+fi
+: >"$runtime_request_release"
+for _ in $(seq 200); do
+  if [[ -r "$runtime_file" ]]; then
+    paired_sample=$(jq -er '.cgroup_sample | select(type == "string")' "$runtime_file")
+    if IFS='|' read -r _ paired_current _ <<<"$paired_sample" && [[ "$paired_current" == 3100000 ]]; then
+      break
+    fi
+  fi
+  sleep 0.01
+done
+if [[ ! -r "$runtime_file" ]]; then
+  [[ -r "$runtime_error" ]] && cat "$runtime_error" >&2
+  printf 'runtime sampler did not persist its first paired sample\n' >&2
+  exit 1
+fi
+for _ in $(seq 200); do
+  if [[ -e "$runtime_final_request_started" ]]; then
+    break
+  fi
+  sleep 0.01
+done
+if [[ ! -e "$runtime_final_request_started" ]]; then
+  [[ -r "$runtime_error" ]] && cat "$runtime_error" >&2
+  printf 'runtime sampler did not make the final aligned request\n' >&2
   exit 1
 fi
 printf '2800000\n' >"$runtime_cgroup/memory.current"
 printf '101\n102\n103\n' >"$runtime_cgroup/cgroup.procs"
 rm -f -- "$proc_root/105/status"
-wait "$sample_peak_writer_pid"
+for _ in $(seq 200); do
+  if rg -q '^([0-9]+)\|2800000\|' "$runtime_prefix-history"; then
+    break
+  fi
+  sleep 0.01
+done
+: >"$runtime_final_request_release"
+touch "$runtime_stop"
+wait "$runtime_sampler_pid"
+runtime_sampler_pid=
 : >"$runtime_cgroup_stop"
 wait "$cgroup_sampler_pid"
-touch "$runtime_stop" "$runtime_request_release"
-wait "$runtime_sampler_pid"
+cgroup_sampler_pid=
+wait "$sample_peak_writer_pid"
+sample_peak_writer_pid=
+final_runtime_timestamp=$(awk -F'|' '$1 == 2 { print $2 }' "$runtime_request_samples")
+final_aligned_sample=$(lima_memory_nearest_cgroup_sample "$runtime_prefix-history" "$final_runtime_timestamp")
+IFS='|' read -r _ final_sample_current _ <<<"$final_aligned_sample"
 if [[ -e "$runtime_error" ]]; then
   cat "$runtime_error" >&2
   exit 1
 fi
-if [[ $(<"$runtime_sample_current") != 3000000 || $(<"$runtime_file") != '{"heap_live_bytes":2}' ]]; then
-  printf 'final runtime metrics sample = %s at %s bytes, want fixture metrics at selected 3000000-byte peak\n' \
-    "$(<"$runtime_file")" "$(<"$runtime_sample_current")" >&2
+runtime_metrics=$(jq -c '.runtime' "$runtime_file")
+paired_sample=$(jq -er '.cgroup_sample | select(type == "string")' "$runtime_file")
+if [[ "$runtime_metrics" != *'"heap_live_bytes":1'* ]] ||
+  ! IFS='|' read -r _ paired_current _ <<<"$paired_sample" ||
+  [[ "$paired_current" != 3100000 || "$final_sample_current" != 2800000 ]]; then
+  printf 'runtime flush relabeled a later cgroup sample: metrics=%s cgroup_sample=%s\n' \
+    "$runtime_metrics" "$paired_sample" >&2
   exit 1
 fi
 
