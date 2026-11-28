@@ -655,6 +655,9 @@ bytes), sticker set (short name), and emoji set (short name). The optional host
 field comes first; omitting it selects the default server at
 `server.teagram.io`. Use an empty host for that server; an explicit default
 host is non-canonical. Generators include a host only for another server.
+Hosts use IDNA and browser-compatible IPv4 parsing; numeric IPv4 forms are
+canonicalized to dotted decimal, and malformed numeric-ending names are
+rejected. A host may include a canonical decimal port from 1 through 65535.
 
 Every field except the last has a one-byte length prefix from 1 through 255.
 The last field consumes the remaining bytes. Host, username, and set short-name
@@ -664,9 +667,10 @@ from 1 to 40. The positive integer is written as minimal big-endian bytes.
 `Encode` folds ASCII case in usernames and short names and IDNA-normalizes hosts
 to lowercase ASCII. `Decode` returns the normalized target with lowercase text.
 Usernames must match
-`^[A-Za-z][A-Za-z0-9_]{1,31}$`. Hosts have trailing dots removed, and may
-include a canonical decimal port from 1 through 65535. DNS labels must be
-valid, and `telegram.org` and its subdomains are refused.
+`^[A-Za-z][A-Za-z0-9_]{1,31}$`. Hosts have trailing dots removed. DNS labels
+must be valid, and `telegram.org` and its subdomains are refused. Vector IDs
+are decimal strings so JSON parsers preserve their exact values; clients parse
+them as integers with exact precision (BigInt in JavaScript).
 Numeric ids are minimal big-endian unsigned integers from 1 through
 `2^63-1`. Join hashes preserve their raw bytes. Invite secrets are 32 bytes and
 are re-encoded as 64 lower-case hexadecimal characters for the API.

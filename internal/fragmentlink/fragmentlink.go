@@ -517,6 +517,13 @@ func normalizeHost(value string) (string, error) {
 	if hostname == "" || len(hostname) > 253 || strings.Contains(hostname, "..") {
 		return "", codecError(ErrorInvalidHost, "host")
 	}
+	if endsInWHATWGIPv4Number(hostname) {
+		var valid bool
+		hostname, valid = normalizeWHATWGIPv4(hostname)
+		if !valid {
+			return "", codecError(ErrorInvalidHost, "host")
+		}
+	}
 	for label := range strings.SplitSeq(hostname, ".") {
 		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
 			return "", codecError(ErrorInvalidHost, "host")
@@ -534,6 +541,100 @@ func normalizeHost(value string) (string, error) {
 		return hostname + ":" + port, nil
 	}
 	return hostname, nil
+}
+
+func endsInWHATWGIPv4Number(hostname string) bool {
+	labels := strings.Split(hostname, ".")
+	last := labels[len(labels)-1]
+	if last == "" {
+		return false
+	}
+	allDigits := true
+	for _, char := range last {
+		if char < '0' || char > '9' {
+			allDigits = false
+			break
+		}
+	}
+	if allDigits {
+		return true
+	}
+	_, valid := parseWHATWGIPv4Number(last)
+	return valid
+}
+
+func normalizeWHATWGIPv4(hostname string) (string, bool) {
+	parts := strings.Split(hostname, ".")
+	if len(parts) > 1 && parts[len(parts)-1] == "" {
+		parts = parts[:len(parts)-1]
+	}
+	if len(parts) == 0 || len(parts) > 4 {
+		return "", false
+	}
+
+	numbers := make([]*big.Int, len(parts))
+	for index, part := range parts {
+		number, valid := parseWHATWGIPv4Number(part)
+		if !valid {
+			return "", false
+		}
+		if index < len(parts)-1 && number.Cmp(big.NewInt(255)) > 0 {
+			return "", false
+		}
+		numbers[index] = number
+	}
+
+	lastLimit := new(big.Int).Lsh(big.NewInt(1), uint(8*(5-len(numbers))))
+	if numbers[len(numbers)-1].Cmp(lastLimit) >= 0 {
+		return "", false
+	}
+
+	address := new(big.Int).Set(numbers[len(numbers)-1])
+	for index, number := range numbers[:len(numbers)-1] {
+		address.Add(address, new(big.Int).Lsh(new(big.Int).Set(number), uint(8*(3-index))))
+	}
+	bytes := address.FillBytes(make([]byte, 4))
+	return fmt.Sprintf("%d.%d.%d.%d", bytes[0], bytes[1], bytes[2], bytes[3]), true
+}
+
+func parseWHATWGIPv4Number(value string) (*big.Int, bool) {
+	if value == "" {
+		return nil, false
+	}
+
+	radix := 10
+	if len(value) >= 2 && value[0] == '0' && (value[1] == 'x' || value[1] == 'X') {
+		radix = 16
+		value = value[2:]
+	} else if len(value) >= 2 && value[0] == '0' {
+		radix = 8
+		value = value[1:]
+	}
+	if value == "" {
+		return new(big.Int), true
+	}
+
+	base := big.NewInt(int64(radix))
+	number := new(big.Int)
+	for _, char := range value {
+		var digit int64
+		switch {
+		case char >= '0' && char <= '9':
+			digit = int64(char - '0')
+		case char >= 'a' && char <= 'f':
+			digit = int64(char-'a') + 10
+		case char >= 'A' && char <= 'F':
+			digit = int64(char-'A') + 10
+		default:
+			return nil, false
+		}
+		if digit >= int64(radix) {
+			return nil, false
+		}
+		number.Mul(number, base)
+		number.Add(number, big.NewInt(digit))
+	}
+	return number, true
 }
 
 func isBase64URLChar(char rune) bool {

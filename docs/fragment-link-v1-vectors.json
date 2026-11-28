@@ -22,9 +22,18 @@
       "input": {
         "type": 2,
         "username": "alice",
-        "message_id": 1
+        "message_id": "1"
       },
       "code": "#~QgQBw6TXAQ"
+    },
+    {
+      "name": "public-message-max-int64",
+      "input": {
+        "type": 2,
+        "username": "alice",
+        "message_id": "9223372036854775807"
+      },
+      "code": "#~QgQBw6TXf_________8"
     },
     {
       "name": "public-message-host-port",
@@ -32,7 +41,7 @@
         "type": 2,
         "host": "chat.example.org:8443",
         "username": "bob",
-        "message_id": 65793
+        "message_id": "65793"
       },
       "code": "#~Yg5I89ZAK-UIMiPJDHXqDAJO9AEBAQ"
     },
@@ -40,8 +49,8 @@
       "name": "private-message-default",
       "input": {
         "type": 3,
-        "channel_id": 123456789,
-        "message_id": 42
+        "channel_id": "123456789",
+        "message_id": "42"
       },
       "code": "#~QwQHW80VKg"
     },
@@ -50,8 +59,8 @@
       "input": {
         "type": 3,
         "host": "chat.example.org",
-        "channel_id": 987654321,
-        "message_id": 12345
+        "channel_id": "987654321",
+        "message_id": "12345"
       },
       "code": "#~YwsL89lf9Nd0cL6ssQQ63mixMDk"
     },
@@ -164,7 +173,7 @@
       "input": {
         "type": 2,
         "username": "",
-        "message_id": 1
+        "message_id": "1"
       },
       "code": "#~QgAB",
       "rule": "empty_field"
@@ -174,7 +183,7 @@
       "input": {
         "type": 2,
         "username": "alice",
-        "message_id": 1
+        "message_id": "1"
       },
       "code": "#~QiABAg",
       "rule": "length_out_of_range"
@@ -184,7 +193,7 @@
       "input": {
         "type": 2,
         "username": "alice",
-        "message_id": 1
+        "message_id": "1"
       },
       "code": "#~QgQBw6TXAAE",
       "rule": "non_canonical"
@@ -255,11 +264,21 @@
       "rule": "invalid_host"
     },
     {
+      "name": "invalid-host-numeric-final-label",
+      "input": {
+        "type": 1,
+        "host": "example.123",
+        "username": "alice"
+      },
+      "code": "#~YQgCTrp4cL4Y_AHDpNc",
+      "rule": "invalid_host"
+    },
+    {
       "name": "id-zero",
       "input": {
         "type": 2,
         "username": "alice",
-        "message_id": 0
+        "message_id": "0"
       },
       "code": "#~QgQBw6TXAA",
       "rule": "invalid_id"
@@ -269,7 +288,7 @@
       "input": {
         "type": 2,
         "username": "alice",
-        "message_id": 9223372036854775808
+        "message_id": "9223372036854775808"
       },
       "code": "#~QgQBw6TXgAAAAAAAAAA",
       "rule": "invalid_id"
@@ -297,7 +316,7 @@
       "input": {
         "type": 2,
         "username": "alice",
-        "message_id": 9223372036854775807
+        "message_id": "18446744073709551615"
       },
       "code": "#~QgQBw6TXf___________",
       "rule": "invalid_id"

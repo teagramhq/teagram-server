@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -30,8 +31,8 @@ type vectorInput struct {
 	Type      fragmentlink.Type `json:"type"`
 	Host      string            `json:"host,omitempty"`
 	Username  string            `json:"username,omitempty"`
-	ChannelID uint64            `json:"channel_id,omitempty"`
-	MessageID uint64            `json:"message_id,omitempty"`
+	ChannelID string            `json:"channel_id,omitempty"`
+	MessageID string            `json:"message_id,omitempty"`
 	JoinHash  string            `json:"join_hash_hex,omitempty"`
 	Secret    string            `json:"secret_hex,omitempty"`
 	ShortName string            `json:"short_name,omitempty"`
@@ -41,7 +42,8 @@ func (input vectorInput) link(t *testing.T) fragmentlink.Link {
 	t.Helper()
 	value := fragmentlink.Link{
 		Type: input.Type, Host: input.Host, Username: input.Username,
-		ChannelID: input.ChannelID, MessageID: input.MessageID, ShortName: input.ShortName,
+		ChannelID: parseVectorID(t, input.ChannelID, "channel_id"),
+		MessageID: parseVectorID(t, input.MessageID, "message_id"), ShortName: input.ShortName,
 	}
 	if input.JoinHash != "" {
 		decoded, err := hex.DecodeString(input.JoinHash)
@@ -60,6 +62,26 @@ func (input vectorInput) link(t *testing.T) fragmentlink.Link {
 	return value
 }
 
+func parseVectorID(t *testing.T, value, field string) uint64 {
+	t.Helper()
+	if value == "" {
+		return 0
+	}
+	if value != "0" && value[0] == '0' {
+		t.Fatalf("parse %s %q: leading zero", field, value)
+	}
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			t.Fatalf("parse %s %q: expected decimal digits", field, value)
+		}
+	}
+	id, err := strconv.ParseUint(value, 10, 64)
+	if err != nil {
+		t.Fatalf("parse %s %q: %v", field, value, err)
+	}
+	return id
+}
+
 func TestVectors(t *testing.T) {
 	contents, err := os.ReadFile(filepath.Join("..", "..", "docs", "fragment-link-v1-vectors.json"))
 	if err != nil {
@@ -68,6 +90,12 @@ func TestVectors(t *testing.T) {
 	var vectors vectorFile
 	if err := json.Unmarshal(contents, &vectors); err != nil {
 		t.Fatal(err)
+	}
+	for _, cases := range [][]vectorCase{vectors.Valid, vectors.Invalid} {
+		for _, testCase := range cases {
+			parseVectorID(t, testCase.Input.ChannelID, "channel_id")
+			parseVectorID(t, testCase.Input.MessageID, "message_id")
+		}
 	}
 
 	if len(vectors.Valid) < 14 {
@@ -223,6 +251,10 @@ func TestEncodeNormalizesHost(t *testing.T) {
 		{name: "Unicode and trailing dot", host: "BÜCHER.Example.", canonicalHost: "xn--bcher-kva.example"},
 		{name: "trailing dot", host: "chat.example.org.", canonicalHost: "chat.example.org"},
 		{name: "leading zero port", host: "chat.example.org:08443", canonicalHost: "chat.example.org:8443"},
+		{name: "WHATWG shorthand IPv4", host: "127.1", canonicalHost: "127.0.0.1"},
+		{name: "WHATWG hexadecimal IPv4", host: "0x7b", canonicalHost: "0.0.0.123"},
+		{name: "WHATWG IPv4 with port", host: "127.1:08443", canonicalHost: "127.0.0.1:8443"},
+		{name: "non-numeric hexadecimal-looking domain", host: "chat.example.0xg", canonicalHost: "chat.example.0xg"},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -263,6 +295,10 @@ func TestEncodeRejectsInvalidTypedFields(t *testing.T) {
 		{name: "missing channel id", value: fragmentlink.Link{Type: fragmentlink.TypePrivateChannelMessage, MessageID: 1}, kind: fragmentlink.ErrorInvalidID},
 		{name: "short invite secret", value: fragmentlink.Link{Type: fragmentlink.TypeSignUpInvite, Secret: make([]byte, 31)}, kind: fragmentlink.ErrorInvalidSecret},
 		{name: "invalid host port", value: fragmentlink.Link{Type: fragmentlink.TypeProfile, Host: "chat.example.org:70000", Username: "alice"}, kind: fragmentlink.ErrorInvalidHost},
+		{name: "numeric final host label", value: fragmentlink.Link{Type: fragmentlink.TypeProfile, Host: "example.123", Username: "alice"}, kind: fragmentlink.ErrorInvalidHost},
+		{name: "invalid numeric IPv4 final label", value: fragmentlink.Link{Type: fragmentlink.TypeProfile, Host: "example.09", Username: "alice"}, kind: fragmentlink.ErrorInvalidHost},
+		{name: "hex IPv4 final label", value: fragmentlink.Link{Type: fragmentlink.TypeProfile, Host: "example.0x7b", Username: "alice"}, kind: fragmentlink.ErrorInvalidHost},
+		{name: "empty hex IPv4 final label", value: fragmentlink.Link{Type: fragmentlink.TypeProfile, Host: "example.0x", Username: "alice"}, kind: fragmentlink.ErrorInvalidHost},
 		{name: "explicit default host", value: fragmentlink.Link{Type: fragmentlink.TypeProfile, Host: fragmentlink.DefaultServerHost, Username: "alice"}, kind: fragmentlink.ErrorNonCanonical},
 		{name: "unexpected id", value: fragmentlink.Link{Type: fragmentlink.TypeProfile, Username: "alice", MessageID: 1}, kind: fragmentlink.ErrorUnexpectedField},
 		{name: "unexpected empty hash", value: fragmentlink.Link{Type: fragmentlink.TypeProfile, Username: "alice", Hash: []byte{}}, kind: fragmentlink.ErrorUnexpectedField},
