@@ -3723,6 +3723,7 @@ jobs:
             for attempt in $(seq 3); do
               echo "Lima uncapped mapping diagnostic attempt $attempt/3"
               if ! LIMA_MEMORY_PROBE_ATTEMPT="$attempt" LIMA_MEMORY_PROBE_ATTEMPTS=3 \
+                LIMA_MEMORY_PROBE_USERNAME_PREFIX="maps${attempt}" \
                 LIMA_MEMORY_PROBE_CGROUP_LIMIT_BYTES=100663296 LIMA_MEMORY_CAPTURE_MAPS=1 \
                 .github/scripts/test-lima-server-memory.sh; then
                 probe_failed=1

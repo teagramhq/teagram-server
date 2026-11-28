@@ -75,6 +75,39 @@ if [[ "$mapping_snapshot" != "$expected" ]]; then
   printf 'mapping RSS snapshot = %s, want %s\n' "$mapping_snapshot" "$expected" >&2
   exit 1
 fi
+curl() {
+  printf '%s\n' '{"sample_unix_nano":123,"mappings":[{"rss_bytes":8192,"anonymous_bytes":4096,"mapping":"10000000-10002000 rw-p 00000000 00:00 0 [heap]"},{"rss_bytes":4096,"anonymous_bytes":0,"mapping":"20000000-20001000 r--p 00000000 00:00 0 /fixture/map.dat"}]}'
+}
+mapping_snapshot=$(LIMA_MEMORY_MAPPING_ENDPOINT=http://127.0.0.1:2447/debug/runtime-memory-mappings \
+  lima_memory_process_mapping_snapshot "$proc_root" 101)
+if [[ "$mapping_snapshot" != $'mapping_sample_unix_nano=123\n8192|4096|10000000-10002000 rw-p 00000000 00:00 0 [heap]\n4096|0|20000000-20001000 r--p 00000000 00:00 0 /fixture/map.dat' ]]; then
+  printf 'endpoint mapping snapshot = %s, want fixture mappings in RSS order\n' "$mapping_snapshot" >&2
+  exit 1
+fi
+
+LIMA_MEMORY_CAPTURE_MAPS=1
+lima_memory_configure_mapping_endpoint
+mapping_endpoint_in_child=$(bash -c 'printf %s "${LIMA_MEMORY_MAPPING_ENDPOINT:-}"')
+if [[ "$mapping_endpoint_in_child" != http://127.0.0.1:2447/debug/runtime-memory-mappings ]]; then
+  printf 'mapping endpoint in sampler child = %s, want the loopback diagnostics endpoint\n' \
+    "$mapping_endpoint_in_child" >&2
+  exit 1
+fi
+export -f lima_memory_process_mapping_snapshot
+export -f curl
+mapping_snapshot_in_child=$(bash -c 'lima_memory_process_mapping_snapshot "$1" 101' _ "$proc_root")
+if [[ "$mapping_snapshot_in_child" != $'mapping_sample_unix_nano=123\n8192|4096|10000000-10002000 rw-p 00000000 00:00 0 [heap]\n4096|0|20000000-20001000 r--p 00000000 00:00 0 /fixture/map.dat' ]]; then
+  printf 'mapping snapshot in sampler child = %s, want timestamped mapping rows\n' \
+    "$mapping_snapshot_in_child" >&2
+  exit 1
+fi
+unset -f curl
+LIMA_MEMORY_CAPTURE_MAPS=0
+lima_memory_configure_mapping_endpoint
+if bash -c '[[ -n ${LIMA_MEMORY_MAPPING_ENDPOINT:-} ]]'; then
+  printf 'mapping endpoint remained enabled with mapping capture disabled\n' >&2
+  exit 1
+fi
 
 snapshot="$(lima_memory_process_snapshot "$proc_root" "$fixture/cgroup.procs" 101)"
 expected='101|102400|81920|2|102:71680:61440,103:76800:66560|complete|-|101,102,103'
@@ -149,7 +182,7 @@ LIMA_MEMORY_CAPTURE_MAPS=1 LIMA_MEMORY_MAPPING_TYPICAL_BYTES=1000000 \
   lima_memory_record_cgroup_sample "$mapping_cgroup" "$proc_root" 101 "$mapping_prefix"
 for label in typical spike; do
   if [[ ! -r "$mapping_prefix-mappings-$label" ]] ||
-    ! rg -q '8192\|4096\|10000000-' "$mapping_prefix-mappings-$label"; then
+    ! grep -Fq '8192|4096|10000000-' "$mapping_prefix-mappings-$label"; then
     printf 'mapping sample %s is missing the expected heap RSS row\n' "$label" >&2
     exit 1
   fi
@@ -340,12 +373,12 @@ if [[ "$sampled_current" != 3100000 || "$sampled_worker_count" != 3 ||
 fi
 for _ in $(seq 200); do
   if [[ -r "$runtime_prefix-history" ]] &&
-    rg -q '^([0-9]+)\|3100000\|' "$runtime_prefix-history"; then
+    grep -Eq '^([0-9]+)[|]3100000[|]' "$runtime_prefix-history"; then
     break
   fi
   sleep 0.01
 done
-if ! rg -q '^([0-9]+)\|3100000\|' "$runtime_prefix-history"; then
+if ! grep -Eq '^([0-9]+)[|]3100000[|]' "$runtime_prefix-history"; then
   printf 'cgroup sampler did not record the high-current worker snapshot\n' >&2
   exit 1
 fi
@@ -379,7 +412,7 @@ printf '2800000\n' >"$runtime_cgroup/memory.current"
 printf '101\n102\n103\n' >"$runtime_cgroup/cgroup.procs"
 rm -f -- "$proc_root/105/status"
 for _ in $(seq 200); do
-  if rg -q '^([0-9]+)\|2800000\|' "$runtime_prefix-history"; then
+  if grep -Eq '^([0-9]+)[|]2800000[|]' "$runtime_prefix-history"; then
     break
   fi
   sleep 0.01

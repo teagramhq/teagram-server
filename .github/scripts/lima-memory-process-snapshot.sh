@@ -146,8 +146,23 @@ lima_memory_write_sample_file() {
   mv -- "$sample_tmp" "$sample_file"
 }
 
+lima_memory_configure_mapping_endpoint() {
+  LIMA_MEMORY_MAPPING_ENDPOINT=
+  if [[ ${LIMA_MEMORY_CAPTURE_MAPS:-0} == 1 ]]; then
+    LIMA_MEMORY_MAPPING_ENDPOINT=http://127.0.0.1:2447/debug/runtime-memory-mappings
+  fi
+  export LIMA_MEMORY_MAPPING_ENDPOINT
+}
+
 lima_memory_process_mapping_snapshot() {
   local proc_root="$1" server_pid="$2"
+  if [[ -n ${LIMA_MEMORY_MAPPING_ENDPOINT:-} ]]; then
+    curl --noproxy '*' --fail --connect-timeout 1 --max-time 2 --silent --show-error \
+      "$LIMA_MEMORY_MAPPING_ENDPOINT" |
+      jq -r '"mapping_sample_unix_nano=\(.sample_unix_nano)", (.mappings[] | "\(.rss_bytes)|\(.anonymous_bytes)|\(.mapping)")' |
+      sed -n '1,21p'
+    return
+  fi
   awk '
     /^[[:xdigit:]]+-[[:xdigit:]]+[[:space:]]/ {
       if (mapping != "") print rss_bytes "|" anonymous_bytes "|" mapping
@@ -261,28 +276,26 @@ lima_memory_record_cgroup_sample() {
   if [[ ${LIMA_MEMORY_CAPTURE_MAPS:-0} == 1 ]]; then
     local mapping_typical_bytes=${LIMA_MEMORY_MAPPING_TYPICAL_BYTES:-31457280}
     local mapping_spike_delta_bytes=${LIMA_MEMORY_MAPPING_SPIKE_DELTA_BYTES:-4194304}
-    local mapping_spike_current=0 mapping_timestamp mapping_tmp
+    local mapping_spike_current=0 mapping_tmp
     if [[ -r "$sample_prefix-mappings-spike-current" ]]; then
       mapping_spike_current=$(<"$sample_prefix-mappings-spike-current") || return 1
       [[ $mapping_spike_current =~ ^[0-9]+$ ]] || return 1
     fi
     if [[ ! -e "$sample_prefix-mappings-typical" ]] && (( current_bytes >= mapping_typical_bytes )); then
-      mapping_timestamp=$(date +%s%N) || return 1
       mapping_tmp="$sample_prefix-mappings-typical.tmp"
       {
-        printf 'sample_unix_nano=%s cgroup_current_bytes=%s server_pid=%s\n' \
-          "$mapping_timestamp" "$current_bytes" "$server_pid"
+        printf 'cgroup_sample_unix_nano=%s cgroup_current_bytes=%s server_pid=%s\n' \
+          "$sampled_at_unix_nano" "$current_bytes" "$server_pid"
         lima_memory_process_mapping_snapshot "$proc_root" "$server_pid"
       } >"$mapping_tmp" || return 1
       mv -- "$mapping_tmp" "$sample_prefix-mappings-typical" || return 1
     fi
     if (( current_bytes >= mapping_typical_bytes + mapping_spike_delta_bytes &&
       ( mapping_spike_current == 0 || current_bytes >= mapping_spike_current + 1048576 ) )); then
-      mapping_timestamp=$(date +%s%N) || return 1
       mapping_tmp="$sample_prefix-mappings-spike.tmp"
       {
-        printf 'sample_unix_nano=%s cgroup_current_bytes=%s server_pid=%s\n' \
-          "$mapping_timestamp" "$current_bytes" "$server_pid"
+        printf 'cgroup_sample_unix_nano=%s cgroup_current_bytes=%s server_pid=%s\n' \
+          "$sampled_at_unix_nano" "$current_bytes" "$server_pid"
         lima_memory_process_mapping_snapshot "$proc_root" "$server_pid"
       } >"$mapping_tmp" || return 1
       mv -- "$mapping_tmp" "$sample_prefix-mappings-spike" || return 1

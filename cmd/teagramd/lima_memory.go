@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"runtime/metrics"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -42,6 +44,17 @@ type limaRuntimeMemorySample struct {
 	OtherBytes               uint64  `json:"other_bytes"`
 	Goroutines               uint64  `json:"goroutines"`
 	GCCPUFraction            float64 `json:"gc_cpu_fraction"`
+}
+
+type limaRuntimeMemoryMapping struct {
+	RSSBytes       uint64 `json:"rss_bytes"`
+	AnonymousBytes uint64 `json:"anonymous_bytes"`
+	Mapping        string `json:"mapping"`
+}
+
+type limaRuntimeMemoryMappingsSample struct {
+	SampleUnixNano int64                      `json:"sample_unix_nano"`
+	Mappings       []limaRuntimeMemoryMapping `json:"mappings"`
 }
 
 var limaRuntimeMemoryMetricNames = [...]string{
@@ -76,10 +89,107 @@ func serveLimaRuntimeMemory(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func serveLimaRuntimeMemoryMappings(w http.ResponseWriter, r *http.Request) {
+	if os.Getenv(limaMemoryDiagnosticsEnv) != "1" {
+		http.NotFound(w, r)
+		return
+	}
+	sample, err := readLimaRuntimeMemoryMappings("/proc/self/smaps")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(sample); err != nil {
+		slog.Error("write Lima runtime memory mappings", "err", err)
+	}
+}
+
 func newLimaRuntimeMemoryDiagnosticsMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /debug/runtime-memory", serveLimaRuntimeMemory)
+	mux.HandleFunc("GET /debug/runtime-memory-mappings", serveLimaRuntimeMemoryMappings)
 	return mux
+}
+
+func readLimaRuntimeMemoryMappings(path string) (result limaRuntimeMemoryMappingsSample, resultErr error) {
+	file, err := os.Open(path) // #nosec G304 -- production passes /proc/self/smaps; tests use temporary fixtures.
+	if err != nil {
+		return limaRuntimeMemoryMappingsSample{}, fmt.Errorf("open process memory mappings: %w", err)
+	}
+	defer func() {
+		if err := file.Close(); err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("close process memory mappings: %w", err))
+		}
+	}()
+
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 4096), 1<<20)
+	mappings := make([]limaRuntimeMemoryMapping, 0, 64)
+	var current limaRuntimeMemoryMapping
+	flush := func() {
+		if current.Mapping != "" {
+			mappings = append(mappings, current)
+		}
+	}
+	for scanner.Scan() {
+		line := scanner.Text()
+		if isLimaRuntimeMemoryMappingHeader(line) {
+			flush()
+			current = limaRuntimeMemoryMapping{Mapping: line}
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		var destination *uint64
+		switch fields[0] {
+		case "Rss:":
+			destination = &current.RSSBytes
+		case "Anonymous:":
+			destination = &current.AnonymousBytes
+		default:
+			continue
+		}
+		kibibytes, err := strconv.ParseUint(fields[1], 10, 64)
+		if err != nil {
+			return limaRuntimeMemoryMappingsSample{}, fmt.Errorf("parse process mapping %s: %w", fields[0], err)
+		}
+		if kibibytes > math.MaxUint64/1024 {
+			return limaRuntimeMemoryMappingsSample{}, fmt.Errorf("process mapping %s overflows bytes", fields[0])
+		}
+		*destination = kibibytes * 1024
+	}
+	if err := scanner.Err(); err != nil {
+		return limaRuntimeMemoryMappingsSample{}, fmt.Errorf("read process memory mappings: %w", err)
+	}
+	flush()
+	sort.SliceStable(mappings, func(left, right int) bool {
+		return mappings[left].RSSBytes > mappings[right].RSSBytes
+	})
+	if len(mappings) > 20 {
+		mappings = mappings[:20]
+	}
+	return limaRuntimeMemoryMappingsSample{SampleUnixNano: time.Now().UnixNano(), Mappings: mappings}, nil
+}
+
+func isLimaRuntimeMemoryMappingHeader(line string) bool {
+	fields := strings.Fields(line)
+	if len(fields) < 5 || len(fields[1]) != 4 {
+		return false
+	}
+	addresses := strings.Split(fields[0], "-")
+	if len(addresses) != 2 {
+		return false
+	}
+	for _, address := range addresses {
+		if _, err := strconv.ParseUint(address, 16, 64); err != nil {
+			return false
+		}
+	}
+	return true
 }
 
 func readLimaRuntimeMemorySample() (limaRuntimeMemorySample, error) {

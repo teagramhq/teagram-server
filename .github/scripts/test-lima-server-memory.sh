@@ -34,6 +34,14 @@ if (( EXPECTED_LIMIT % (1024 * 1024) != 0 )); then
 fi
 DOCKER_MEMORY_LIMIT_MIB=$((EXPECTED_LIMIT / (1024 * 1024)))
 LIMA_MEMORY_PROBE_ATTEMPTS=${LIMA_MEMORY_PROBE_ATTEMPTS:-3}
+LIMA_MEMORY_PROBE_USERNAME_PREFIX=${LIMA_MEMORY_PROBE_USERNAME_PREFIX:-${LIMA_MEMORY_PROBE_ATTEMPT:-1}}
+if [[ ! $LIMA_MEMORY_PROBE_USERNAME_PREFIX =~ ^[A-Za-z0-9_]{1,22}$ ]]; then
+  printf 'LIMA_MEMORY_PROBE_USERNAME_PREFIX must contain 1-22 letters, digits, or underscores, got %s\n' \
+    "$LIMA_MEMORY_PROBE_USERNAME_PREFIX" >&2
+  exit 2
+fi
+LIMA_MEMORY_MAPPING_ENDPOINT=
+lima_memory_configure_mapping_endpoint
 MEMORY_CGROUP_DIR=
 MEMORY_CURRENT_FILE=
 MEMORY_STAT_FILE=
@@ -426,7 +434,7 @@ printf 'lima-memory-probe-only-password\n' >"$password_file"
 chmod 600 "$password_file"
 for suffix in a b; do
   # The repeated attempts share a PostgreSQL service, so each needs fresh users.
-  username="limamem_${LIMA_MEMORY_PROBE_ATTEMPT:-1}_$suffix"
+  username="limamem_${LIMA_MEMORY_PROBE_USERNAME_PREFIX}_$suffix"
   username_file="$RUNNER_TEMP/lima-memory-username-$suffix"
   printf '%s\n' "$username" >"$username_file"
   chmod 600 "$username_file"

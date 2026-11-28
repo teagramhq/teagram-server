@@ -154,6 +154,76 @@ func TestLimaRuntimeMemoryEndpointReportsGoHeapAndRuntimeAttribution(t *testing.
 	}
 }
 
+func TestReadLimaRuntimeMemoryMappingsRanksRSSAndAnonymousBytes(t *testing.T) {
+	smapsPath := filepath.Join(t.TempDir(), "smaps")
+	smaps := "10000000-10002000 rw-p 00000000 00:00 0 [heap]\n" +
+		"Size: 8 kB\nRss: 8 kB\nAnonymous: 4 kB\n" +
+		"20000000-20001000 r--p 00000000 00:00 0 /fixture/map.dat\n" +
+		"Size: 4 kB\nRss: 20 kB\nAnonymous: 12 kB\n"
+	if err := os.WriteFile(smapsPath, []byte(smaps), 0o600); err != nil {
+		t.Fatalf("write smaps fixture: %v", err)
+	}
+
+	sample, err := readLimaRuntimeMemoryMappings(smapsPath)
+	if err != nil {
+		t.Fatalf("read runtime memory mappings: %v", err)
+	}
+	if sample.SampleUnixNano <= 0 || len(sample.Mappings) != 2 {
+		t.Fatalf("runtime memory mappings = %+v, want timestamped two-mapping sample", sample)
+	}
+	if got := sample.Mappings[0]; got.Mapping != "20000000-20001000 r--p 00000000 00:00 0 /fixture/map.dat" ||
+		got.RSSBytes != 20*1024 || got.AnonymousBytes != 12*1024 {
+		t.Fatalf("largest runtime memory mapping = %+v, want 20 KiB RSS and 12 KiB anonymous", got)
+	}
+	if got := sample.Mappings[1]; got.RSSBytes != 8*1024 || got.AnonymousBytes != 4*1024 {
+		t.Fatalf("second runtime memory mapping = %+v, want 8 KiB RSS and 4 KiB anonymous", got)
+	}
+}
+
+func TestLimaRuntimeMemoryMappingsEndpointReportsProcessMappings(t *testing.T) {
+	t.Setenv("TG_LIMA_MEMORY_DIAGNOSTICS", "1")
+
+	server := httptest.NewServer(newLimaRuntimeMemoryDiagnosticsMux())
+	t.Cleanup(server.Close)
+
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL+"/debug/runtime-memory-mappings", nil)
+	if err != nil {
+		t.Fatalf("create runtime memory mappings request: %v", err)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("get runtime memory mappings: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := response.Body.Close(); err != nil {
+			t.Errorf("close runtime memory mappings response: %v", err)
+		}
+	})
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("runtime memory mappings status = %d, want %d", response.StatusCode, http.StatusOK)
+	}
+
+	var got struct {
+		SampleUnixNano int64 `json:"sample_unix_nano"`
+		Mappings       []struct {
+			RSSBytes       uint64 `json:"rss_bytes"`
+			AnonymousBytes uint64 `json:"anonymous_bytes"`
+			Mapping        string `json:"mapping"`
+		} `json:"mappings"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&got); err != nil {
+		t.Fatalf("decode runtime memory mappings: %v", err)
+	}
+	if got.SampleUnixNano <= 0 || len(got.Mappings) == 0 {
+		t.Fatalf("runtime memory mappings = %+v, want a timestamped non-empty sample", got)
+	}
+	for _, mapping := range got.Mappings {
+		if mapping.Mapping == "" {
+			t.Fatalf("runtime memory mapping has no header: %+v", mapping)
+		}
+	}
+}
+
 func TestLimaRuntimeMemoryEndpointIsDisabledOutsideProbe(t *testing.T) {
 	t.Setenv("TG_LIMA_MEMORY_DIAGNOSTICS", "")
 
@@ -175,5 +245,22 @@ func TestLimaRuntimeMemoryEndpointIsDisabledOutsideProbe(t *testing.T) {
 	})
 	if response.StatusCode != http.StatusNotFound {
 		t.Fatalf("runtime memory diagnostics status = %d, want %d when disabled", response.StatusCode, http.StatusNotFound)
+	}
+
+	mappingRequest, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL+"/debug/runtime-memory-mappings", nil)
+	if err != nil {
+		t.Fatalf("create runtime memory mappings request: %v", err)
+	}
+	mappingResponse, err := http.DefaultClient.Do(mappingRequest)
+	if err != nil {
+		t.Fatalf("get runtime memory mappings: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := mappingResponse.Body.Close(); err != nil {
+			t.Errorf("close runtime memory mappings response: %v", err)
+		}
+	})
+	if mappingResponse.StatusCode != http.StatusNotFound {
+		t.Fatalf("runtime memory mappings status = %d, want %d when disabled", mappingResponse.StatusCode, http.StatusNotFound)
 	}
 }
