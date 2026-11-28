@@ -17,6 +17,7 @@ BLOB_DATA=$BLOB_MOUNT/data
 BLOB_MIN_BYTES=$((3 * 1024 * 1024 * 1024))
 BLOB_MAX_BYTES=$((4 * 1024 * 1024 * 1024))
 MEMORY_BUDGET_BYTES=$((200 * 1024 * 1024))
+MIN_SERVICE_MEMORY_BYTES=$((6 * 1024 * 1024))
 COMPOSE_RENDER_COMMAND='docker compose --env-file <lima.env> --project-directory <checkout> -f deploy/teagram-demo/lima/compose.yaml --project-name teagram-demo config --format json'
 DEMO_SUBNETS=(198.18.130.0/24 198.18.132.0/24 198.18.133.0/24)
 REQUIRED_ENV_KEYS=(POSTGRES_PASSWORD TG_PUBLIC_LINK_PREFIX TG_AUTHKEY_ENC_KEY TEAGRAM_DEMO_TURNSTILE_SITE_KEY TEAGRAM_DEMO_IMAGE_REF TG_RSA_KEY_FINGERPRINT)
@@ -31,11 +32,15 @@ fail() {
 
 check_tools() {
   local tool missing=()
-  for tool in docker jq python3 stat mountpoint findmnt; do
+  for tool in docker jq python3 stat mountpoint findmnt flock; do
     command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
   done
   if ((${#missing[@]} > 0)); then
     fail tools "missing on this host: ${missing[*]}"
+    return 1
+  fi
+  if ! flock -x -w 1 -E 75 /dev/null true >/dev/null 2>&1; then
+    fail tools "flock must support -w and -E; install the Alpine flock package"
     return 1
   fi
   pass tools
@@ -190,12 +195,23 @@ check_config_shape() {
   if [[ -n $no_limit ]]; then
     fail mem-limits "no memory limit: $(tr '\n' ' ' <<<"$no_limit")"
   else
-    local sum
-    sum=$(jq '[.services | to_entries[] | select(.key != "migrate") | .value.mem_limit | tonumber] | add' <<<"$CONFIG_JSON")
-    if (( sum > MEMORY_BUDGET_BYTES )); then
-      fail mem-limits "all services except one-shot migrate total $((sum / 1048576)) MiB, budget is 200 MiB"
+    local below_minimum
+    below_minimum=$(jq -r --argjson minimum "$MIN_SERVICE_MEMORY_BYTES" '
+      .services | to_entries[] |
+      .key as $name | .value as $service |
+      (if (($service.mem_limit // "0") | tonumber) < $minimum then "\($name).mem_limit" else empty end),
+      (if (($service.memswap_limit // "0") | tonumber) < $minimum then "\($name).memswap_limit" else empty end)
+    ' <<<"$CONFIG_JSON")
+    if [[ -n $below_minimum ]]; then
+      fail mem-limits "below 6 MiB: $(tr '\n' ' ' <<<"$below_minimum")"
     else
-      pass "mem-limits ($((sum / 1048576)) MiB of 200 MiB)"
+      local sum
+      sum=$(jq '[.services | to_entries[] | select(.key != "migrate") | .value.mem_limit | tonumber] | add' <<<"$CONFIG_JSON")
+      if (( sum > MEMORY_BUDGET_BYTES )); then
+        fail mem-limits "all services except one-shot migrate total $((sum / 1048576)) MiB, budget is 200 MiB"
+      else
+        pass "mem-limits ($((sum / 1048576)) MiB of 200 MiB)"
+      fi
     fi
   fi
 
