@@ -87,6 +87,51 @@ ci_query() {
   cached_query "$ci_workflow" "$1"
 }
 
+check_alpha_bootstrap_mount_failure() (
+  local tmp
+  tmp="$(mktemp -d)"
+  trap 'rm -rf -- "$tmp"' EXIT
+
+  mkdir -p "$tmp/bin"
+  ci_query '.jobs."test-alpha-bootstrap".steps[] | select(.name == "Run alpha bootstrap apply fixture in a private root namespace") | .run' |
+    sed "s#deploy/k8s/test-bootstrap-alpha.sh#$tmp/bootstrap-fixture#" > "$tmp/workflow-run.sh"
+  [[ -s "$tmp/workflow-run.sh" ]] || ci_fail 'the alpha bootstrap workflow command must be available for mount-failure testing'
+
+  cat > "$tmp/bin/sudo" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${1:-}" == '-n' ]] || exit 2
+shift
+exec "$@"
+SH
+  cat > "$tmp/bin/unshare" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${1:-}" == '--mount' && "${2:-}" == '--propagation' && "${3:-}" == 'private' ]] || exit 2
+shift 3
+exec "$@"
+SH
+  cat > "$tmp/bin/mount" <<'SH'
+#!/usr/bin/env bash
+: > "$ALPHA_BOOTSTRAP_MOUNT_RAN"
+exit 23
+SH
+  cat > "$tmp/bootstrap-fixture" <<'SH'
+#!/usr/bin/env bash
+: > "$ALPHA_BOOTSTRAP_FIXTURE_RAN"
+SH
+  chmod +x "$tmp/bin/sudo" "$tmp/bin/unshare" "$tmp/bin/mount" "$tmp/bootstrap-fixture"
+
+  if PATH="$tmp/bin:$PATH" \
+    ALPHA_BOOTSTRAP_MOUNT_RAN="$tmp/mount-ran" \
+    ALPHA_BOOTSTRAP_FIXTURE_RAN="$tmp/fixture-ran" \
+    bash -euo pipefail "$tmp/workflow-run.sh" > "$tmp/output" 2>&1; then
+    ci_fail 'the alpha bootstrap workflow succeeded after its private root mount failed'
+  fi
+  [[ -e "$tmp/mount-ran" ]] || ci_fail 'the alpha bootstrap workflow did not attempt the private root mount'
+  [[ ! -e "$tmp/fixture-ran" ]] || ci_fail 'the alpha bootstrap fixture ran after its private root mount failed'
+)
+
 check_ci_contract() {
   [[ "$(ci_query '.on | keys | sort | join(",")')" == 'merge_group,pull_request,push' ]] ||
     ci_fail 'triggers must be exactly merge_group, pull_request, and push'
@@ -104,6 +149,7 @@ check_ci_contract() {
     ci_fail 'the alpha bootstrap fixture must keep its dedicated test job name'
   [[ "$(ci_query '.jobs."test-alpha-bootstrap".steps[] | select(.name == "Run alpha bootstrap apply fixture in a private root namespace") | .run | contains("sudo -n unshare --mount --propagation private")')" == 'true' ]] ||
     ci_fail 'the alpha bootstrap fixture must keep its private root filesystem'
+  check_alpha_bootstrap_mount_failure
   [[ "$(ci_query '.jobs.ci.needs | contains(["test-alpha-bootstrap"])')" == 'true' ]] ||
     ci_fail 'the required CI gate must include the alpha bootstrap fixture'
   [[ "$(ci_query '.jobs."publish-k8s-images".needs | contains(["test-alpha-bootstrap"])')" == 'true' ]] ||
@@ -1766,6 +1812,7 @@ self_test() {
     '.jobs."publish-demo-image".if = "${{ success() }}"'
     '.jobs."publish-demo-image".needs = ["lint-go"]'
     '.jobs."publish-demo-image".permissions.packages = "read"'
+    '(.jobs."test-alpha-bootstrap".steps[] | select(.name == "Run alpha bootstrap apply fixture in a private root namespace") | .run) |= sub("exit"; "echo")'
     '(.jobs."publish-demo-image".steps[] | select(.name == "Build and publish the tested demo image") | .with.tags) = "ghcr.io/teagramhq/teagram-server-demo:latest"'
     '(.jobs."publish-demo-image".steps[] | select(.name == "Build and publish the tested demo image") | .with.push) = false'
   )

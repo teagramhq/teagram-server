@@ -1330,7 +1330,7 @@ jobs:
       - name: Run alpha bootstrap apply fixture in a private root namespace
         run: |
           sudo -n unshare --mount --propagation private bash -c '
-            mount -t tmpfs -o mode=0755 tmpfs /root
+            mount -t tmpfs -o mode=0755 tmpfs /root || exit $?
             exec "$1"
           ' bootstrap-alpha-test deploy/k8s/test-bootstrap-alpha.sh
 
