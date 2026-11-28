@@ -639,6 +639,52 @@ recovery-email row untouched.
 Other Teagram clients must use the server advertised address and DC id, and
 verify its RSA identity before sending account credentials.
 
+### Fragment share links (v1)
+
+Share targets use the URL fragment `#~<code>`. The marker identifies this
+format; the code is unpadded base64url (RFC 4648 section 5) over the encoded
+fields. The reference codec is in `internal/fragmentlink`. Its
+[`fragment-link-v1-vectors.json`](fragment-link-v1-vectors.json) file is the
+normative byte-for-byte contract for every client implementation.
+
+The first decoded byte contains version `01` in bits 7–6, the host-present flag
+in bit 5, and the target type in bits 4–0. Types 1–7 are profile (username),
+public message (username and message id), private-channel message (channel id
+and message id), join chat (raw hash bytes), sign-up invite (32 raw secret
+bytes), sticker set (short name), and emoji set (short name). The optional host
+field comes first; omitting it selects the default server at
+`server.teagram.io`. Use an empty host for that server; an explicit default
+host is non-canonical. Generators include a host only for another server.
+Hosts use IDNA and browser-compatible IPv4 parsing; numeric IPv4 forms are
+canonicalized to dotted decimal, and malformed numeric-ending names are
+rejected. A host may include a canonical decimal port from 1 through 65535.
+
+Every field except the last has a one-byte length prefix from 1 through 255.
+The last field consumes the remaining bytes. Host, username, and set short-name
+text is case-folded to lowercase and represented as a bijective base-40 integer
+using the ordered alphabet `0-9 a-z - . _ :`; each alphabet position is a digit
+from 1 to 40. The positive integer is written as minimal big-endian bytes.
+`Encode` folds ASCII case in usernames and short names and IDNA-normalizes hosts
+to lowercase ASCII. `Decode` returns the normalized target with lowercase text.
+Usernames must match
+`^[A-Za-z][A-Za-z0-9_]{1,31}$`. Hosts have trailing dots removed. DNS labels
+must be valid, and `telegram.org` and its subdomains are refused. Vector IDs
+are decimal strings so JSON parsers preserve their exact values; clients parse
+them as integers with exact precision (BigInt in JavaScript).
+Sticker and emoji short names are limited to 64 characters; their encoded text
+fields are limited to 43 bytes.
+Numeric ids are minimal big-endian unsigned integers from 1 through
+`2^63-1`. Join hashes preserve their raw bytes. Invite secrets are 32 bytes and
+are re-encoded as 64 lower-case hexadecimal characters for the API.
+
+Decoders reject unknown versions and types, missing or empty fields, truncated
+lengths, invalid typed fields, invalid base64url, padding, non-zero unused
+base64url bits, and non-canonical encodings. Canonicality requires that
+`Encode(Decode(code))` reproduce the exact `#~` code, including minimal byte
+representations. Since the last field runs to the end, trailing bytes belong
+to that field and are accepted only when they form another valid canonical
+value. The codec does not change any link generators or application parsers.
+
 ### Sticker pack import
 
 Before uploading files for a sticker or emoji pack, a client can call

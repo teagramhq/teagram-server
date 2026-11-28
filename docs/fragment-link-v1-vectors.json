@@ -1,0 +1,361 @@
+{
+  "valid": [
+    {
+      "name": "profile-default",
+      "input": {
+        "type": 1,
+        "username": "alice"
+      },
+      "code": "#~QQHDpNc"
+    },
+    {
+      "name": "profile-hosted",
+      "input": {
+        "type": 1,
+        "host": "chat.example.org",
+        "username": "alice"
+      },
+      "code": "#~YQsL89lf9Nd0cL6ssQHDpNc"
+    },
+    {
+      "name": "profile-hosted-double-hyphen",
+      "input": {
+        "type": 1,
+        "host": "ab--cd.chat.example",
+        "username": "alice"
+      },
+      "code": "#~YQ0J0l5L9-YjDlZLJcv_AcOk1w"
+    },
+    {
+      "name": "public-message-default",
+      "input": {
+        "type": 2,
+        "username": "alice",
+        "message_id": "1"
+      },
+      "code": "#~QgQBw6TXAQ"
+    },
+    {
+      "name": "public-message-max-int64",
+      "input": {
+        "type": 2,
+        "username": "alice",
+        "message_id": "9223372036854775807"
+      },
+      "code": "#~QgQBw6TXf_________8"
+    },
+    {
+      "name": "public-message-host-port",
+      "input": {
+        "type": 2,
+        "host": "chat.example.org:8443",
+        "username": "bob",
+        "message_id": "65793"
+      },
+      "code": "#~Yg5I89ZAK-UIMiPJDHXqDAJO9AEBAQ"
+    },
+    {
+      "name": "private-message-default",
+      "input": {
+        "type": 3,
+        "channel_id": "123456789",
+        "message_id": "42"
+      },
+      "code": "#~QwQHW80VKg"
+    },
+    {
+      "name": "private-message-hosted",
+      "input": {
+        "type": 3,
+        "host": "chat.example.org",
+        "channel_id": "987654321",
+        "message_id": "12345"
+      },
+      "code": "#~YwsL89lf9Nd0cL6ssQQ63mixMDk"
+    },
+    {
+      "name": "join-chat-default",
+      "input": {
+        "type": 4,
+        "join_hash_hex": "1020304050607080"
+      },
+      "code": "#~RBAgMEBQYHCA"
+    },
+    {
+      "name": "join-chat-hosted",
+      "input": {
+        "type": 4,
+        "host": "chat.example.org",
+        "join_hash_hex": "00112233445566778899aabbccddeeff"
+      },
+      "code": "#~ZAsL89lf9Nd0cL6ssQARIjNEVWZ3iJmqu8zd7v8"
+    },
+    {
+      "name": "signup-invite-default",
+      "input": {
+        "type": 5,
+        "secret_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+      },
+      "code": "#~RQABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f"
+    },
+    {
+      "name": "signup-invite-hosted",
+      "input": {
+        "type": 5,
+        "host": "chat.example.org",
+        "secret_hex": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      },
+      "code": "#~ZQsL89lf9Nd0cL6ssf__________________________________________"
+    },
+    {
+      "name": "sticker-set-default",
+      "input": {
+        "type": 6,
+        "short_name": "funny_cats"
+      },
+      "code": "#~Rg-jJAT_640"
+    },
+    {
+      "name": "sticker-set-host-port",
+      "input": {
+        "type": 6,
+        "host": "chat.example.org:8443",
+        "short_name": "cats-and-dogs"
+      },
+      "code": "#~Zg5I89ZAK-UIMiPJDHXqDAwXTR-BaWabBQ"
+    },
+    {
+      "name": "emoji-set-default",
+      "input": {
+        "type": 7,
+        "short_name": "emoji_pack"
+      },
+      "code": "#~Rw6FK8h0mt0"
+    },
+    {
+      "name": "emoji-set-hosted",
+      "input": {
+        "type": 7,
+        "host": "chat.example.org",
+        "short_name": "emoji-animals"
+      },
+      "code": "#~ZwsL89lf9Nd0cL6ssQ4uDMFnliTuTQ"
+    }
+  ],
+  "invalid": [
+    {
+      "name": "unknown-version",
+      "input": {
+        "type": 1,
+        "username": "alice"
+      },
+      "code": "#~gQHDpNc",
+      "rule": "unsupported_version"
+    },
+    {
+      "name": "unknown-type",
+      "input": {
+        "type": 8
+      },
+      "code": "#~SAE",
+      "rule": "unsupported_type"
+    },
+    {
+      "name": "missing-final-field",
+      "input": {
+        "type": 2,
+        "username": "alice"
+      },
+      "code": "#~QgQBw6TX",
+      "rule": "missing_field"
+    },
+    {
+      "name": "missing-only-field",
+      "input": {
+        "type": 1
+      },
+      "code": "#~QQ",
+      "rule": "missing_field"
+    },
+    {
+      "name": "empty-intermediate-field",
+      "input": {
+        "type": 2,
+        "username": "",
+        "message_id": "1"
+      },
+      "code": "#~QgAB",
+      "rule": "empty_field"
+    },
+    {
+      "name": "length-runs-past-end",
+      "input": {
+        "type": 2,
+        "username": "alice",
+        "message_id": "1"
+      },
+      "code": "#~QiABAg",
+      "rule": "length_out_of_range"
+    },
+    {
+      "name": "number-has-leading-zero",
+      "input": {
+        "type": 2,
+        "username": "alice",
+        "message_id": "1"
+      },
+      "code": "#~QgQBw6TXAAE",
+      "rule": "non_canonical"
+    },
+    {
+      "name": "text-zero-value",
+      "input": {
+        "type": 1,
+        "username": ""
+      },
+      "code": "#~QQA",
+      "rule": "non_canonical"
+    },
+    {
+      "name": "text-has-leading-zero",
+      "input": {
+        "type": 1,
+        "username": "alice"
+      },
+      "code": "#~QQABw6TX",
+      "rule": "non_canonical"
+    },
+    {
+      "name": "base64url-padding",
+      "input": {
+        "type": 1,
+        "username": "alice"
+      },
+      "code": "#~QQHDpNc=",
+      "rule": "non_canonical"
+    },
+    {
+      "name": "base64url-nonzero-unused-bits",
+      "input": {
+        "type": 1,
+        "username": "alice"
+      },
+      "code": "#~QQHDpNd",
+      "rule": "non_canonical"
+    },
+    {
+      "name": "invalid-username",
+      "input": {
+        "type": 1,
+        "username": "a"
+      },
+      "code": "#~QQs",
+      "rule": "invalid_username"
+    },
+    {
+      "name": "username-field-over-22-bytes",
+      "input": {
+        "type": 1,
+        "username": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      },
+      "code": "#~QRxxywAqSxbltIXE7E7E7E7E7E7E7E7E",
+      "rule": "invalid_username"
+    },
+    {
+      "name": "short-name-over-64-characters-within-byte-limit",
+      "input": {
+        "type": 6,
+        "short_name": "00000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "code": "#~RhjulGvy2Psh5ve4cQxwMtFzaAEGkGkGkGkGkGkGkGkGkGkGkGkGkGkGkGk",
+      "rule": "invalid_text"
+    },
+    {
+      "name": "short-name-field-over-43-bytes",
+      "input": {
+        "type": 6,
+        "short_name": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      },
+      "code": "#~RgOBjN8uJoNQxHrV7-W_xyV0OqAk7E7E7E7E7E7E7E7E7E7E7E7E7E7E7E7E",
+      "rule": "invalid_text"
+    },
+    {
+      "name": "invalid-host-reserved-domain",
+      "input": {
+        "type": 1,
+        "host": "telegram.org",
+        "username": "alice"
+      },
+      "code": "#~YQiw4yAy2VussQHDpNc",
+      "rule": "invalid_host"
+    },
+    {
+      "name": "invalid-host-port-range",
+      "input": {
+        "type": 1,
+        "host": "chat.example.org:70000",
+        "username": "alice"
+      },
+      "code": "#~YQ8LZhl6BtvJR9WXafJBgGkBw6TX",
+      "rule": "invalid_host"
+    },
+    {
+      "name": "invalid-host-numeric-final-label",
+      "input": {
+        "type": 1,
+        "host": "example.123",
+        "username": "alice"
+      },
+      "code": "#~YQgCTrp4cL4Y_AHDpNc",
+      "rule": "invalid_host"
+    },
+    {
+      "name": "id-zero",
+      "input": {
+        "type": 2,
+        "username": "alice",
+        "message_id": "0"
+      },
+      "code": "#~QgQBw6TXAA",
+      "rule": "invalid_id"
+    },
+    {
+      "name": "id-above-int64",
+      "input": {
+        "type": 2,
+        "username": "alice",
+        "message_id": "9223372036854775808"
+      },
+      "code": "#~QgQBw6TXgAAAAAAAAAA",
+      "rule": "invalid_id"
+    },
+    {
+      "name": "secret-not-32-bytes",
+      "input": {
+        "type": 5,
+        "secret_hex": "11111111111111111111111111111111111111111111111111111111111111"
+      },
+      "code": "#~RRERERERERERERERERERERERERERERERERERERERERE",
+      "rule": "invalid_secret"
+    },
+    {
+      "name": "non-base64url-character",
+      "input": {
+        "type": 1,
+        "username": "alice"
+      },
+      "code": "#~*",
+      "rule": "invalid_code"
+    },
+    {
+      "name": "trailing-id-overflow",
+      "input": {
+        "type": 2,
+        "username": "alice",
+        "message_id": "18446744073709551615"
+      },
+      "code": "#~QgQBw6TX__________8",
+      "rule": "invalid_id"
+    }
+  ]
+}
